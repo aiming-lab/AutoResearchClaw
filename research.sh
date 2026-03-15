@@ -15,7 +15,9 @@ TOPIC="$1"
 shift
 EXTRA_ARGS="$@"
 
-export OPENAI_API_KEY="sk-proj-..."
+# Set your API key via environment variable or a local .env file (not committed)
+# export OPENAI_API_KEY="sk-proj-..."
+# Or load from .env: [ -f .env ] && source .env
 
 source .venv/bin/activate
 
