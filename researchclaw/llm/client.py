@@ -13,7 +13,7 @@ Supported providers:
   - gemini-cli — shells out to `gemini --output-format json` (Gemini CLI OAuth session,
                  free tier or Google One AI Premium, no API key needed).
                  Token is auto-refreshed by Gemini CLI. Default model: gemini-2.5-pro.
-                 Auth is managed by `~/.gemini/oauth_creds.json`.
+                 Auth is managed by `~/.config/gemini-cli/oauth_creds.json`.
   - codex-cli — shells out to `codex exec --json` (OpenAI Codex CLI, uses ChatGPT Pro/Plus
                 subscription, no separate API key needed). Default model: gpt-5.3-codex-spark
                 (or whatever is set in ~/.codex/config.toml). Supports all Codex CLI models
@@ -396,7 +396,7 @@ class LLMClient:
                 "Authorization": f"Bearer {token}",
                 "anthropic-version": "2023-06-01",
                 "anthropic-beta": self._OAUTH_BETAS,
-                "User-Agent": "AutoResearchClaw/0.5 (anthropic-oauth)",
+                "User-Agent": "AutoResearchClaw/0.8 (anthropic-oauth)",
             },
         )
 
@@ -522,7 +522,7 @@ class LLMClient:
     ) -> LLMResponse:
         """Shell out to `gemini --output-format json` using Gemini CLI OAuth session.
 
-        Uses `~/.gemini/oauth_creds.json` (auto-refreshed by Gemini CLI).
+        Uses `~/.config/gemini-cli/oauth_creds.json` (auto-refreshed by Gemini CLI).
         No API key required — uses the locally authenticated Gemini CLI session.
         Supports free tier and Google One AI Premium quota.
         """
@@ -695,6 +695,8 @@ class LLMClient:
             cmd += ["-c", f"model={effective_model}"]
         cmd += ["-"]  # read prompt from stdin
 
+        import os as _os
+
         try:
             result = subprocess.run(
                 cmd,
@@ -704,20 +706,16 @@ class LLMClient:
                 timeout=self.config.timeout_sec,
             )
         except FileNotFoundError:
+            _os.unlink(out_path) if _os.path.exists(out_path) else None
             raise RuntimeError(
                 "codex CLI not found. Install: brew install codex or "
                 "visit https://developers.openai.com/codex/cli"
             )
         except subprocess.TimeoutExpired:
+            _os.unlink(out_path) if _os.path.exists(out_path) else None
             raise RuntimeError(
                 f"codex CLI timed out after {self.config.timeout_sec}s"
             )
-        finally:
-            import os as _os
-            try:
-                _os.unlink(out_path)
-            except OSError:
-                pass
 
         # Parse JSONL for token usage and errors
         input_tokens = 0
@@ -750,15 +748,22 @@ class LLMClient:
                 error_msg = err.get("message", error_msg or "turn failed")
 
         if error_msg:
+            _os.unlink(out_path) if _os.path.exists(out_path) else None
             raise RuntimeError(f"codex CLI error: {error_msg}")
 
         if not final_text:
-            # Fallback: read the -o file if it exists
+            # Fallback: read the -o file written by codex exec -o (must read BEFORE cleanup)
             try:
                 with open(out_path) as f:
                     final_text = f.read().strip()
             except OSError:
                 pass
+
+        # Cleanup temp file now that we've read it
+        try:
+            _os.unlink(out_path)
+        except OSError:
+            pass
 
         if not final_text:
             raise RuntimeError("codex CLI returned empty response")

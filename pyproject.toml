@@ -1,6 +1,6 @@
 [project]
 name = "researchclaw"
-version = "0.5.0"
+version = "0.8.0"
 description = "ResearchClaw — Autonomous Research Pipeline. Turn any research idea into a paper."
 requires-python = ">=3.11"
 dependencies = [

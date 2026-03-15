@@ -673,7 +673,7 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
             name="llm_connectivity",
             status=status,
             detail=detail,
-            fix=None if status == "pass" else "brew install codex && codex login",
+            fix="" if status == "pass" else "brew install codex && codex login",
         ))
         checks.append(CheckResult(
             name="api_key_valid",
