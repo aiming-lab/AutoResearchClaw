@@ -118,6 +118,298 @@ experiment:
 
 ---
 
+## 💳 Run With Your Existing AI Subscriptions (No API Key Required)
+
+Already paying for **ChatGPT Pro**, **Claude Max**, or **Google One AI Premium**?  
+You don't need to pay for separate API credits. AutoResearchClaw supports all three via their official CLIs.
+
+> **TL;DR** — install the CLI, log in once, point at the right config file, run research.
+
+---
+
+### 🚀 Zero-to-Running in 5 Minutes
+
+#### Step 1 — Clone & Install AutoResearchClaw
+
+```bash
+git clone https://github.com/ArielleTolome/AutoResearchClaw.git
+cd AutoResearchClaw
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
+```
+
+#### Step 2 — Install your CLI (pick one or all three)
+
+<details>
+<summary>💬 ChatGPT Pro — Codex CLI (gpt-5.3-codex-spark, gpt-4.1, o3, o4-mini)</summary>
+
+**Requirements:** ChatGPT Pro or Plus subscription
+
+```bash
+# Install
+brew install codex
+# OR: npm install -g @openai/codex
+
+# Log in (browser opens, one-time)
+codex login
+
+# Verify
+codex exec - <<< "ping"
+# Expected: pong (or similar one-word reply)
+```
+
+**What's happening:** The Codex CLI authenticates via the same OAuth session as ChatGPT. Credentials are stored at `~/.codex/`. No API key — your Pro subscription covers the usage.
+
+**Available models:**
+
+| Model | Notes |
+|---|---|
+| `gpt-5.3-codex-spark` | Default (set in `~/.codex/config.toml`) — recommended for research |
+| `gpt-4.1` | Faster fallback |
+| `o3` | Best reasoning quality, slower |
+| `o4-mini` | Fast + cheap fallback |
+
+</details>
+
+<details>
+<summary>🤖 Claude Max — Anthropic OAuth (claude-opus-4-6, claude-sonnet-4-6)</summary>
+
+**Requirements:** Claude Max subscription (Pro also works, rate limits apply)
+
+The OAuth token lives inside your [Claude Code](https://docs.anthropic.com/claude-code) installation. If you have Claude Code installed, you're already authenticated.
+
+```bash
+# Install Claude Code (if not already installed)
+npm install -g @anthropic-ai/claude-code
+# OR: brew install claude-code
+
+# Log in (browser opens, one-time)
+claude login
+
+# Verify — token is at:
+cat ~/.openclaw/agents/main/agent/auth-profiles.json | python3 -m json.tool | grep -A2 anthropic
+
+# Quick test
+echo "ping" | claude --print --permission-mode bypassPermissions - 
+# Expected: pong
+```
+
+**What's happening:** AutoResearchClaw reads your OAuth token directly from Claude Code's auth profile and uses it with the Anthropic REST API (`Bearer` auth + `anthropic-beta: oauth-2025-04-20`). No API key. Your Claude Max subscription covers usage.
+
+**Available models:**
+
+| Model | Notes |
+|---|---|
+| `claude-opus-4-6` | Best quality — recommended for research writing |
+| `claude-sonnet-4-6` | Faster, good quality — good fallback |
+| `claude-haiku-3-5` | Fast, lightweight fallback |
+
+**Note:** OAuth tokens expire every ~1 hour. Claude Code auto-refreshes them. If you get a 401, run `claude login` to refresh manually.
+
+</details>
+
+<details>
+<summary>♊ Google One AI Premium — Gemini CLI (gemini-2.5-pro, gemini-2.5-flash)</summary>
+
+**Requirements:** Google One AI Premium or Gemini free tier (free tier has lower rate limits)
+
+```bash
+# Install
+brew install gemini-cli
+# OR: npm install -g @google/gemini-cli
+
+# Log in (browser opens, one-time)
+gemini auth login
+
+# Verify
+gemini --output-format json -p "ping"
+# Expected: JSON with response field containing "pong"
+
+# Check token freshness (tokens expire ~1hr, auto-refreshed on use)
+cat ~/.gemini/oauth_creds.json | python3 -c "
+import json, sys, time
+d = json.load(sys.stdin)
+exp = d.get('expiry_date', 0) / 1000
+remaining = exp - time.time()
+print(f'Token expires in: {remaining/60:.0f} min' if remaining > 0 else 'EXPIRED — run: gemini auth login')
+"
+```
+
+**What's happening:** Gemini CLI authenticates via Google OAuth and stores credentials at `~/.gemini/oauth_creds.json`. AutoResearchClaw shells out to the `gemini` binary, which handles token refresh automatically.
+
+**Available models:**
+
+| Model | Notes |
+|---|---|
+| `gemini-2.5-pro` | Best quality — recommended |
+| `gemini-2.5-flash` | 3–5× faster, slightly lower quality |
+| `gemini-2.5-flash-lite` | Fastest, good for fallback |
+
+**Note:** Doctor check may show ⚠️ for gemini-cli even when working (the 15s smoke-test sometimes times out). `Result: PASS` still means it's ready — the live research run will work fine.
+
+</details>
+
+---
+
+#### Step 3 — Run a doctor check
+
+```bash
+# Codex CLI (ChatGPT Pro)
+./research.sh "test" --config config.arc.codex-cli.yaml --doctor
+
+# Claude Max (OAuth — recommended)
+./research.sh "test" --config config.arc.anthropic-oauth.yaml --doctor
+
+# Gemini CLI
+./research.sh "test" --config config.arc.gemini-cli.yaml --doctor
+```
+
+Look for `Result: PASS` — all checks green (⚠️ on gemini smoke-test is normal).
+
+#### Step 4 — Run research
+
+```bash
+# ChatGPT Pro — gpt-5.3-codex-spark
+./research.sh "attention mechanisms in transformer models" --config config.arc.codex-cli.yaml
+
+# Claude Max — claude-opus-4-6
+./research.sh "attention mechanisms in transformer models" --config config.arc.anthropic-oauth.yaml
+
+# Gemini 2.5 Pro — free via Google One AI Premium
+./research.sh "attention mechanisms in transformer models" --config config.arc.gemini-cli.yaml
+```
+
+Output lands in: `artifacts/rc-<timestamp>/deliverables/` — compile-ready LaTeX, BibTeX, charts.
+
+---
+
+### 📊 Provider Comparison
+
+| Provider | Config | Subscription | Best For | Speed |
+|---|---|---|---|---|
+| **Claude Max** (OAuth) | `config.arc.anthropic-oauth.yaml` | Claude Max / Pro | Research writing quality | Medium |
+| **ChatGPT Pro** (Codex CLI) | `config.arc.codex-cli.yaml` | ChatGPT Pro / Plus | Code generation stages | Medium |
+| **Gemini** (CLI) | `config.arc.gemini-cli.yaml` | Google One AI Premium / Free | Long context, cost-free | Fast |
+| **Claude Max** (CLI) | `config.arc.claude-cli.yaml` | Claude Max | Fallback for oauth | Medium |
+| **OpenAI API** | `config.arc.yaml` | Pay-as-you-go | Standard deployments | Fast |
+| **Anthropic API** | `config.arc.anthropic.yaml` | Pay-as-you-go | Standard deployments | Medium |
+
+> **Recommended:** `config.arc.anthropic-oauth.yaml` (Claude Max) for research quality, or `config.arc.codex-cli.yaml` (ChatGPT Pro) for coding-heavy experiments.
+
+---
+
+### 🔧 Customizing Models
+
+Edit your chosen config file and change `primary_model` + `fallback_models`:
+
+```yaml
+# config.arc.codex-cli.yaml
+llm:
+  provider: "codex-cli"
+  primary_model: "o3"              # Override the ~/.codex/config.toml default
+  fallback_models:
+    - "gpt-4.1"
+    - "o4-mini"
+```
+
+```yaml
+# config.arc.anthropic-oauth.yaml
+llm:
+  provider: "anthropic-oauth"
+  primary_model: "claude-opus-4-6"
+  fallback_models:
+    - "claude-sonnet-4-6"
+    - "claude-haiku-3-5"
+```
+
+---
+
+### 🚨 Troubleshooting
+
+<details>
+<summary>Codex CLI: "model not supported when using Codex with a ChatGPT account"</summary>
+
+The model you specified isn't available on your subscription tier. Use `gpt-5.3-codex-spark` (the Codex CLI default) or `gpt-4.1`. Set `primary_model: "gpt-5.3-codex-spark"` in the config.
+
+Verify your default:
+```bash
+cat ~/.codex/config.toml | grep model
+```
+</details>
+
+<details>
+<summary>Anthropic OAuth: 401 Unauthorized</summary>
+
+Your OAuth token has expired. Claude Code auto-refreshes it during normal use. Manually refresh:
+
+```bash
+claude login
+```
+
+Also check you're using `config.arc.anthropic-oauth.yaml` (not `config.arc.anthropic.yaml` which needs a console API key).
+</details>
+
+<details>
+<summary>Gemini CLI: smoke-test fails / ⚠️ warning in doctor</summary>
+
+The 15-second smoke-test window is tight for Gemini. The actual research run (which has a much longer timeout) usually works fine. Run doctor and look for `Result: PASS` — that's the signal that matters.
+
+If the token is truly expired:
+```bash
+gemini auth login
+```
+</details>
+
+<details>
+<summary>General: "CLI not found in PATH"</summary>
+
+```bash
+# Codex
+brew install codex
+
+# Gemini
+brew install gemini-cli
+# or: npm install -g @google/gemini-cli
+
+# Claude
+npm install -g @anthropic-ai/claude-code
+```
+
+Make sure `~/.nvm/versions/node/*/bin` or `/opt/homebrew/bin` is in your `$PATH`.
+</details>
+
+---
+
+### 🎓 Full Example: End-to-End Research Run
+
+```bash
+# Clone
+git clone https://github.com/ArielleTolome/AutoResearchClaw.git
+cd AutoResearchClaw
+
+# Set up Python env
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
+
+# Install and log in to Codex CLI (ChatGPT Pro)
+brew install codex && codex login
+
+# Doctor check
+./research.sh "test" --config config.arc.codex-cli.yaml --doctor
+# → Result: PASS
+
+# Run a full research pipeline (takes 20–60 min)
+./research.sh "sparse attention mechanisms for long-context transformers" \
+  --config config.arc.codex-cli.yaml \
+  --auto-approve
+
+# Check output
+ls artifacts/rc-*/deliverables/
+# paper_draft.md   paper.tex   references.bib   reviews.md   charts/
+```
+
+---
+
 ## 🧠 What Makes It Different
 
 | Capability | How It Works |
