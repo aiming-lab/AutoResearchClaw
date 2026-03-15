@@ -5793,7 +5793,9 @@ def _execute_citation_verify(
         (stage_dir / "verification_report.json").write_text(
             json.dumps(report_data, indent=2), encoding="utf-8"
         )
-        (stage_dir / "references_verified.bib").write_text("", encoding="utf-8")
+        (stage_dir / "references_verified.bib").write_text(
+            "% No references.bib found upstream — nothing to verify.\n", encoding="utf-8"
+        )
         return StageResult(
             stage=Stage.CITATION_VERIFY,
             status=StageStatus.DONE,
@@ -5880,7 +5882,10 @@ def _execute_citation_verify(
                 len(_vbib_keys) - len(_uncited_vbib),
             )
 
-    (stage_dir / "references_verified.bib").write_text(verified_bib, encoding="utf-8")
+    (stage_dir / "references_verified.bib").write_text(
+        verified_bib if verified_bib.strip() else "% All citations filtered or unverified.\n",
+        encoding="utf-8",
+    )
 
     artifacts = ["verification_report.json", "references_verified.bib"]
 
