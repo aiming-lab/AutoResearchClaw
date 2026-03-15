@@ -100,9 +100,9 @@ class OpenClawBridgeConfig:
 
 @dataclass(frozen=True)
 class LlmConfig:
-    provider: str
     base_url: str
     api_key_env: str
+    provider: str = "openai"  # "openai" | "anthropic" | "openrouter"
     api_key: str = ""
     primary_model: str = ""
     fallback_models: tuple[str, ...] = ()
@@ -262,7 +262,7 @@ class RCConfig:
                 use_browser=bool(bridge.get("use_browser", False)),
             ),
             llm=LlmConfig(
-                provider=llm.get("provider", ""),
+                provider=llm.get("provider", "openai") or "openai",
                 base_url=llm["base_url"],
                 api_key_env=llm["api_key_env"],
                 api_key=llm.get("api_key", ""),

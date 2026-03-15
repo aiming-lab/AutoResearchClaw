@@ -1,0 +1,15 @@
+{
+  "name": "@esotech/contextuate",
+  "version": "2.1.2",
+  "description": "**Standardized AI Context for Software Projects**",
+  "repository": "https://github.com/esotech/contextuate",
+  "initialized": "2026-03-15T09:27:56.479Z",
+  "updated": "2026-03-15T09:27:56.479Z",
+  "tools": {
+    "ripgrep": {
+      "installed": true,
+      "version": "15.1.0",
+      "path": "/opt/homebrew/bin/rg"
+    }
+  }
+}

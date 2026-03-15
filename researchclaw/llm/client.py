@@ -1,11 +1,16 @@
-"""Lightweight OpenAI-compatible LLM client — stdlib only.
+"""Multi-provider LLM client — stdlib only.
+
+Supported providers:
+  - OpenAI (default) — /chat/completions, Bearer auth
+  - Anthropic — /messages, x-api-key auth, system as top-level param
+  - OpenRouter — /chat/completions, Bearer auth + HTTP-Referer/X-Title
 
 Features:
-  - Model fallback chain (gpt-5.2 → gpt-5.1 → gpt-4.1 → gpt-4o)
-  - Auto-detect max_tokens vs max_completion_tokens per model
+  - Model fallback chain (configurable per provider)
+  - Auto-detect max_tokens vs max_completion_tokens per model (OpenAI)
   - Cloudflare User-Agent bypass
   - Exponential backoff retry with jitter
-  - JSON mode support
+  - JSON mode support (OpenAI/OpenRouter only)
   - Streaming disabled (sync only)
 """
 
@@ -61,6 +66,7 @@ class LLMConfig:
 
     base_url: str
     api_key: str
+    provider: str = "openai"  # "openai" | "anthropic" | "openrouter"
     primary_model: str = "gpt-4o"
     fallback_models: list[str] = field(
         default_factory=lambda: ["gpt-4.1", "gpt-4o-mini"]
@@ -74,7 +80,7 @@ class LLMConfig:
 
 
 class LLMClient:
-    """Stateless OpenAI-compatible chat completion client."""
+    """Multi-provider LLM client (OpenAI, Anthropic, OpenRouter)."""
 
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
@@ -82,6 +88,7 @@ class LLMClient:
 
     @classmethod
     def from_rc_config(cls, rc_config: Any) -> LLMClient:
+        provider = getattr(rc_config.llm, "provider", "") or "openai"
         return cls(
             LLMConfig(
                 base_url=rc_config.llm.base_url,
@@ -90,6 +97,7 @@ class LLMClient:
                     or os.environ.get(rc_config.llm.api_key_env, "")
                     or ""
                 ),
+                provider=provider,
                 primary_model=rc_config.llm.primary_model,
                 fallback_models=list(rc_config.llm.fallback_models or []),
             )
@@ -145,19 +153,28 @@ class LLMClient:
         Distinguishes: 401 (bad key), 403 (model forbidden),
                        404 (bad endpoint), 429 (rate limited), timeout.
         """
-        # Reasoning models (o3, gpt-5.x) need more tokens because
-        # some go to internal reasoning even for trivial prompts.
+        provider = self.config.provider
+
+        # Anthropic requires max_tokens >= 1; reasoning models need more
         is_reasoning = any(
             self.config.primary_model.startswith(p) for p in _NEW_PARAM_MODELS
         )
-        min_tokens = 64 if is_reasoning else 1
+        if provider == "anthropic":
+            min_tokens = 16
+        elif is_reasoning:
+            min_tokens = 64
+        else:
+            min_tokens = 1
+
         try:
             _ = self.chat(
                 [{"role": "user", "content": "ping"}],
                 max_tokens=min_tokens,
                 temperature=0,
             )
-            return True, f"OK - model {self.config.primary_model} responding"
+            return True, (
+                f"OK - {provider} model {self.config.primary_model} responding"
+            )
         except urllib.error.HTTPError as e:
             status_map = {
                 401: "Invalid API key",
@@ -171,6 +188,7 @@ class LLMClient:
             return False, f"Connection failed: {e}"
         except RuntimeError as e:
             return False, f"All models failed: {e}"
+
     def _call_with_retry(
         self,
         model: str,
@@ -236,19 +254,38 @@ class LLMClient:
         temperature: float,
         json_mode: bool,
     ) -> LLMResponse:
-        """Make a single API call."""
+        """Route to the correct provider-specific call method."""
+        provider = self.config.provider
+        if provider == "anthropic":
+            return self._call_anthropic(
+                model, messages, max_tokens, temperature, json_mode
+            )
+        if provider == "openrouter":
+            return self._call_openrouter(
+                model, messages, max_tokens, temperature, json_mode
+            )
+        # Default: OpenAI-compatible (covers "openai", "openai-compatible", etc.)
+        return self._call_openai(
+            model, messages, max_tokens, temperature, json_mode
+        )
+
+    def _call_openai(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        json_mode: bool,
+    ) -> LLMResponse:
+        """OpenAI /chat/completions call."""
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
         }
 
-        # Use correct token parameter based on model
-        # Reasoning models (o3, gpt-5.x) need higher token budgets because
-        # internal reasoning tokens count against max_completion_tokens.
+        # Reasoning models need max_completion_tokens with higher minimum
         if any(model.startswith(prefix) for prefix in _NEW_PARAM_MODELS):
-            # Ensure reasoning models get at least 32768 tokens so internal
-            # reasoning doesn't consume the entire budget leaving empty output.
             reasoning_min = 32768
             body["max_completion_tokens"] = max(max_tokens, reasoning_min)
         else:
@@ -273,6 +310,128 @@ class LLMClient:
         with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
             data = json.loads(resp.read())
 
+        return self._parse_openai_response(data, model)
+
+    def _call_anthropic(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        json_mode: bool,
+    ) -> LLMResponse:
+        """Anthropic /messages call with x-api-key auth."""
+        base = self.config.base_url.rstrip("/") or "https://api.anthropic.com/v1"
+
+        # Extract system messages — Anthropic takes system as top-level param
+        system_parts: list[str] = []
+        non_system: list[dict[str, str]] = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_parts.append(msg["content"])
+            else:
+                non_system.append(msg)
+
+        body: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": non_system,
+        }
+
+        if system_parts:
+            body["system"] = "\n\n".join(system_parts)
+
+        # Anthropic thinking models (claude with extended thinking) should not
+        # receive temperature — skip for safety on all Anthropic calls if temp==0
+        # or if model looks like a thinking model. For now, always include unless 0.
+        if temperature > 0:
+            body["temperature"] = temperature
+
+        if json_mode:
+            logger.debug(
+                "json_mode requested but Anthropic does not support "
+                "response_format natively — passing messages as-is"
+            )
+
+        payload = json.dumps(body).encode("utf-8")
+        url = f"{base}/messages"
+
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "x-api-key": self.config.api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+                "User-Agent": self.config.user_agent,
+            },
+        )
+
+        with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
+            data = json.loads(resp.read())
+
+        # Anthropic response: {"content": [{"type": "text", "text": "..."}], ...}
+        content_blocks = data.get("content", [])
+        text = content_blocks[0]["text"] if content_blocks else ""
+
+        usage = data.get("usage", {})
+
+        return LLMResponse(
+            content=text,
+            model=data.get("model", model),
+            prompt_tokens=usage.get("input_tokens", 0),
+            completion_tokens=usage.get("output_tokens", 0),
+            total_tokens=usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+            finish_reason=data.get("stop_reason", ""),
+            truncated=(data.get("stop_reason", "") == "max_tokens"),
+            raw=data,
+        )
+
+    def _call_openrouter(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        json_mode: bool,
+    ) -> LLMResponse:
+        """OpenRouter /chat/completions — OpenAI-compatible with extra headers."""
+        base = self.config.base_url.rstrip("/") or "https://openrouter.ai/api/v1"
+
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+
+        payload = json.dumps(body).encode("utf-8")
+        url = f"{base}/chat/completions"
+
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": self.config.user_agent,
+                "HTTP-Referer": "https://github.com/ArielleTolome/AutoResearchClaw",
+                "X-Title": "AutoResearchClaw",
+            },
+        )
+
+        with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
+            data = json.loads(resp.read())
+
+        return self._parse_openai_response(data, model)
+
+    def _parse_openai_response(
+        self, data: dict[str, Any], model: str
+    ) -> LLMResponse:
+        """Parse an OpenAI-compatible chat completion response."""
         choice = data["choices"][0]
         usage = data.get("usage", {})
 
@@ -302,18 +461,35 @@ def create_client_from_yaml(yaml_path: str | None = None) -> LLMClient:
         raw = _yaml.safe_load(f)
 
     llm_section = raw.get("llm", {})
+    provider = llm_section.get("provider", "openai") or "openai"
+
+    # Resolve default base_url per provider
+    default_urls = {
+        "openai": "https://api.openai.com/v1",
+        "anthropic": "https://api.anthropic.com/v1",
+        "openrouter": "https://openrouter.ai/api/v1",
+    }
+    default_key_envs = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+    }
+
+    base_url = llm_section.get("base_url") or default_urls.get(
+        provider, "https://api.openai.com/v1"
+    )
+    api_key_env = llm_section.get("api_key_env") or default_key_envs.get(
+        provider, "OPENAI_API_KEY"
+    )
     api_key = str(
-        os.environ.get(
-            llm_section.get("api_key_env", "OPENAI_API_KEY"),
-            llm_section.get("api_key", ""),
-        )
-        or ""
+        os.environ.get(api_key_env, llm_section.get("api_key", "")) or ""
     )
 
     return LLMClient(
         LLMConfig(
-            base_url=llm_section.get("base_url", "https://api.openai.com/v1"),
+            base_url=base_url,
             api_key=api_key,
+            provider=provider,
             primary_model=llm_section.get("primary_model", "gpt-4o"),
             fallback_models=llm_section.get(
                 "fallback_models", ["gpt-4.1", "gpt-4o-mini"]

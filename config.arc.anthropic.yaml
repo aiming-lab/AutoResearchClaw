@@ -1,0 +1,73 @@
+project:
+  name: "pigeonfi-research"
+  mode: "full-auto"
+
+research:
+  topic: "Your research topic here"
+  domains:
+    - "machine-learning"
+  daily_paper_count: 10
+  quality_threshold: 4.0
+
+runtime:
+  timezone: "America/New_York"
+  max_parallel_tasks: 3
+  approval_timeout_hours: 12
+  retry_limit: 2
+
+notifications:
+  channel: "console"
+  target: ""
+  on_stage_start: true
+  on_stage_fail: true
+  on_gate_required: true
+
+knowledge_base:
+  backend: "markdown"
+  root: "docs/kb"
+
+openclaw_bridge:
+  use_cron: false
+  use_message: false
+  use_memory: false
+  use_sessions_spawn: false
+  use_web_fetch: true
+  use_browser: false
+
+llm:
+  provider: "anthropic"
+  base_url: "https://api.anthropic.com/v1"
+  api_key_env: "ANTHROPIC_API_KEY"
+  api_key: ""
+  primary_model: "claude-opus-4-6"
+  fallback_models:
+    - "claude-sonnet-4-6"
+    - "claude-haiku-3-5"
+
+security:
+  hitl_required_stages: [5, 9, 20]
+  allow_publish_without_approval: false
+  redact_sensitive_logs: true
+
+experiment:
+  mode: "sandbox"
+  time_budget_sec: 300
+  max_iterations: 10
+  metric_key: "primary_metric"
+  metric_direction: "minimize"
+  sandbox:
+    python_path: ".venv/bin/python3"
+    gpu_required: false
+    max_memory_mb: 4096
+  ssh_remote:
+    host: "100.86.239.1"
+    gpu_ids: []
+    remote_workdir: "/tmp/researchclaw_experiments"
+
+export:
+  target_conference: "neurips_2025"
+  authors: "Anonymous"
+  bib_file: "references"
+
+prompts:
+  custom_file: ""

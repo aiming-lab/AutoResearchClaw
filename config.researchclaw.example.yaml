@@ -35,7 +35,8 @@ openclaw_bridge:
   use_browser: false
 
 llm:
-  provider: "openai-compatible"
+  # Provider: "openai" (default) | "anthropic" | "openrouter"
+  provider: "openai"
   base_url: "https://api.openai.com/v1"
   api_key_env: "OPENAI_API_KEY"
   api_key: ""
@@ -43,6 +44,24 @@ llm:
   fallback_models:
     - "gpt-4.1"
     - "gpt-4o-mini"
+
+  # --- Anthropic example ---
+  # provider: "anthropic"
+  # base_url: "https://api.anthropic.com/v1"
+  # api_key_env: "ANTHROPIC_API_KEY"
+  # primary_model: "claude-opus-4-6"
+  # fallback_models:
+  #   - "claude-sonnet-4-6"
+  #   - "claude-haiku-3-5"
+
+  # --- OpenRouter example (any model via single API) ---
+  # provider: "openrouter"
+  # base_url: "https://openrouter.ai/api/v1"
+  # api_key_env: "OPENROUTER_API_KEY"
+  # primary_model: "anthropic/claude-opus-4-6"
+  # fallback_models:
+  #   - "openai/gpt-5.4"
+  #   - "openai/gpt-4o"
 
 security:
   hitl_required_stages: [5, 9, 20]
