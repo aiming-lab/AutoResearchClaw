@@ -44,10 +44,10 @@ llm:
   base_url: ""        # not used for codex-cli
   api_key: ""         # not used for codex-cli
   api_key_env: ""     # not used for codex-cli
-  primary_model: "gpt-5.4"
-  fallback_models:
-    - "gpt-5.3-codex-spark"
-    - "gpt-4.1"
+  # Only gpt-5.3-codex-spark is confirmed working on ChatGPT accounts via codex exec.
+  # gpt-5.4, gpt-4.1, gpt-4o, o3, o4-mini are all NOT supported via codex CLI.
+  primary_model: "gpt-5.3-codex-spark"
+  fallback_models: []
 
 security:
   hitl_required_stages: [5, 9, 20]

@@ -496,6 +496,9 @@ class LLMClient:
         if system_parts:
             cmd += ["--system-prompt", "\n\n".join(system_parts)]
 
+        # Run from /tmp to avoid reading workspace context files
+        _cwd = tempfile.gettempdir()
+
         try:
             result = subprocess.run(
                 cmd,
@@ -503,6 +506,7 @@ class LLMClient:
                 capture_output=True,
                 text=True,
                 timeout=self.config.timeout_sec,
+                cwd=_cwd,
             )
         except FileNotFoundError:
             raise RuntimeError(
@@ -593,12 +597,16 @@ class LLMClient:
             "--prompt", prompt,
         ]
 
+        # Run from /tmp to avoid reading workspace context files
+        _cwd = tempfile.gettempdir()
+
         try:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.config.timeout_sec,
+                cwd=_cwd,
             )
         except FileNotFoundError:
             raise RuntimeError(
@@ -715,12 +723,16 @@ class LLMClient:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
             out_path = tf.name
 
-        cmd = [cli_path, "exec", "--json", "-o", out_path]
+        cmd = [cli_path, "exec", "--json", "--skip-git-repo-check", "-o", out_path]
         if effective_model:
             cmd += ["-c", f"model={effective_model}"]
         cmd += ["-"]  # read prompt from stdin
 
         import os as _os
+
+        # Run codex from /tmp to avoid reading workspace context files
+        # (AGENTS.md, SOUL.md, MEMORY.md) which add 50K+ tokens per call.
+        _cwd = tempfile.gettempdir()
 
         try:
             result = subprocess.run(
@@ -729,6 +741,7 @@ class LLMClient:
                 capture_output=True,
                 text=True,
                 timeout=self.config.timeout_sec,
+                cwd=_cwd,
             )
         except FileNotFoundError:
             _os.unlink(out_path) if _os.path.exists(out_path) else None
