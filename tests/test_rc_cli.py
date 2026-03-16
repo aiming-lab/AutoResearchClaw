@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from researchclaw import cli as rc_cli
+from researchclaw.config import resolve_config_path
 
 
 def _write_valid_config(path: Path) -> None:
@@ -164,3 +165,137 @@ def test_run_parser_accepts_required_flags(
 def test_validate_parser_accepts_config_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rc_cli, "cmd_validate", lambda args: 0)
     assert rc_cli.main(["validate", "--config", "cfg.yaml"]) == 0
+
+
+# --- resolve_config_path tests ---
+
+
+def test_resolve_config_finds_arc_yaml_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.arc.yaml").write_text("x: 1\n")
+    (tmp_path / "config.yaml").write_text("x: 2\n")
+    result = resolve_config_path(None)
+    assert result is not None
+    assert result.name == "config.arc.yaml"
+
+
+def test_resolve_config_falls_back_to_config_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yaml").write_text("x: 1\n")
+    result = resolve_config_path(None)
+    assert result is not None
+    assert result.name == "config.yaml"
+
+
+def test_resolve_config_returns_none_when_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    result = resolve_config_path(None)
+    assert result is None
+
+
+def test_resolve_config_explicit_path_no_search() -> None:
+    result = resolve_config_path("/some/explicit/path.yaml")
+    assert result is not None
+    assert str(result) == "/some/explicit/path.yaml"
+
+
+# --- cmd_init tests ---
+
+
+def _write_example_config(path: Path) -> None:
+    path.write_text(
+        """\
+project:
+  name: "my-research"
+llm:
+  provider: "openai"
+  base_url: "https://api.openai.com/v1"
+  api_key_env: "OPENAI_API_KEY"
+  primary_model: "gpt-4o"
+  fallback_models:
+    - "gpt-4.1"
+    - "gpt-4o-mini"
+""",
+        encoding="utf-8",
+    )
+
+
+def test_cmd_init_creates_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_example_config(tmp_path / "config.researchclaw.example.yaml")
+    # Simulate non-TTY (stdin not a tty) → defaults to openai
+    monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: False})())
+    args = argparse.Namespace(force=False)
+    code = rc_cli.cmd_init(args)
+    assert code == 0
+    created = tmp_path / "config.arc.yaml"
+    assert created.exists()
+    content = created.read_text()
+    assert 'provider: "openai"' in content
+    assert "Created config.arc.yaml" in capsys.readouterr().out
+
+
+def test_cmd_init_refuses_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_example_config(tmp_path / "config.researchclaw.example.yaml")
+    (tmp_path / "config.arc.yaml").write_text("existing\n")
+    args = argparse.Namespace(force=False)
+    code = rc_cli.cmd_init(args)
+    assert code == 0
+    assert "already exists" in capsys.readouterr().out
+    assert (tmp_path / "config.arc.yaml").read_text() == "existing\n"
+
+
+def test_cmd_init_force_overwrites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_example_config(tmp_path / "config.researchclaw.example.yaml")
+    (tmp_path / "config.arc.yaml").write_text("old\n")
+    monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: False})())
+    args = argparse.Namespace(force=True)
+    code = rc_cli.cmd_init(args)
+    assert code == 0
+    assert (tmp_path / "config.arc.yaml").read_text() != "old\n"
+
+
+def test_cmd_run_missing_config_shows_init_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(
+        config=None,
+        topic=None,
+        output=None,
+        from_stage=None,
+        auto_approve=False,
+        skip_preflight=True,
+        resume=False,
+        skip_noncritical_stage=False,
+    )
+    code = rc_cli.cmd_run(args)
+    assert code == 1
+    assert "researchclaw init" in capsys.readouterr().err
+
+
+def test_main_dispatches_init(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_cmd_init(args):
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(rc_cli, "cmd_init", fake_cmd_init)
+    code = rc_cli.main(["init", "--force"])
+    assert code == 0
+    assert captured["args"].force is True

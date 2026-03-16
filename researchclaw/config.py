@@ -8,6 +8,21 @@ from typing import Any
 
 import yaml
 
+CONFIG_SEARCH_ORDER: tuple[str, ...] = ("config.arc.yaml", "config.yaml")
+EXAMPLE_CONFIG = "config.researchclaw.example.yaml"
+
+
+def resolve_config_path(explicit: str | None) -> Path | None:
+    """Return first existing config from search order, or explicit path if given."""
+    if explicit is not None:
+        return Path(explicit)
+    for name in CONFIG_SEARCH_ORDER:
+        candidate = Path(name)
+        if candidate.exists():
+            return candidate
+    return None
+
+
 REQUIRED_FIELDS = (
     "project.name",
     "research.topic",
