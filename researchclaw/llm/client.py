@@ -103,6 +103,12 @@ class LLMClient:
         # Use preset base_url if available and config doesn't override
         base_url = rc_config.llm.base_url or preset_base_url or ""
 
+        # Preserve original URL/key before MetaClaw bridge override
+        # (needed for Anthropic adapter which should always talk directly
+        # to the Anthropic API, not through the OpenAI-compatible proxy).
+        original_base_url = base_url
+        original_api_key = api_key
+
         # MetaClaw bridge: if enabled, point to proxy and set up fallback
         bridge = getattr(rc_config, "metaclaw_bridge", None)
         fallback_url = ""
@@ -127,12 +133,13 @@ class LLMClient:
         )
         client = cls(config)
 
-        # Detect Anthropic provider
+        # Detect Anthropic provider — use original URL/key (not the
+        # MetaClaw proxy URL which is OpenAI-compatible only).
         if provider == "anthropic":
             from .anthropic_adapter import AnthropicAdapter
 
             client._anthropic = AnthropicAdapter(
-                config.base_url, config.api_key, config.timeout_sec
+                original_base_url, original_api_key, config.timeout_sec
             )
         return client
 

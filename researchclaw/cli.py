@@ -207,12 +207,23 @@ def cmd_init(args: argparse.Namespace) -> int:
     dest = Path("config.arc.yaml")
 
     if dest.exists() and not force:
-        print(f"{dest} already exists. Use --force to overwrite.")
-        return 0
+        print(f"{dest} already exists. Use --force to overwrite.", file=sys.stderr)
+        return 1
 
-    example = Path.cwd() / EXAMPLE_CONFIG
-    if not example.exists():
-        print(f"Error: example config not found: {example}", file=sys.stderr)
+    # Look for the example config: first in repo root (relative to package),
+    # then in CWD (for development), then bundled in the package data dir.
+    _candidates = [
+        Path(__file__).resolve().parent.parent / EXAMPLE_CONFIG,  # repo root
+        Path.cwd() / EXAMPLE_CONFIG,                              # cwd fallback
+        Path(__file__).resolve().parent / "data" / EXAMPLE_CONFIG, # packaged
+    ]
+    example = next((p for p in _candidates if p.exists()), None)
+    if example is None:
+        print(
+            f"Error: example config not found.\n"
+            f"Searched: {', '.join(str(c) for c in _candidates)}",
+            file=sys.stderr,
+        )
         return 1
 
     # Interactive provider prompt (TTY only, else default to openai)
@@ -223,7 +234,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("  2) openrouter   (requires OPENROUTER_API_KEY)")
         print("  3) deepseek     (requires DEEPSEEK_API_KEY)")
         print("  4) acp          (local AI agent — no API key needed)")
-        raw = input("Choice [1]: ").strip()
+        try:
+            raw = input("Choice [1]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raw = ""
         if raw in _PROVIDER_CHOICES:
             choice = raw
 
@@ -232,7 +246,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     content = example.read_text(encoding="utf-8")
 
     # String-based replacement to preserve YAML comments
-    content = content.replace('provider: "openai"', f'provider: "{provider}"')
+    content = content.replace(
+        'provider: "openai-compatible"', f'provider: "{provider}"'
+    )
 
     if provider == "acp":
         # ACP doesn't need base_url or api_key_env

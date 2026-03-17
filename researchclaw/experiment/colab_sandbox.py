@@ -169,12 +169,14 @@ class ColabDriveSandbox:
 
         self._inject_harness(staging)
 
-        for src_file in project_dir.iterdir():
-            if src_file.is_file():
-                dest = staging / src_file.name
-                if dest.name == "experiment_harness.py":
-                    continue
-                dest.write_bytes(src_file.read_bytes())
+        for src_item in project_dir.iterdir():
+            dest = staging / src_item.name
+            if dest.name == "experiment_harness.py":
+                continue
+            if src_item.is_dir():
+                shutil.copytree(src_item, dest, dirs_exist_ok=True)
+            elif src_item.is_file():
+                dest.write_bytes(src_item.read_bytes())
 
         if not (staging / entry_point).exists():
             return SandboxResult(

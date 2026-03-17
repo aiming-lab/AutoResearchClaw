@@ -251,8 +251,8 @@ def test_cmd_init_refuses_overwrite(
     (tmp_path / "config.arc.yaml").write_text("existing\n")
     args = argparse.Namespace(force=False)
     code = rc_cli.cmd_init(args)
-    assert code == 0
-    assert "already exists" in capsys.readouterr().out
+    assert code == 1
+    assert "already exists" in capsys.readouterr().err
     assert (tmp_path / "config.arc.yaml").read_text() == "existing\n"
 
 

@@ -19,6 +19,14 @@ _JSON_MODE_INSTRUCTION = (
     "Do not include any text outside the JSON object."
 )
 
+# Map Anthropic stop_reason → OpenAI finish_reason
+_STOP_REASON_MAP = {
+    "end_turn": "stop",
+    "max_tokens": "length",
+    "stop_sequence": "stop",
+    "tool_use": "tool_calls",
+}
+
 
 class AnthropicAdapter:
     """Adapter to call Anthropic Messages API and return OpenAI-compatible response."""
@@ -45,14 +53,33 @@ class AnthropicAdapter:
         Raises urllib.error.HTTPError on API errors so the upstream retry
         logic in LLMClient._call_with_retry works unchanged.
         """
-        # Extract system message if present
-        system_msg = None
-        user_messages = []
+        # Extract and concatenate all system messages
+        system_parts: list[str] = []
+        user_messages: list[dict[str, str]] = []
         for msg in messages:
             if msg["role"] == "system":
-                system_msg = msg["content"]
+                system_parts.append(msg["content"])
             else:
                 user_messages.append(msg)
+
+        system_msg = "\n\n".join(system_parts) if system_parts else None
+
+        # Merge consecutive messages with the same role (Anthropic
+        # requires strict user/assistant alternation)
+        merged: list[dict[str, str]] = []
+        for msg in user_messages:
+            if merged and merged[-1]["role"] == msg["role"]:
+                merged[-1] = {
+                    "role": msg["role"],
+                    "content": merged[-1]["content"] + "\n\n" + msg["content"],
+                }
+            else:
+                merged.append(dict(msg))
+        user_messages = merged
+
+        # Ensure at least one user message
+        if not user_messages:
+            user_messages = [{"role": "user", "content": "Hello."}]
 
         # Prepend JSON instruction when json_mode is requested
         if json_mode:
@@ -93,19 +120,41 @@ class AnthropicAdapter:
                 dict(exc.response.headers),
                 None,
             ) from exc
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        except httpx.HTTPError as exc:
+            # Catch all transport errors (ConnectError, TimeoutException,
+            # ReadError, RemoteProtocolError, PoolTimeout, etc.)
             raise urllib.error.URLError(str(exc)) from exc
 
-        # Convert Anthropic response to OpenAI format
+        # Check for Anthropic error responses
+        if data.get("type") == "error" or "error" in data:
+            error_info = data.get("error", {})
+            raise urllib.error.HTTPError(
+                url,
+                500,
+                f"{error_info.get('type', 'api_error')}: {error_info.get('message', str(data))}",
+                {},
+                None,
+            )
+
+        # Extract ALL text content blocks (not just the first)
         content = ""
         if "content" in data and data["content"]:
-            content = data["content"][0].get("text", "")
+            text_parts = [
+                block.get("text", "")
+                for block in data["content"]
+                if block.get("type") == "text"
+            ]
+            content = "\n".join(text_parts)
+
+        # Map Anthropic stop_reason to OpenAI finish_reason
+        raw_stop_reason = data.get("stop_reason", "end_turn")
+        finish_reason = _STOP_REASON_MAP.get(raw_stop_reason, "stop")
 
         return {
             "choices": [
                 {
                     "message": {"role": "assistant", "content": content},
-                    "finish_reason": data.get("stop_reason", "stop"),
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -75,15 +76,17 @@ class SshRemoteSandbox:
 
         self._inject_harness(staging)
 
-        for src_file in project_dir.iterdir():
-            if src_file.is_file():
-                dest = staging / src_file.name
-                if dest.name == "experiment_harness.py":
-                    logger.warning(
-                        "Project contains experiment_harness.py — skipping (immutable)"
-                    )
-                    continue
-                dest.write_bytes(src_file.read_bytes())
+        for src_item in project_dir.iterdir():
+            dest = staging / src_item.name
+            if dest.name == "experiment_harness.py":
+                logger.warning(
+                    "Project contains experiment_harness.py — skipping (immutable)"
+                )
+                continue
+            if src_item.is_dir():
+                shutil.copytree(src_item, dest, dirs_exist_ok=True)
+            elif src_item.is_file():
+                dest.write_bytes(src_item.read_bytes())
 
         entry = staging / entry_point
         if not entry.exists():
@@ -106,10 +109,8 @@ class SshRemoteSandbox:
         """Return (ok, message) after testing SSH connectivity."""
         if not config.host:
             return False, "ssh_remote.host is empty"
-        cmd = _build_ssh_base(config) + [
-            "-o", "ConnectTimeout=10",
-            "echo", "researchclaw-ssh-ok",
-        ]
+        cmd = _build_ssh_base(config, extra_opts=["-o", "ConnectTimeout=10"])
+        cmd.append("echo researchclaw-ssh-ok")
         try:
             cp = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=15, check=False,
@@ -151,9 +152,10 @@ class SshRemoteSandbox:
         cfg = self.config
         run_id = f"rc-{uuid.uuid4().hex[:8]}"
         remote_dir = f"{cfg.remote_workdir}/{run_id}"
+        remote_dir_q = shlex.quote(remote_dir)
 
         # 1. Create remote directory
-        mkdir_ok = self._ssh_run(f"mkdir -p {remote_dir}")
+        mkdir_ok = self._ssh_run(f"mkdir -p {remote_dir_q}")
         if mkdir_ok.returncode != 0:
             return SandboxResult(
                 returncode=-1,
@@ -166,6 +168,7 @@ class SshRemoteSandbox:
         # 2. Upload code
         upload_ok = self._scp_upload(staging_dir, remote_dir)
         if not upload_ok:
+            self._ssh_run(f"rm -rf {remote_dir_q}", timeout_sec=15)
             return SandboxResult(
                 returncode=-1,
                 stdout="",
@@ -177,7 +180,7 @@ class SshRemoteSandbox:
         # 3. Run setup commands (pip install, conda activate, etc.)
         for setup_cmd in cfg.setup_commands:
             setup_result = self._ssh_run(
-                f"cd {remote_dir} && {setup_cmd}",
+                f"cd {remote_dir_q} && {setup_cmd}",
                 timeout_sec=120,
             )
             if setup_result.returncode != 0:
@@ -206,7 +209,7 @@ class SshRemoteSandbox:
         metrics = parse_metrics(result.stdout)
 
         # 6. Clean up remote directory
-        self._ssh_run(f"rm -rf {remote_dir}", timeout_sec=15)
+        self._ssh_run(f"rm -rf {remote_dir_q}", timeout_sec=15)
 
         return SandboxResult(
             returncode=result.returncode,
@@ -222,6 +225,10 @@ class SshRemoteSandbox:
     ) -> str:
         """Build command to run Python directly on remote host (with basic sandboxing)."""
         cfg = self.config
+        rd = shlex.quote(remote_dir)
+        ep = shlex.quote(entry_point)
+        py = shlex.quote(cfg.remote_python)
+
         gpu_env = ""
         if cfg.gpu_ids:
             gpu_env = f"CUDA_VISIBLE_DEVICES={','.join(str(g) for g in cfg.gpu_ids)} "
@@ -232,16 +239,16 @@ class SshRemoteSandbox:
         # 3. If unshare unavailable, still runs with HOME override but
         #    logs a warning so the user knows network isolation is missing.
         return (
-            f"cd {remote_dir} && "
+            f"cd {rd} && "
             f"if command -v unshare >/dev/null 2>&1; then "
-            f"HOME={remote_dir} "
+            f"HOME={rd} "
             f"{gpu_env}"
-            f"unshare --net {cfg.remote_python} -u {entry_point}; "
+            f"unshare --net {py} -u {ep}; "
             f"else "
             f"echo 'WARNING: unshare not available, running without network isolation' >&2; "
-            f"HOME={remote_dir} "
+            f"HOME={rd} "
             f"{gpu_env}"
-            f"{cfg.remote_python} -u {entry_point}; "
+            f"{py} -u {ep}; "
             f"fi"
         )
 
@@ -257,7 +264,7 @@ class SshRemoteSandbox:
         cfg = self.config
         parts = [
             "docker", "run", "--rm",
-            "-v", f"{remote_dir}:/workspace",
+            "-v", f"{shlex.quote(remote_dir)}:/workspace",
             "-w", "/workspace",
             f"--memory={cfg.docker_memory_limit_mb}m",
             f"--shm-size={cfg.docker_shm_size_mb}m",
@@ -270,13 +277,13 @@ class SshRemoteSandbox:
         # GPU passthrough
         if cfg.gpu_ids:
             device_spec = ",".join(str(g) for g in cfg.gpu_ids)
-            parts.extend(["--gpus", f"'device={device_spec}'"])
+            parts.extend(["--gpus", f"device={device_spec}"])
         else:
             # Try to pass all GPUs; fails gracefully if none available
             parts.extend(["--gpus", "all"])
 
-        parts.append(cfg.docker_image)
-        parts.append(entry_point)
+        parts.append(shlex.quote(cfg.docker_image))
+        parts.extend(["python3", "-u", shlex.quote(entry_point)])
 
         return " ".join(parts)
 
@@ -329,11 +336,11 @@ class SshRemoteSandbox:
         if cfg.key_path:
             cmd.extend(["-i", os.path.expanduser(cfg.key_path)])
 
-        # Upload all files in the staging directory
-        files = [str(f) for f in local_dir.iterdir() if f.is_file()]
-        if not files:
+        # Upload all files and directories in the staging directory
+        items = [str(f) for f in local_dir.iterdir()]
+        if not items:
             return True
-        cmd.extend(files)
+        cmd.extend(items)
         cmd.append(target)
 
         try:
@@ -375,8 +382,15 @@ def _ssh_target(cfg: SshRemoteConfig) -> str:
     return cfg.host
 
 
-def _build_ssh_base(cfg: SshRemoteConfig) -> list[str]:
-    """Build the base ssh command with common options."""
+def _build_ssh_base(
+    cfg: SshRemoteConfig,
+    extra_opts: list[str] | None = None,
+) -> list[str]:
+    """Build the base ssh command with common options.
+
+    *extra_opts* are inserted **before** the hostname so that SSH
+    interprets them as SSH options, not as part of the remote command.
+    """
     cmd = [
         "ssh",
         "-o", "StrictHostKeyChecking=no",
@@ -386,5 +400,7 @@ def _build_ssh_base(cfg: SshRemoteConfig) -> list[str]:
         cmd.extend(["-p", str(cfg.port)])
     if cfg.key_path:
         cmd.extend(["-i", os.path.expanduser(cfg.key_path)])
+    if extra_opts:
+        cmd.extend(extra_opts)
     cmd.append(_ssh_target(cfg))
     return cmd
