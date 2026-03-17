@@ -173,9 +173,8 @@ def _collect_content_metrics(run_dir: Path | None) -> dict[str, object]:
             vdata = json.loads(verify_path.read_text(encoding="utf-8"))
             if isinstance(vdata, dict):
                 summary = vdata.get("summary", vdata)
-                if isinstance(summary, dict):
-                    total = summary.get("total", 0)
-                    verified = summary.get("verified", 0)
+                total = summary.get("total", 0) if isinstance(summary, dict) else None
+                verified = summary.get("verified", 0) if isinstance(summary, dict) else None
                 if isinstance(total, int | float) and isinstance(verified, int | float):
                     total_num = int(total)
                     verified_num = int(verified)
