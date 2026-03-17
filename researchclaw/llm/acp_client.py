@@ -76,6 +76,7 @@ class ACPClient:
             cwd=acp.cwd,
             acpx_command=getattr(acp, "acpx_command", ""),
             session_name=getattr(acp, "session_name", "researchclaw"),
+            timeout_sec=getattr(acp, "timeout_sec", 600),
         ))
 
     # ------------------------------------------------------------------

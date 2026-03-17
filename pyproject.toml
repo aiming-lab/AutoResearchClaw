@@ -10,11 +10,12 @@ dependencies = [
 readme = "README.md"
 license = {text = "MIT"}
 
+[project.optional-dependencies]
+anthropic = ["httpx>=0.24"]
+dev = ["pytest>=7.0"]
+
 [project.scripts]
 researchclaw = "researchclaw.cli:main"
-
-[project.optional-dependencies]
-dev = ["pytest>=7.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["researchclaw", "sibyl", "arc"]

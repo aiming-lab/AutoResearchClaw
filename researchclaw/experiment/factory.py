@@ -39,5 +39,47 @@ def create_sandbox(config: ExperimentConfig, workdir: Path) -> SandboxProtocol:
 
         return DockerSandbox(docker_cfg, workdir)
 
-    # Default: subprocess sandbox
+    if config.mode == "ssh_remote":
+        from researchclaw.experiment.ssh_sandbox import SshRemoteSandbox
+
+        ssh_cfg = config.ssh_remote
+        if not ssh_cfg.host:
+            raise RuntimeError(
+                "ssh_remote mode requires experiment.ssh_remote.host in config."
+            )
+
+        ok, msg = SshRemoteSandbox.check_ssh_available(ssh_cfg)
+        if not ok:
+            raise RuntimeError(f"SSH connectivity check failed: {msg}")
+
+        logger.info("SSH remote sandbox: %s", msg)
+        return SshRemoteSandbox(ssh_cfg, workdir)
+
+    if config.mode == "colab_drive":
+        from researchclaw.experiment.colab_sandbox import ColabDriveSandbox
+
+        colab_cfg = config.colab_drive
+        ok, msg = ColabDriveSandbox.check_drive_available(colab_cfg)
+        if not ok:
+            raise RuntimeError(f"Colab Drive check failed: {msg}")
+
+        logger.info("Colab Drive sandbox: %s", msg)
+
+        # Write worker template for user convenience
+        worker_path = Path(colab_cfg.drive_root).expanduser() / "colab_worker.py"
+        if not worker_path.exists():
+            ColabDriveSandbox.write_worker_notebook(worker_path)
+            logger.info(
+                "Colab worker template written to %s — "
+                "upload this to Colab and run it.",
+                worker_path,
+            )
+
+        return ColabDriveSandbox(colab_cfg, workdir)
+
+    if config.mode != "sandbox":
+        raise RuntimeError(
+            f"Unsupported experiment mode for create_sandbox(): {config.mode}"
+        )
+
     return ExperimentSandbox(config.sandbox, workdir)

@@ -75,6 +75,74 @@ experiment:
     auto_install_deps: true
     shm_size_mb: 2048
     keep_containers: false
+  ssh_remote:
+    host: ""                # SSH hostname or IP
+    user: ""                # SSH username (default: current user)
+    port: 22                # SSH port
+    key_path: ""            # Path to private key (default: ~/.ssh/id_rsa)
+    gpu_ids: []             # e.g. [0, 1] for CUDA_VISIBLE_DEVICES
+    remote_workdir: "/tmp/researchclaw_experiments"
+    remote_python: "python3"
+    setup_commands: []      # e.g. ["source ~/venv/bin/activate", "pip install torch"]
+    # Docker-over-SSH (most secure remote execution)
+    use_docker: false       # Set true to run experiments inside Docker on remote host
+    docker_image: "researchclaw/experiment:latest"
+    docker_network_policy: "none"   # none | full
+    docker_memory_limit_mb: 8192
+    docker_shm_size_mb: 2048
+
+# ============================================================================
+# SSH Remote Examples
+# ============================================================================
+#
+# 1. Lab server (bare Python, basic sandboxing):
+#   experiment:
+#     mode: "ssh_remote"
+#     ssh_remote:
+#       host: "gpu-server.lab.edu"
+#       user: "researcher"
+#       key_path: "~/.ssh/id_rsa"
+#       gpu_ids: [0]
+#       remote_python: "python3"
+#
+# 2. Lab server (Docker — most secure):
+#   experiment:
+#     mode: "ssh_remote"
+#     ssh_remote:
+#       host: "gpu-server.lab.edu"
+#       user: "researcher"
+#       key_path: "~/.ssh/id_rsa"
+#       gpu_ids: [0]
+#       use_docker: true
+#       docker_image: "researchclaw/experiment:latest"
+#       docker_network_policy: "none"
+#
+# 3. Colab via SSH tunnel:
+#   experiment:
+#     mode: "ssh_remote"
+#     ssh_remote:
+#       host: "localhost"
+#       port: 12345
+#       user: "root"
+#       remote_python: "python3"
+#       setup_commands:
+#         - "pip install torch torchvision -q"
+#
+# 4. Colab via Google Drive (most robust, no SSH needed):
+#   experiment:
+#     mode: "colab_drive"
+#     colab_drive:
+#       drive_root: "~/Library/CloudStorage/GoogleDrive-you@gmail.com/My Drive/researchclaw"
+#       poll_interval_sec: 30
+#       timeout_sec: 3600
+#       setup_script: "pip install torch torchvision -q"
+#   # Then in Colab: run the colab_worker.py that appears in your Drive
+
+  colab_drive:
+    drive_root: ""          # Local path to Google Drive mount
+    poll_interval_sec: 30   # How often to check for results
+    timeout_sec: 3600       # Max wait per experiment (1 hour)
+    setup_script: ""        # Shell commands to run before each experiment
 
   # Scientific Visualization Agent (Code-to-Viz + Nano Banana)
   # Uses a Decision Agent to analyze paper content and determine:

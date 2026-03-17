@@ -8,6 +8,21 @@ from typing import Any
 
 import yaml
 
+CONFIG_SEARCH_ORDER: tuple[str, ...] = ("config.arc.yaml", "config.yaml")
+EXAMPLE_CONFIG = "config.researchclaw.example.yaml"
+
+
+def resolve_config_path(explicit: str | None) -> Path | None:
+    """Return first existing config from search order, or explicit path if given."""
+    if explicit is not None:
+        return Path(explicit)
+    for name in CONFIG_SEARCH_ORDER:
+        candidate = Path(name)
+        if candidate.exists():
+            return candidate
+    return None
+
+
 REQUIRED_FIELDS = (
     "project.name",
     "research.topic",
@@ -27,7 +42,7 @@ KB_SUBDIRS = (
 )
 PROJECT_MODES = {"docs-first", "semi-auto", "full-auto"}
 KB_BACKENDS = {"markdown", "obsidian"}
-EXPERIMENT_MODES = {"simulated", "sandbox", "docker", "ssh_remote"}
+EXPERIMENT_MODES = {"simulated", "sandbox", "docker", "ssh_remote", "colab_drive"}
 
 
 def _get_by_path(data: dict[str, Any], dotted_key: str) -> Any:
@@ -148,8 +163,28 @@ class SandboxConfig:
 @dataclass(frozen=True)
 class SshRemoteConfig:
     host: str = ""
+    user: str = ""
+    port: int = 22
+    key_path: str = ""
     gpu_ids: tuple[int, ...] = ()
     remote_workdir: str = "/tmp/researchclaw_experiments"
+    remote_python: str = "python3"
+    setup_commands: tuple[str, ...] = ()
+    use_docker: bool = False
+    docker_image: str = "researchclaw/experiment:latest"
+    docker_network_policy: str = "none"
+    docker_memory_limit_mb: int = 8192
+    docker_shm_size_mb: int = 2048
+
+
+@dataclass(frozen=True)
+class ColabDriveConfig:
+    """Configuration for Google Drive-based async Colab execution."""
+
+    drive_root: str = ""  # local mount path, e.g. ~/Google Drive/MyDrive/researchclaw
+    poll_interval_sec: int = 30
+    timeout_sec: int = 3600
+    setup_script: str = ""  # commands to run before experiment, written to setup.sh
 
 
 @dataclass(frozen=True)
@@ -246,6 +281,7 @@ class ExperimentConfig:
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     docker: DockerSandboxConfig = field(default_factory=DockerSandboxConfig)
     ssh_remote: SshRemoteConfig = field(default_factory=SshRemoteConfig)
+    colab_drive: ColabDriveConfig = field(default_factory=ColabDriveConfig)
     code_agent: CodeAgentConfig = field(default_factory=CodeAgentConfig)
     benchmark_agent: BenchmarkAgentConfig = field(default_factory=BenchmarkAgentConfig)
     figure_agent: FigureAgentConfig = field(default_factory=FigureAgentConfig)
@@ -512,6 +548,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
     sandbox_data = data.get("sandbox") or {}
     docker_data = data.get("docker") or {}
     ssh_data = data.get("ssh_remote") or {}
+    colab_data = data.get("colab_drive") or {}
     return ExperimentConfig(
         mode=data.get("mode", "simulated"),
         time_budget_sec=int(data.get("time_budget_sec", 300)),
@@ -543,10 +580,112 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         ),
         ssh_remote=SshRemoteConfig(
             host=ssh_data.get("host", ""),
+            user=ssh_data.get("user", ""),
+            port=int(ssh_data.get("port", 22)),
+            key_path=ssh_data.get("key_path", ""),
             gpu_ids=tuple(int(g) for g in ssh_data.get("gpu_ids", ())),
             remote_workdir=ssh_data.get(
                 "remote_workdir", "/tmp/researchclaw_experiments"
             ),
+            remote_python=ssh_data.get("remote_python", "python3"),
+            setup_commands=tuple(ssh_data.get("setup_commands") or ()),
+            use_docker=bool(ssh_data.get("use_docker", False)),
+            docker_image=ssh_data.get("docker_image", "researchclaw/experiment:latest"),
+            docker_network_policy=ssh_data.get("docker_network_policy", "none"),
+            docker_memory_limit_mb=int(ssh_data.get("docker_memory_limit_mb", 8192)),
+            docker_shm_size_mb=int(ssh_data.get("docker_shm_size_mb", 2048)),
+        ),
+        colab_drive=ColabDriveConfig(
+            drive_root=colab_data.get("drive_root", ""),
+            poll_interval_sec=int(colab_data.get("poll_interval_sec", 30)),
+            timeout_sec=int(colab_data.get("timeout_sec", 3600)),
+            setup_script=colab_data.get("setup_script", ""),
+        ),
+        code_agent=_parse_code_agent_config(data.get("code_agent") or {}),
+        benchmark_agent=_parse_benchmark_agent_config(
+            data.get("benchmark_agent") or {}
+        ),
+        figure_agent=_parse_figure_agent_config(data.get("figure_agent") or {}),
+    )
+
+
+def _parse_benchmark_agent_config(data: dict[str, Any]) -> BenchmarkAgentConfig:
+    if not data:
+        return BenchmarkAgentConfig()
+    return BenchmarkAgentConfig(
+        enabled=bool(data.get("enabled", True)),
+        enable_hf_search=bool(data.get("enable_hf_search", True)),
+        max_hf_results=int(data.get("max_hf_results", 10)),
+        tier_limit=int(data.get("tier_limit", 2)),
+        min_benchmarks=int(data.get("min_benchmarks", 1)),
+        min_baselines=int(data.get("min_baselines", 2)),
+        prefer_cached=bool(data.get("prefer_cached", True)),
+        max_iterations=int(data.get("max_iterations", 2)),
+    )
+
+
+def _parse_figure_agent_config(data: dict[str, Any]) -> FigureAgentConfig:
+    if not data:
+        return FigureAgentConfig()
+    return FigureAgentConfig(
+        enabled=bool(data.get("enabled", True)),
+        min_figures=int(data.get("min_figures", 3)),
+        max_figures=int(data.get("max_figures", 8)),
+        max_iterations=int(data.get("max_iterations", 3)),
+        render_timeout_sec=int(data.get("render_timeout_sec", 30)),
+        strict_mode=bool(data.get("strict_mode", False)),
+        dpi=int(data.get("dpi", 300)),
+    )
+
+
+def _parse_code_agent_config(data: dict[str, Any]) -> CodeAgentConfig:
+    if not data:
+        return CodeAgentConfig()
+    return CodeAgentConfig(
+        enabled=bool(data.get("enabled", True)),
+        architecture_planning=bool(data.get("architecture_planning", True)),
+        sequential_generation=bool(data.get("sequential_generation", True)),
+        hard_validation=bool(data.get("hard_validation", True)),
+        hard_validation_max_repairs=int(
+            data.get("hard_validation_max_repairs", 2)
+        ),
+        exec_fix_max_iterations=int(data.get("exec_fix_max_iterations", 3)),
+        exec_fix_timeout_sec=int(data.get("exec_fix_timeout_sec", 60)),
+        tree_search_enabled=bool(data.get("tree_search_enabled", False)),
+        tree_search_candidates=int(data.get("tree_search_candidates", 3)),
+        tree_search_max_depth=int(data.get("tree_search_max_depth", 2)),
+        tree_search_eval_timeout_sec=int(
+            data.get("tree_search_eval_timeout_sec", 120)
+        ),
+        review_max_rounds=int(data.get("review_max_rounds", 2)),
+    )
+
+
+def _parse_metaclaw_bridge_config(data: dict[str, Any]) -> MetaClawBridgeConfig:
+    prm_data = data.get("prm") or {}
+    l2s_data = data.get("lesson_to_skill") or {}
+    return MetaClawBridgeConfig(
+        enabled=bool(data.get("enabled", False)),
+        proxy_url=data.get("proxy_url", "http://localhost:30000"),
+        skills_dir=data.get("skills_dir", "~/.metaclaw/skills"),
+        fallback_url=data.get("fallback_url", ""),
+        fallback_api_key=data.get("fallback_api_key", ""),
+        prm=MetaClawPRMConfig(
+            enabled=bool(prm_data.get("enabled", False)),
+            api_base=prm_data.get("api_base", ""),
+            api_key_env=prm_data.get("api_key_env", ""),
+            api_key=prm_data.get("api_key", ""),
+            model=prm_data.get("model", "gpt-5.4"),
+            votes=int(prm_data.get("votes", 3)),
+            temperature=float(prm_data.get("temperature", 0.6)),
+            gate_stages=tuple(
+                int(s) for s in prm_data.get("gate_stages", (5, 9, 15, 20))
+            ),
+        ),
+        lesson_to_skill=MetaClawLessonToSkillConfig(
+            enabled=bool(l2s_data.get("enabled", True)),
+            min_severity=l2s_data.get("min_severity", "warning"),
+            max_skills_per_run=int(l2s_data.get("max_skills_per_run", 3)),
         ),
         code_agent=_parse_code_agent_config(data.get("code_agent") or {}),
         benchmark_agent=_parse_benchmark_agent_config(

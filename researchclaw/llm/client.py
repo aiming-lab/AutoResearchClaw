@@ -84,23 +84,31 @@ class LLMClient:
     def __init__(self, config: LLMConfig) -> None:
         self.config = config
         self._model_chain = [config.primary_model] + list(config.fallback_models)
+        self._anthropic = None  # Will be set by from_rc_config if needed
 
     @classmethod
     def from_rc_config(cls, rc_config: Any) -> LLMClient:
+        from researchclaw.llm import PROVIDER_PRESETS
+
+        provider = getattr(rc_config.llm, "provider", "openai")
+        preset = PROVIDER_PRESETS.get(provider, {})
+        preset_base_url = preset.get("base_url")
+
         api_key = str(
             rc_config.llm.api_key
             or os.environ.get(rc_config.llm.api_key_env, "")
             or ""
         )
 
+        # Use preset base_url if available and config doesn't override
+        base_url = rc_config.llm.base_url or preset_base_url or ""
+
         # MetaClaw bridge: if enabled, point to proxy and set up fallback
         bridge = getattr(rc_config, "metaclaw_bridge", None)
-        base_url = rc_config.llm.base_url
         fallback_url = ""
         fallback_api_key = ""
 
         if bridge and getattr(bridge, "enabled", False):
-            # Redirect to MetaClaw proxy; original URL becomes fallback
             fallback_url = base_url
             fallback_api_key = api_key
             base_url = bridge.proxy_url
@@ -108,19 +116,25 @@ class LLMClient:
                 fallback_url = bridge.fallback_url
             if bridge.fallback_api_key:
                 fallback_api_key = bridge.fallback_api_key
-            # Proxy doesn't require auth if proxy_api_key is empty
-            api_key = api_key  # keep same key — proxy passes it through
 
-        return cls(
-            LLMConfig(
-                base_url=base_url,
-                api_key=api_key,
-                primary_model=rc_config.llm.primary_model,
-                fallback_models=list(rc_config.llm.fallback_models or []),
-                fallback_url=fallback_url,
-                fallback_api_key=fallback_api_key,
-            )
+        config = LLMConfig(
+            base_url=base_url,
+            api_key=api_key,
+            primary_model=rc_config.llm.primary_model or "gpt-4o",
+            fallback_models=list(rc_config.llm.fallback_models or []),
+            fallback_url=fallback_url,
+            fallback_api_key=fallback_api_key,
         )
+        client = cls(config)
+
+        # Detect Anthropic provider
+        if provider == "anthropic":
+            from .anthropic_adapter import AnthropicAdapter
+
+            client._anthropic = AnthropicAdapter(
+                config.base_url, config.api_key, config.timeout_sec
+            )
+        return client
 
     def chat(
         self,
@@ -191,8 +205,6 @@ class LLMClient:
         Distinguishes: 401 (bad key), 403 (model forbidden),
                        404 (bad endpoint), 429 (rate limited), timeout.
         """
-        # Reasoning models (o3, gpt-5.x) need more tokens because
-        # some go to internal reasoning even for trivial prompts.
         is_reasoning = any(
             self.config.primary_model.startswith(p) for p in _NEW_PARAM_MODELS
         )
@@ -217,6 +229,7 @@ class LLMClient:
             return False, f"Connection failed: {e}"
         except RuntimeError as e:
             return False, f"All models failed: {e}"
+
     def _call_with_retry(
         self,
         model: str,
@@ -283,76 +296,78 @@ class LLMClient:
         json_mode: bool,
     ) -> LLMResponse:
         """Make a single API call."""
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-        }
-
-        # Use correct token parameter based on model
-        # Reasoning models (o3, gpt-5.x) need higher token budgets because
-        # internal reasoning tokens count against max_completion_tokens.
-        if any(model.startswith(prefix) for prefix in _NEW_PARAM_MODELS):
-            # Ensure reasoning models get at least 32768 tokens so internal
-            # reasoning doesn't consume the entire budget leaving empty output.
-            reasoning_min = 32768
-            body["max_completion_tokens"] = max(max_tokens, reasoning_min)
+        
+        # Use Anthropic adapter if configured
+        if self._anthropic:
+            data = self._anthropic.chat_completion(model, messages, max_tokens, temperature, json_mode)
         else:
-            body["max_tokens"] = max_tokens
+            # Original OpenAI logic
+            body: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+            }
 
-        if json_mode:
-            body["response_format"] = {"type": "json_object"}
-
-        payload = json.dumps(body).encode("utf-8")
-        url = f"{self.config.base_url.rstrip('/')}/chat/completions"
-
-        headers = {
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": self.config.user_agent,
-        }
-        # MetaClaw bridge: inject extra headers (session ID, stage info, etc.)
-        headers.update(self.config.extra_headers)
-
-        req = urllib.request.Request(url, data=payload, headers=headers)
-
-        try:
-            with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
-                data = json.loads(resp.read())
-        except (urllib.error.URLError, OSError) as exc:
-            # MetaClaw bridge: fallback to direct LLM if proxy unreachable
-            if self.config.fallback_url:
-                logger.warning(
-                    "Primary endpoint unreachable, falling back to %s: %s",
-                    self.config.fallback_url,
-                    exc,
-                )
-                fallback_url = (
-                    f"{self.config.fallback_url.rstrip('/')}/chat/completions"
-                )
-                fallback_key = self.config.fallback_api_key or self.config.api_key
-                fallback_headers = {
-                    "Authorization": f"Bearer {fallback_key}",
-                    "Content-Type": "application/json",
-                    "User-Agent": self.config.user_agent,
-                }
-                fallback_req = urllib.request.Request(
-                    fallback_url, data=payload, headers=fallback_headers
-                )
-                with urllib.request.urlopen(
-                    fallback_req, timeout=self.config.timeout_sec
-                ) as resp:
-                    data = json.loads(resp.read())
+            # Use correct token parameter based on model
+            if any(model.startswith(prefix) for prefix in _NEW_PARAM_MODELS):
+                reasoning_min = 32768
+                body["max_completion_tokens"] = max(max_tokens, reasoning_min)
             else:
-                raise
+                body["max_tokens"] = max_tokens
 
-        # Handle API error responses (e.g., {"error": {"message": "..."}})
+            if json_mode:
+                body["response_format"] = {"type": "json_object"}
+
+            payload = json.dumps(body).encode("utf-8")
+            url = f"{self.config.base_url.rstrip('/')}/chat/completions"
+
+            headers = {
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": self.config.user_agent,
+            }
+            # MetaClaw bridge: inject extra headers (session ID, stage info, etc.)
+            headers.update(self.config.extra_headers)
+
+            req = urllib.request.Request(url, data=payload, headers=headers)
+
+            try:
+                with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
+                    data = json.loads(resp.read())
+            except (urllib.error.URLError, OSError) as exc:
+                # MetaClaw bridge: fallback to direct LLM if proxy unreachable
+                if self.config.fallback_url:
+                    logger.warning(
+                        "Primary endpoint unreachable, falling back to %s: %s",
+                        self.config.fallback_url,
+                        exc,
+                    )
+                    fallback_url = (
+                        f"{self.config.fallback_url.rstrip('/')}/chat/completions"
+                    )
+                    fallback_key = self.config.fallback_api_key or self.config.api_key
+                    fallback_headers = {
+                        "Authorization": f"Bearer {fallback_key}",
+                        "Content-Type": "application/json",
+                        "User-Agent": self.config.user_agent,
+                    }
+                    fallback_req = urllib.request.Request(
+                        fallback_url, data=payload, headers=fallback_headers
+                    )
+                    with urllib.request.urlopen(
+                        fallback_req, timeout=self.config.timeout_sec
+                    ) as resp:
+                        data = json.loads(resp.read())
+                else:
+                    raise
+
+        # Handle API error responses
         if "error" in data:
             error_info = data["error"]
             error_msg = error_info.get("message", str(error_info))
             error_type = error_info.get("type", "api_error")
             raise urllib.error.HTTPError(
-                url, 500, f"{error_type}: {error_msg}", {}, None  # noqa: PLW2901
+                "", 500, f"{error_type}: {error_msg}", {}, None
             )
 
         # Validate response structure
@@ -362,7 +377,6 @@ class LLMClient:
         choice = data["choices"][0]
         usage = data.get("usage", {})
 
-        # Safely extract content (may be None for some responses)
         message = choice.get("message", {})
         content = message.get("content") or ""
 
