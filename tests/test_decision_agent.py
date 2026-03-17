@@ -778,3 +778,64 @@ class TestLatexFigurePlacement:
         assert "\\caption{My Figure}" in result
         assert "\\label{fig:" in result
 
+
+# =========================================================================
+# Pipeline wrapper — _chat_with_prompt strip_thinking default
+# =========================================================================
+
+class TestChatWithPromptStripThinking:
+    """Verify _chat_with_prompt passes strip_thinking=True by default."""
+
+    def test_default_strips_thinking(self):
+        """_chat_with_prompt should strip <think> tags by default."""
+        from unittest.mock import MagicMock
+        from researchclaw.pipeline.executor import _chat_with_prompt
+
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = "clean output"
+
+        result = _chat_with_prompt(mock_llm, system="sys", user="hello")
+
+        # Verify strip_thinking=True was passed
+        call_kwargs = mock_llm.chat.call_args
+        assert call_kwargs.kwargs.get("strip_thinking") is True
+        assert result == "clean output"
+
+    def test_can_disable_stripping(self):
+        """_chat_with_prompt(strip_thinking=False) should preserve tags."""
+        from unittest.mock import MagicMock
+        from researchclaw.pipeline.executor import _chat_with_prompt
+
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = "<think>reasoning</think>output"
+
+        result = _chat_with_prompt(
+            mock_llm, system="sys", user="hello", strip_thinking=False
+        )
+
+        call_kwargs = mock_llm.chat.call_args
+        assert call_kwargs.kwargs.get("strip_thinking") is False
+
+    def test_strip_produces_clean_yaml_parseable_output(self):
+        """End-to-end: LLM returns <think>+YAML, pipeline gets clean YAML."""
+        from researchclaw.llm.client import LLMClient
+        from researchclaw.pipeline.executor import _chat_with_prompt
+        from unittest.mock import patch, MagicMock
+        import yaml
+
+        raw_response = (
+            "<think>Let me plan the YAML...</think>\n"
+            "metric: accuracy\nvalue: 0.95\n"
+        )
+        expected_yaml = "metric: accuracy\nvalue: 0.95\n"
+
+        mock_llm = MagicMock(spec=LLMClient)
+        # Simulate what chat(strip_thinking=True) would return
+        mock_llm.chat.return_value = expected_yaml
+
+        result = _chat_with_prompt(mock_llm, system="sys", user="plan")
+
+        # Result should be valid YAML
+        parsed = yaml.safe_load(result)
+        assert parsed["metric"] == "accuracy"
+        assert parsed["value"] == 0.95

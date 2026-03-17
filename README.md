@@ -18,7 +18,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
-  <a href="#testing"><img src="https://img.shields.io/badge/Tests-1284%20passed-brightgreen?logo=pytest&logoColor=white" alt="1284 Tests Passed"></a>
+  <a href="#testing"><img src="https://img.shields.io/badge/Tests-1374%20passed-brightgreen?logo=pytest&logoColor=white" alt="1374 Tests Passed"></a>
   <a href="https://github.com/aiming-lab/AutoResearchClaw"><img src="https://img.shields.io/badge/GitHub-AutoResearchClaw-181717?logo=github" alt="GitHub"></a>
   <a href="#openclaw-integration"><img src="https://img.shields.io/badge/OpenClaw-Compatible-ff4444?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==" alt="OpenClaw Compatible"></a>
   <a href="https://discord.gg/u4ksqW5P"><img src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
@@ -47,6 +47,7 @@
 ---
 
 ## 🔥 News
+- **[03/17/2026]** [v0.3.1](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.1) — **FigureAgent Overhaul** — New `FigureDecisionAgent` with LLM-powered code/image routing, `NanoBananaAgent` for AI-generated figures via Gemini, Docker-sandboxed code rendering, opt-in `strip_thinking` for safe LLM output with pipeline-level auto-stripping, and LaTeX `$$` display math fixes. **49 new tests** (1,374 total). See [PR #feat/figure-agent-and-latex-fixes](https://github.com/pzcuong/AutoResearchClaw/pulls).
 - **[03/17/2026]** [v0.3.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.0) — **MetaClaw Integration** — AutoResearchClaw now supports [MetaClaw](https://github.com/aiming-lab/MetaClaw) cross-run learning: pipeline failures → structured lessons → reusable skills, injected into all 23 stages. **+18.3%** robustness in controlled experiments. Opt-in (`metaclaw_bridge.enabled: true`), fully backward-compatible. See [Integration Guide](#-metaclaw-integration).
 - **[03/16/2026]** [v0.2.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.2.0) — Three multi-agent subsystems (CodeAgent, BenchmarkAgent, FigureAgent), hardened Docker sandbox with network-policy-aware execution, 4-round paper quality audit (AI-slop detection, 7-dim review scoring, NeurIPS checklist), and 15+ bug fixes from production runs.
 - **[03/15/2026]** [v0.1.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.1.0) — We release AutoResearchClaw: a fully autonomous 23-stage research pipeline that turns a single research idea into a conference-ready paper. No human intervention required.
@@ -291,6 +292,11 @@ Phase D: Experiment Design         Phase H: Finalization
 | **📝 Conference-Grade Writing** | NeurIPS/ICML/ICLR templates, section-by-section drafting (5,000-6,500 words), anti-fabrication guard, revision length guard, anti-disclaimer enforcement |
 | **📐 Template Switching** | `neurips_2025`, `iclr_2026`, `icml_2026` — Markdown → LaTeX with math, tables, figures, cross-refs, `\cite{}` |
 | **🚦 Quality Gates** | 3 human-in-the-loop gates (Stages 5, 9, 20) with rollback. Skip with `--auto-approve`. |
+| **🎨 FigureDecisionAgent** | LLM-powered agent classifies each figure as *code* (bar/line/heatmap → Matplotlib) or *image* (architecture/flowchart → Gemini NanoBanana) and routes accordingly |
+| **🖼️ NanoBanana Image Generation** | Integrates Google Gemini native image generation (`gemini-2.5-flash-image`) for publication-quality architecture diagrams, flowcharts, and concept illustrations |
+| **🐳 Docker Rendering Backend** | Sandboxed figure code execution with `--network none`, `--read-only`, `--memory 512m` — auto-detects Docker availability, falls back to local subprocess |
+| **🧹 Opt-in `strip_thinking`** | `<think>` tag stripping moved from global LLM client to opt-in `chat(strip_thinking=True)` — prevents corruption of legitimate LLM output |
+| **📐 LaTeX Display Math Fix** | `$$...$$` correctly converted to `\begin{equation}...\end{equation}` — no more escaped dollar signs or broken superscripts on Overleaf |
 
 ---
 
@@ -361,7 +367,7 @@ In controlled A/B experiments (same topic, same LLM, same configuration):
 
 - **Default: OFF.** If `metaclaw_bridge` is absent or `enabled: false`, the pipeline behaves exactly as before.
 - **No new dependencies.** MetaClaw is optional — the core pipeline works without it.
-- **All 1,284 existing tests pass** with the integration code present.
+- **All 1,374 existing tests pass** with the integration code present.
 
 ---
 
@@ -500,7 +506,7 @@ If you find AutoResearchClaw useful, please cite:
 
 ```bibtex
 @misc{liu2026autoresearchclaw,
-  author       = {Liu, Jiaqi and Xia, Peng and Han, Siwei and Qiu, Shi and Zhang, Letian and Chen, Guiming  and Tu, Haoqin and Yang, Xinyu and and Zhou, Jiawei and Zhu, Hongtu and Li, Yun and Zheng, Zeyu and Xie, Cihang and Ding, Mingyu and Yao, Huaxiu},
+  author       = {Liu, Jiaqi and Xia, Peng and Han, Siwei and Qiu, Shi and Zhang, Letian and Chen, Guiming and Tu, Haoqin and Yang, Xinyu and Pham, Quoc Cuong and Zhou, Jiawei and Zhu, Hongtu and Li, Yun and Zheng, Zeyu and Xie, Cihang and Ding, Mingyu and Yao, Huaxiu},
   title        = {AutoResearchClaw: Fully Autonomous Research from Idea to Paper},
   year         = {2026},
   organization = {GitHub},
