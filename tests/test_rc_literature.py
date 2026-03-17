@@ -162,7 +162,14 @@ class TestPaper:
         p = _make_paper(venue="", arxiv_id="2301.00001")
         bib = p.to_bibtex()
         assert "@article{" in bib
-        assert "journal = {arXiv preprint}" in bib
+        assert "journal = {arXiv preprint arXiv:2301.00001}" in bib
+
+    def test_to_bibtex_arxiv_category_venue(self) -> None:
+        """T1.4: arXiv category codes (cs.CL) must not be used as journal names."""
+        p = _make_paper(venue="cs.CL", arxiv_id="2301.00001")
+        bib = p.to_bibtex()
+        assert "journal = {cs.CL}" not in bib
+        assert "arXiv preprint" in bib
 
     def test_to_dict(self) -> None:
         p = _make_paper()

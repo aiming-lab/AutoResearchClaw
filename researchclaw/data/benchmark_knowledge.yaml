@@ -692,17 +692,20 @@ domains:
         paper: "Chen et al., Improved Baselines for MoCo, 2020"
         pip: []
 
-  # ── Optimization ────────────────────────────────────────────────
+  # ── Optimizer Research ──────────────────────────────────────────
+  # NOTE: This domain is specifically for research ON optimizers/learning
+  # rate schedules. Do NOT match generic topics that merely USE optimization.
+  # Keywords are narrow to avoid false matches (e.g., "combinatorial
+  # optimization" or "PDE optimization" should NOT match this domain).
 
-  optimization:
+  optimizer_research:
     keywords:
-      - optimizer
-      - optimization
-      - learning rate
-      - gradient descent
-      - convergence
+      - optimizer design
       - learning rate schedule
       - adaptive learning rate
+      - gradient descent method
+      - second-order optimization
+      - optimizer convergence
     standard_benchmarks:
       - name: CIFAR-10
         tier: 1
@@ -723,21 +726,21 @@ domains:
         metrics: [accuracy, convergence_speed]
         api: "torchvision.datasets.FashionMNIST(root='/workspace/data', download=False)"
     common_baselines:
-      - name: SGD + Momentum
-        source: "torch.optim.SGD(params, lr=0.1, momentum=0.9, weight_decay=5e-4)"
-        paper: "Standard SGD with Nesterov momentum"
-        pip: []
-      - name: Adam
-        source: "torch.optim.Adam(params, lr=1e-3, weight_decay=1e-4)"
-        paper: "Kingma & Ba, Adam, ICLR 2015"
-        pip: []
       - name: AdamW
         source: "torch.optim.AdamW(params, lr=1e-3, weight_decay=0.01)"
         paper: "Loshchilov & Hutter, Decoupled Weight Decay, ICLR 2019"
         pip: []
-      - name: Cosine LR
-        source: "torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)"
+      - name: SGD + Cosine Annealing
+        source: "torch.optim.SGD + CosineAnnealingLR"
         paper: "Loshchilov & Hutter, SGDR, ICLR 2017"
+        pip: []
+      - name: LAMB
+        source: "Custom: Layer-wise Adaptive Moments for Batch Training"
+        paper: "You et al., Large Batch Optimization, ICLR 2020"
+        pip: []
+      - name: SAM (Sharpness-Aware Minimization)
+        source: "Custom: Sharpness-Aware Minimization"
+        paper: "Foret et al., SAM, ICLR 2021"
         pip: []
 
   # ── LLM Fine-Tuning ────────────────────────────────────────────

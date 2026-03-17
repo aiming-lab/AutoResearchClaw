@@ -275,7 +275,7 @@ def test_check_experiment_mode_sandbox() -> None:
     assert result.status == "pass"
 
 
-def test_run_doctor_all_pass(tmp_path: Path) -> None:
+def test_run_doctor_all_pass_openai(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     _ = config_path.write_text("project: {}\n", encoding="utf-8")
     with (
@@ -451,3 +451,125 @@ def test_print_doctor_report_fail(capsys: pytest.CaptureFixture[str]) -> None:
     assert "❌" in out
     assert "⚠️" in out
     assert "Result: FAIL (1 errors, 1 warnings)" in out
+
+
+# --- ACP agent checks ---
+
+
+def test_check_acp_agent_found() -> None:
+    with patch("shutil.which", return_value="/usr/local/bin/claude"):
+        result = health.check_acp_agent("claude")
+    assert result.status == "pass"
+    assert "/usr/local/bin/claude" in result.detail
+
+
+def test_check_acp_agent_missing() -> None:
+    with patch("shutil.which", return_value=None):
+        result = health.check_acp_agent("claude")
+    assert result.status == "fail"
+    assert "'claude' not found" in result.detail
+    assert "Install claude" in result.fix
+
+
+def _write_acp_config(path: Path) -> None:
+    _ = path.write_text(
+        """\
+project:
+  name: demo
+research:
+  topic: ACP test
+runtime:
+  timezone: UTC
+notifications:
+  channel: test
+knowledge_base:
+  root: kb
+llm:
+  provider: acp
+  acp:
+    agent: claude
+""",
+        encoding="utf-8",
+    )
+
+
+def test_run_doctor_acp_skips_http_checks(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_acp_config(config_path)
+    with (
+        patch.object(
+            health, "check_python_version",
+            return_value=health.CheckResult("python_version", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_yaml_import",
+            return_value=health.CheckResult("yaml_import", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_config_valid",
+            return_value=health.CheckResult("config_valid", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_acp_agent",
+            return_value=health.CheckResult("acp_agent", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_sandbox_python",
+            return_value=health.CheckResult("sandbox_python", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_matplotlib",
+            return_value=health.CheckResult("matplotlib", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_experiment_mode",
+            return_value=health.CheckResult("experiment_mode", "pass", "ok"),
+        ),
+    ):
+        report = health.run_doctor(config_path)
+
+    check_names = [c.name for c in report.checks]
+    assert "llm_connectivity" not in check_names
+    assert "api_key_valid" not in check_names
+    assert "model_chain" not in check_names
+
+
+def test_run_doctor_acp_includes_agent_check(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_acp_config(config_path)
+    with (
+        patch.object(
+            health, "check_python_version",
+            return_value=health.CheckResult("python_version", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_yaml_import",
+            return_value=health.CheckResult("yaml_import", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_config_valid",
+            return_value=health.CheckResult("config_valid", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_acp_agent",
+            return_value=health.CheckResult("acp_agent", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_sandbox_python",
+            return_value=health.CheckResult("sandbox_python", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_matplotlib",
+            return_value=health.CheckResult("matplotlib", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_experiment_mode",
+            return_value=health.CheckResult("experiment_mode", "pass", "ok"),
+        ),
+    ):
+        report = health.run_doctor(config_path)
+
+    check_names = [c.name for c in report.checks]
+    assert "acp_agent" in check_names
+    assert report.overall == "pass"
+    assert len(report.checks) == 7

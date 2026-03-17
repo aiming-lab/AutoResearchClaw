@@ -308,6 +308,9 @@ class PlannerAgent(BaseAgent):
         # Cap at max
         figures = figures[:self._max_figures]
 
+        # BUG-36: LLM may return figures as list of strings instead of dicts
+        figures = [f for f in figures if isinstance(f, dict)]
+
         # Assign IDs if missing
         for i, fig in enumerate(figures):
             if not fig.get("figure_id"):
@@ -409,7 +412,11 @@ class PlannerAgent(BaseAgent):
         conditions: list[str],
     ) -> list[dict[str, Any]]:
         """Add default figures to meet minimum count."""
-        existing_types = {f.get("chart_type") for f in existing}
+        # BUG-37: chart_type may be non-hashable (list) — force str
+        existing_types = {
+            f.get("chart_type") for f in existing
+            if isinstance(f.get("chart_type"), str)
+        }
         augmented = list(existing)
 
         # Add main comparison if missing

@@ -900,6 +900,43 @@ def check_api_correctness(code: str, fname: str = "main.py") -> list[str]:
                 f"may produce identical results across calls — pass seed as parameter"
             )
 
+    # --- Import-usage mismatch detection ---
+    # Detect `from X import Y` followed by `X.Y(...)` — guaranteed NameError
+    import_from_map: dict[str, set[str]] = {}  # module -> {names}
+    import_module_set: set[str] = set()  # modules imported with `import X`
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        m = _re.match(r"from\s+([\w.]+)\s+import\s+(.+)", stripped)
+        if m:
+            mod = m.group(1)
+            names = {n.strip().split(" as ")[-1].strip()
+                     for n in m.group(2).split(",")}
+            import_from_map.setdefault(mod, set()).update(names)
+        elif _re.match(r"import\s+([\w.]+)", stripped) and "from" not in stripped:
+            m2 = _re.match(r"import\s+([\w.]+)", stripped)
+            if m2:
+                import_module_set.add(m2.group(1).split(".")[0])
+
+    # Now scan for qualified calls to modules that were only from-imported
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        for mod, _names in import_from_map.items():
+            top_mod = mod.split(".")[0]
+            # Only flag if the module was NOT also imported via `import X`
+            if top_mod in import_module_set:
+                continue
+            # Check for `module.name(...)` usage when `name` was from-imported
+            for name in _names:
+                pattern = _re.escape(f"{mod}.{name}") + r"\s*\("
+                if _re.search(pattern, stripped):
+                    warnings.append(
+                        f"[{fname}:{i}] Import-usage mismatch: '{name}' was imported "
+                        f"via `from {mod} import {name}` but called as `{mod}.{name}()` "
+                        f"— this will raise NameError. Use `{name}()` directly."
+                    )
+
     return warnings
 
 

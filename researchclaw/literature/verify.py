@@ -689,7 +689,32 @@ def verify_citations(
     _DELAY_OPENALEX = 0.2                   # OpenAlex: 10K/day
     api_call_count = 0
 
+    # BUG-22: Global timeout — stop verifying after 5 minutes total
+    _verify_start = time.monotonic()
+    _VERIFY_TIMEOUT_SEC = 300  # 5 minutes
+
     for i, entry in enumerate(entries):
+        # BUG-22: Check global timeout — mark remaining as SKIPPED
+        if time.monotonic() - _verify_start > _VERIFY_TIMEOUT_SEC:
+            logger.warning(
+                "Verification timeout (%.0fs). Marking remaining %d/%d "
+                "citations as SKIPPED.",
+                _VERIFY_TIMEOUT_SEC, len(entries) - i, len(entries),
+            )
+            for remaining_entry in entries[i:]:
+                _rkey = remaining_entry.get("key", f"unknown_{i}")
+                _rtitle = remaining_entry.get("title", "")
+                report.results.append(CitationResult(
+                    cite_key=_rkey,
+                    title=_rtitle,
+                    status=VerifyStatus.SKIPPED,
+                    confidence=0.0,
+                    method="skipped",
+                    details="Verification timeout exceeded",
+                ))
+                report.skipped += 1
+            break
+
         key = entry.get("key", f"unknown_{i}")
         title = entry.get("title", "")
         arxiv_id = entry.get("eprint", "")

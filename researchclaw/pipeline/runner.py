@@ -345,6 +345,7 @@ def execute_pipeline(
     _write_pipeline_summary(run_dir, summary)
 
     # --- Evolution: extract and store lessons ---
+    lessons: list[object] = []
     try:
         lessons = extract_lessons(results, run_id=run_id, run_dir=run_dir)
         if lessons:
@@ -353,6 +354,12 @@ def execute_pipeline(
             logger.info("Extracted %d lessons from pipeline run", len(lessons))
     except Exception:  # noqa: BLE001
         logger.warning("Evolution lesson extraction failed (non-blocking)")
+
+    # --- MetaClaw bridge: convert high-severity lessons to skills ---
+    try:
+        _metaclaw_post_pipeline(config, results, lessons, run_id, run_dir)
+    except Exception:  # noqa: BLE001
+        logger.warning("MetaClaw post-pipeline hook failed (non-blocking)")
 
     # --- Package deliverables into a single folder ---
     try:
@@ -960,3 +967,115 @@ def execute_iterative_pipeline(
         logger.warning("Deliverables packaging failed (non-blocking)")
 
     return summary
+
+
+def _metaclaw_post_pipeline(
+    config: RCConfig,
+    results: list[StageResult],
+    lessons: list[object],
+    run_id: str,
+    run_dir: Path,
+) -> None:
+    """MetaClaw bridge: post-pipeline hook.
+
+    1. Convert high-severity lessons into MetaClaw skills.
+    2. Record skill effectiveness feedback.
+    3. Signal session end to MetaClaw proxy.
+    """
+    bridge = getattr(config, "metaclaw_bridge", None)
+    if not bridge or not getattr(bridge, "enabled", False):
+        return
+
+    from researchclaw.llm.client import LLMClient
+
+    # 1. Lesson-to-skill conversion
+    l2s = getattr(bridge, "lesson_to_skill", None)
+    if l2s and getattr(l2s, "enabled", False) and lessons:
+        try:
+            from researchclaw.metaclaw_bridge.lesson_to_skill import (
+                convert_lessons_to_skills,
+            )
+
+            min_sev = getattr(l2s, "min_severity", "warning")
+            llm = LLMClient.from_rc_config(config)
+            new_skills = convert_lessons_to_skills(
+                lessons,
+                llm,
+                getattr(bridge, "skills_dir", "~/.metaclaw/skills"),
+                min_severity=min_sev,
+                max_skills=getattr(l2s, "max_skills_per_run", 3),
+            )
+            if new_skills:
+                logger.info(
+                    "MetaClaw: generated %d new skills from lessons: %s",
+                    len(new_skills),
+                    new_skills,
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning("MetaClaw lesson-to-skill conversion failed", exc_info=True)
+
+    # 2. Skill effectiveness feedback
+    try:
+        from researchclaw.metaclaw_bridge.skill_feedback import (
+            SkillFeedbackStore,
+            record_stage_skills,
+        )
+        from researchclaw.metaclaw_bridge.stage_skill_map import get_stage_config
+
+        feedback_store = SkillFeedbackStore(run_dir / "evolution" / "skill_effectiveness.jsonl")
+        for result in results:
+            stage_num = int(getattr(result, "stage", 0))
+            stage_name = {
+                1: "topic_init", 2: "problem_decompose", 3: "search_strategy",
+                4: "literature_collect", 5: "literature_screen", 6: "knowledge_extract",
+                7: "synthesis", 8: "hypothesis_gen", 9: "experiment_design",
+                10: "code_generation", 11: "resource_planning", 12: "experiment_run",
+                13: "iterative_refine", 14: "result_analysis", 15: "research_decision",
+                16: "paper_outline", 17: "paper_draft", 18: "peer_review",
+                19: "paper_revision", 20: "quality_gate", 21: "knowledge_archive",
+                22: "export_publish", 23: "citation_verify",
+            }.get(stage_num, "")
+            if not stage_name:
+                continue
+
+            stage_config = get_stage_config(stage_name)
+            active_skills = stage_config.get("skills", [])
+            status = str(getattr(result, "status", ""))
+            success = "done" in status.lower()
+
+            if active_skills:
+                record_stage_skills(
+                    feedback_store,
+                    stage_name,
+                    run_id,
+                    success,
+                    active_skills,
+                )
+    except Exception:  # noqa: BLE001
+        logger.warning("MetaClaw skill feedback recording failed")
+
+    # 3. Signal session end (fire-and-forget)
+    try:
+        from researchclaw.metaclaw_bridge.session import MetaClawSession
+        import json as _json
+        import urllib.request as _urllib_req
+
+        session = MetaClawSession(run_id)
+        end_headers = session.end()
+        # Send a minimal request to signal session end
+        proxy_url = getattr(bridge, "proxy_url", "http://localhost:30000")
+        url = f"{proxy_url.rstrip('/')}/v1/chat/completions"
+        body = _json.dumps({
+            "model": "session-end",
+            "messages": [{"role": "user", "content": "session complete"}],
+            "max_tokens": 1,
+        }).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        headers.update(end_headers)
+        req = _urllib_req.Request(url, data=body, headers=headers)
+        try:
+            _urllib_req.urlopen(req, timeout=5)
+        except Exception:  # noqa: BLE001
+            pass  # Best-effort signal
+    except Exception:  # noqa: BLE001
+        pass

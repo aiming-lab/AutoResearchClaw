@@ -66,8 +66,9 @@ class TestNoncriticalStages:
     def test_knowledge_archive_is_noncritical(self):
         assert Stage.KNOWLEDGE_ARCHIVE in NONCRITICAL_STAGES
 
-    def test_citation_verify_is_noncritical(self):
-        assert Stage.CITATION_VERIFY in NONCRITICAL_STAGES
+    def test_citation_verify_is_critical(self):
+        # T3.4: CITATION_VERIFY is now critical — hallucinated refs must block export
+        assert Stage.CITATION_VERIFY not in NONCRITICAL_STAGES
 
     def test_topic_init_is_critical(self):
         assert Stage.TOPIC_INIT not in NONCRITICAL_STAGES

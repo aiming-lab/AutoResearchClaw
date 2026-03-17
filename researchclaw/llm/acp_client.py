@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -194,13 +195,33 @@ class ACPClient:
         self._session_ready = True
         logger.info("ACP session '%s' ready (%s)", self.config.session_name, self.config.agent)
 
+    # Linux MAX_ARG_STRLEN is 128KB; stay well under to leave room for env
+    _MAX_CLI_PROMPT_BYTES = 100_000
+
     def _send_prompt(self, prompt: str) -> str:
-        """Send a prompt via acpx and return the response text."""
+        """Send a prompt via acpx and return the response text.
+
+        For large prompts that would exceed the OS argument-length limit
+        (``E2BIG``), the prompt is written to a temp file and the agent
+        is asked to read it.
+        """
         self._ensure_session()
         acpx = self._resolve_acpx()
         if not acpx:
             raise RuntimeError("acpx not found")
 
+        prompt_bytes = len(prompt.encode("utf-8"))
+        if prompt_bytes <= self._MAX_CLI_PROMPT_BYTES:
+            return self._send_prompt_cli(acpx, prompt)
+
+        logger.info(
+            "Prompt too large for CLI arg (%d bytes). Using temp file.",
+            prompt_bytes,
+        )
+        return self._send_prompt_via_file(acpx, prompt)
+
+    def _send_prompt_cli(self, acpx: str, prompt: str) -> str:
+        """Send prompt as a CLI argument (original path)."""
         result = subprocess.run(
             [acpx, "--approve-all", "--cwd", self._abs_cwd(),
              self.config.agent, "-s", self.config.session_name,
@@ -214,6 +235,43 @@ class ACPClient:
             raise RuntimeError(f"ACP prompt failed (exit {result.returncode}): {stderr}")
 
         return self._extract_response(result.stdout)
+
+    def _send_prompt_via_file(self, acpx: str, prompt: str) -> str:
+        """Write prompt to a temp file, ask the agent to read and respond."""
+        fd, prompt_path = tempfile.mkstemp(
+            suffix=".md", prefix="rc_prompt_", dir="/tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(prompt)
+
+            short_prompt = (
+                f"Read the file at {prompt_path} in its entirety. "
+                f"Follow ALL instructions contained in that file and "
+                f"respond exactly as requested. Do NOT summarize, "
+                f"just produce the requested output."
+            )
+
+            result = subprocess.run(
+                [acpx, "--approve-all", "--cwd", self._abs_cwd(),
+                 self.config.agent, "-s", self.config.session_name,
+                 short_prompt],
+                capture_output=True, text=True,
+                timeout=self.config.timeout_sec,
+            )
+
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                raise RuntimeError(
+                    f"ACP prompt failed (exit {result.returncode}): {stderr}"
+                )
+
+            return self._extract_response(result.stdout)
+        finally:
+            try:
+                os.unlink(prompt_path)
+            except OSError:
+                pass
 
     @staticmethod
     def _extract_response(raw_output: str) -> str:

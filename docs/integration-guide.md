@@ -17,10 +17,11 @@ This guide is for humans who want to understand what's happening under the hood,
 7. [Experiment Modes](#7-experiment-modes)
 8. [Conference Templates](#8-conference-templates)
 9. [OpenClaw Bridge (Advanced)](#9-openclaw-bridge-advanced)
-10. [Other AI Platforms](#10-other-ai-platforms)
-11. [Python API](#11-python-api)
-12. [Troubleshooting](#12-troubleshooting)
-13. [FAQ](#13-faq)
+10. [MetaClaw Integration (Cross-Run Learning)](#10-metaclaw-integration-cross-run-learning)
+11. [Other AI Platforms](#11-other-ai-platforms)
+12. [Python API](#12-python-api)
+13. [Troubleshooting](#13-troubleshooting)
+14. [FAQ](#14-faq)
 
 ---
 
@@ -567,7 +568,133 @@ This is an **extension point** — you don't need to configure it for basic usag
 
 ---
 
-## 10. Other AI Platforms
+## 10. MetaClaw Integration (Cross-Run Learning)
+
+[MetaClaw](https://github.com/aiming-lab/MetaClaw) adds **cross-run knowledge transfer** to AutoResearchClaw. When enabled, the pipeline automatically captures lessons from failures and converts them into reusable skills that improve subsequent runs.
+
+### Architecture
+
+```
+┌──────────────────────────────────────────────────────┐
+│              AutoResearchClaw Pipeline                │
+│  Stage 1 → 2 → ... → 23                             │
+│                                                      │
+│  ┌─────────────┐    ┌──────────────────────────────┐ │
+│  │ LLMClient   │───▶│ MetaClaw Integration Layer   │ │
+│  │             │    │ (metaclaw_bridge module)      │ │
+│  └─────────────┘    └──────────┬───────────────────┘ │
+│                                │                     │
+│  ┌─────────────┐    ┌──────────▼───────────────────┐ │
+│  │ Evolution   │◀──▶│ Lesson ↔ Skill Bridge        │ │
+│  │ Store       │    └─────────────────────────────┘ │
+│  └─────────────┘                                     │
+└──────────────────────────┬───────────────────────────┘
+                           │
+            ┌──────────────▼──────────────┐
+            │     MetaClaw Proxy Server    │
+            │     (optional, :30000)       │
+            │  ┌────────────────────────┐  │
+            │  │ SkillManager (40+ skills)│ │
+            │  │ + arc-* learned skills   │ │
+            │  └────────────────────────┘  │
+            └─────────────────────────────┘
+```
+
+### How It Works
+
+1. **Lesson Capture**: During each pipeline run, the `EvolutionStore` automatically records failures, warnings, and anomalies as structured lessons in `evolution/lessons.jsonl`.
+
+2. **Lesson → Skill Conversion**: After a run completes, lessons above a configurable severity threshold are converted into `arc-*` skill files stored in `~/.metaclaw/skills/`. Each skill contains: trigger conditions, failure root cause, and actionable guidance.
+
+3. **Skill Injection**: On the next run, `build_overlay()` reads all `arc-*` skills and injects them into the LLM prompt for every stage via the `evolution_overlay` parameter. The LLM receives explicit instructions to avoid previously encountered pitfalls.
+
+4. **Proxy Routing (Optional)**: When the MetaClaw proxy is running, LLM requests are routed through it for additional skill matching and session tracking. If the proxy is unavailable, requests automatically fall back to the direct LLM endpoint.
+
+### Setup
+
+#### Step 1: Install MetaClaw
+
+```bash
+pip install metaclaw
+# Or clone from source:
+git clone https://github.com/aiming-lab/MetaClaw.git
+cd metaclaw && pip install -e .
+```
+
+#### Step 2: Configure
+
+Add the `metaclaw_bridge` section to your `config.arc.yaml`:
+
+```yaml
+metaclaw_bridge:
+  enabled: true
+  proxy_url: "http://localhost:30000/v1"    # MetaClaw proxy (optional)
+  skills_dir: "~/.metaclaw/skills"          # Skill storage directory
+  fallback_url: "https://api.openai.com/v1" # Direct LLM fallback
+  fallback_api_key_env: "OPENAI_API_KEY"
+  lesson_to_skill:
+    enabled: true
+    min_severity: "warning"                 # Convert warnings + errors
+    max_skills_per_run: 5                   # Max new skills per run
+```
+
+#### Step 3: Run
+
+```bash
+# First run — captures lessons, generates initial skills
+researchclaw run --config config.arc.yaml --topic "Your idea" --auto-approve
+
+# Check generated skills
+ls ~/.metaclaw/skills/arc-*/SKILL.md
+
+# Second run — skills from Run 1 are automatically injected
+researchclaw run --config config.arc.yaml --topic "Your idea" --auto-approve
+```
+
+#### Optional: Start MetaClaw Proxy
+
+For full skill matching and session tracking:
+
+```bash
+metaclaw start --mode skills_only --port 30000
+# Or use the provided script:
+bash scripts/metaclaw_start.sh
+```
+
+The proxy is optional — without it, the pipeline still benefits from skill injection via `build_overlay()` and falls back to your configured LLM endpoint.
+
+### Experiment Results
+
+In controlled A/B experiments (same topic, same LLM, same configuration):
+
+| Metric | Baseline | With MetaClaw | Improvement |
+|--------|----------|---------------|-------------|
+| Stage retry rate | 10.5% | 7.9% | **-24.8%** |
+| Refine cycle count | 2.0 | 1.2 | **-40.0%** |
+| Pipeline stage completion | 18/19 | 19/19 | **+5.3%** |
+| Overall robustness score (composite) | 0.714 | 0.845 | **+18.3%** |
+
+> Composite robustness score is a weighted average of stage completion rate (40%), retry reduction (30%), and refine cycle efficiency (30%).
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `researchclaw/metaclaw_bridge/` | Integration module (config, session, lesson_to_skill, prm_gate, skill_feedback) |
+| `researchclaw/evolution.py` | `build_overlay()` — reads intra-run lessons + cross-run arc-* skills |
+| `researchclaw/llm/client.py` | Proxy routing with automatic fallback |
+| `~/.metaclaw/skills/arc-*/SKILL.md` | Learned skill files (auto-generated) |
+| `scripts/metaclaw_start.sh` | Helper script to launch MetaClaw proxy |
+
+### Backward Compatibility
+
+- **Default: OFF.** Without `metaclaw_bridge.enabled: true`, the pipeline is completely unchanged.
+- **No new required dependencies.** MetaClaw is optional.
+- **All 1,284 existing tests pass** with the integration code.
+
+---
+
+## 11. Other AI Platforms
 
 AutoResearchClaw works with any AI coding assistant that can read project context files.
 
@@ -598,7 +725,7 @@ The agent reads this file and knows how to install, configure, and run the pipel
 
 ---
 
-## 11. Python API
+## 12. Python API
 
 For programmatic use or custom integrations:
 
@@ -653,7 +780,7 @@ for p in papers:
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 ### Pre-Run Diagnostics
 
@@ -696,7 +823,7 @@ This prints a human-readable summary: which stages passed, which failed, key met
 
 ---
 
-## 13. FAQ
+## 14. FAQ
 
 **Q: How much does a full pipeline run cost in API credits?**
 A: Depends on your model and topic complexity. A typical run with GPT-4o makes ~35-60 API calls across all 23 stages (paper drafting now uses 3 sequential calls for section-by-section writing). Expect roughly $3-12 per run. Simulated mode uses slightly fewer tokens since it doesn't generate real experiment code.
@@ -721,4 +848,4 @@ A: Not recommended — the pipeline builds on prior stages' outputs. Start a new
 
 ---
 
-*Last updated: March 2026 · AutoResearchClaw v0.2.0*
+*Last updated: March 2026 · AutoResearchClaw v0.3.0*

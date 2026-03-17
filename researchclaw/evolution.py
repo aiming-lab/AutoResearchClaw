@@ -414,26 +414,63 @@ class EvolutionStore:
         return [entry for _, entry in scored[:max_lessons]]
 
     def build_overlay(
-        self, stage_name: str, *, max_lessons: int = 5
+        self,
+        stage_name: str,
+        *,
+        max_lessons: int = 5,
+        skills_dir: str = "",
     ) -> str:
         """Generate a prompt overlay string for a given stage.
 
-        Returns empty string if no relevant lessons exist.
+        Combines two sources:
+        1. Current-run lessons from ``lessons.jsonl`` (intra-run learning).
+        2. Cross-run MetaClaw ``arc-*`` skills from *skills_dir* (inter-run
+           learning via the MetaClaw skill-generation feedback loop).
+
+        Returns empty string if no relevant lessons or skills exist.
         """
+        parts: list[str] = []
+
+        # --- Section 1: intra-run lessons ---
         lessons = self.query_for_stage(stage_name, max_lessons=max_lessons)
-        if not lessons:
-            return ""
-        parts = ["## Lessons from Prior Runs"]
-        for i, lesson in enumerate(lessons, 1):
-            severity_icon = {"error": "❌", "warning": "⚠️", "info": "ℹ️"}.get(
-                lesson.severity, "•"
-            )
+        if lessons:
+            parts.append("## Lessons from Prior Runs")
+            for i, lesson in enumerate(lessons, 1):
+                severity_icon = {"error": "❌", "warning": "⚠️", "info": "ℹ️"}.get(
+                    lesson.severity, "•"
+                )
+                parts.append(
+                    f"{i}. {severity_icon} [{lesson.category}] {lesson.description}"
+                )
             parts.append(
-                f"{i}. {severity_icon} [{lesson.category}] {lesson.description}"
+                "\nUse these lessons to avoid repeating past mistakes."
             )
-        parts.append(
-            "\nUse these lessons to avoid repeating past mistakes."
-        )
+
+        # --- Section 2: cross-run MetaClaw arc-* skills ---
+        if skills_dir:
+            from pathlib import Path as _Path
+
+            sd = _Path(skills_dir).expanduser()
+            if sd.is_dir():
+                arc_skills: list[str] = []
+                for skill_dir in sorted(sd.iterdir()):
+                    if skill_dir.is_dir() and skill_dir.name.startswith("arc-"):
+                        skill_file = skill_dir / "SKILL.md"
+                        if skill_file.is_file():
+                            try:
+                                text = skill_file.read_text(encoding="utf-8").strip()
+                                if text:
+                                    arc_skills.append(text)
+                            except OSError:
+                                continue
+                if arc_skills:
+                    parts.append("\n## Learned Skills from Prior Runs")
+                    for skill_text in arc_skills[:5]:
+                        parts.append(skill_text)
+                    parts.append(
+                        "\nApply these skills proactively to improve quality."
+                    )
+
         return "\n".join(parts)
 
     def count(self) -> int:

@@ -371,20 +371,23 @@ class DockerSandbox:
             user_datasets.mkdir(parents=True, exist_ok=True)
             cmd.extend(["-v", f"{user_datasets}:/workspace/data:rw"])
 
-        # Mount HuggingFace model cache (read-write for downloading)
+        # Mount HuggingFace model cache (read-only — experiments only read
+        # pretrained models; downloads happen via setup.py with network access
+        # and write to /workspace/data/hf instead).
         hf_mounted = False
+        _hf_container = "/home/researcher/.cache/huggingface"
         hf_home_env = os.environ.get("HF_HOME", "").strip()
         if hf_home_env:
             xdg_hf = Path(hf_home_env).resolve()
             if xdg_hf.is_dir():
-                cmd.extend(["-v", f"{xdg_hf}:/home/researcher/.cache/huggingface"])
-                cmd.extend(["-e", "HF_HOME=/home/researcher/.cache/huggingface"])
+                cmd.extend(["-v", f"{xdg_hf}:{_hf_container}:ro"])
+                cmd.extend(["-e", f"HF_HOME={_hf_container}"])
                 hf_mounted = True
         if not hf_mounted:
             hf_cache_host = Path.home() / ".cache" / "huggingface"
             if hf_cache_host.is_dir():
-                cmd.extend(["-v", f"{hf_cache_host}:/home/researcher/.cache/huggingface"])
-                cmd.extend(["-e", "HF_HOME=/home/researcher/.cache/huggingface"])
+                cmd.extend(["-v", f"{hf_cache_host}:{_hf_container}:ro"])
+                cmd.extend(["-e", f"HF_HOME={_hf_container}"])
 
         # Pass HF token if available (for gated model downloads)
         hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")

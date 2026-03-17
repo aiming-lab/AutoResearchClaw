@@ -39,15 +39,5 @@ def create_sandbox(config: ExperimentConfig, workdir: Path) -> SandboxProtocol:
 
         return DockerSandbox(docker_cfg, workdir)
 
-    if config.mode == "ssh_remote":
-        raise RuntimeError(
-            "ssh_remote mode is configured but not implemented in this build. "
-            "Use mode: sandbox or mode: docker."
-        )
-
-    if config.mode != "sandbox":
-        raise RuntimeError(
-            f"Unsupported experiment mode for create_sandbox(): {config.mode}"
-        )
-
+    # Default: subprocess sandbox
     return ExperimentSandbox(config.sandbox, workdir)

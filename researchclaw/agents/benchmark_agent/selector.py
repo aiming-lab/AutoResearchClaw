@@ -160,7 +160,13 @@ class SelectorAgent(BaseAgent):
             "- Select 2-4 baselines (must include at least 1 classic + 1 recent)\n"
             "- Primary benchmark MUST be the domain standard\n"
             "- Prefer benchmarks that top-venue papers commonly use\n"
-            "- Consider dataset size vs time budget"
+            "- Consider dataset size vs time budget\n"
+            "- CRITICAL: Only select benchmarks that are RELEVANT to the research "
+            "topic's domain. Do NOT select image classification datasets (CIFAR, "
+            "MNIST) for non-image tasks like PDE solvers, RL, or optimization.\n"
+            "- CRITICAL: Baselines must be COMPETING METHODS, not optimizers. "
+            "SGD/Adam/AdamW/Cosine LR are NOT baselines — they are training "
+            "tools. Baselines must be alternative approaches to the same problem."
         )
         user = (
             f"Research Topic: {topic}\n\n"

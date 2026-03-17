@@ -153,12 +153,15 @@ class AcquirerAgent(BaseAgent):
                     f'        print(f"Warning: Failed to download {name}: {{e}}")',
                     '',
                 ])
-            elif "datasets.load_dataset" in api:
+            elif "datasets.load_dataset" in api or "load_dataset" in api:
+                # Rewrite qualified `datasets.load_dataset(...)` to
+                # `load_dataset(...)` so it matches the `from datasets import`
+                _dl_api = api.replace("datasets.load_dataset", "load_dataset")
                 lines.extend([
                     f'    # Download {name}',
                     '    try:',
                     f'        from datasets import load_dataset',
-                    f'        {api}',
+                    f'        {_dl_api}',
                     f'        print(f"Downloaded {name}")',
                     f'    except Exception as e:',
                     f'        print(f"Warning: Failed to download {name}: {{e}}")',

@@ -1549,7 +1549,9 @@ class TestCollectRawExperimentMetrics:
     def test_returns_empty_when_no_runs(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
-        assert rc_executor._collect_raw_experiment_metrics(run_dir) == ""
+        block, has_parsed = rc_executor._collect_raw_experiment_metrics(run_dir)
+        assert block == ""
+        assert not has_parsed
 
     def test_extracts_metrics_from_stdout(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "run"
@@ -1560,10 +1562,11 @@ class TestCollectRawExperimentMetrics:
             "stdout": "UCB regret: 361.92\nThompson regret: 576.24\n",
         }
         (runs_dir / "run-1.json").write_text(json.dumps(payload))
-        result = rc_executor._collect_raw_experiment_metrics(run_dir)
+        result, has_parsed = rc_executor._collect_raw_experiment_metrics(run_dir)
         assert "361.92" in result
         assert "576.24" in result
         assert "1 run(s)" in result
+        assert not has_parsed
 
     def test_extracts_from_metrics_dict(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "run"
@@ -1571,9 +1574,10 @@ class TestCollectRawExperimentMetrics:
         runs_dir.mkdir(parents=True)
         payload = {"metrics": {"loss": 0.042, "accuracy": 0.95}, "stdout": ""}
         (runs_dir / "run-1.json").write_text(json.dumps(payload))
-        result = rc_executor._collect_raw_experiment_metrics(run_dir)
+        result, has_parsed = rc_executor._collect_raw_experiment_metrics(run_dir)
         assert "loss" in result
         assert "0.042" in result
+        assert has_parsed
 
     def test_deduplicates_metrics(self, tmp_path: Path) -> None:
         run_dir = tmp_path / "run"
@@ -1584,7 +1588,7 @@ class TestCollectRawExperimentMetrics:
             "stdout": "loss: 0.5\nloss: 0.5\n",
         }
         (runs_dir / "run-1.json").write_text(json.dumps(payload))
-        result = rc_executor._collect_raw_experiment_metrics(run_dir)
+        result, _ = rc_executor._collect_raw_experiment_metrics(run_dir)
         # "loss: 0.5" should appear only once (deduplicated)
         assert result.count("loss: 0.5") == 1
 

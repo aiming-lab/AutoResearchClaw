@@ -148,6 +148,14 @@ def _request_with_retry(
                         wait = 2 ** (attempt + 1)
                 else:
                     wait = 2 ** (attempt + 1)
+                # BUG-22: If Retry-After is absurdly long (>300s), skip immediately
+                if wait > 300:
+                    logger.warning(
+                        "[rate-limit] OpenAlex Retry-After=%s (>300s). "
+                        "Skipping request instead of waiting.",
+                        retry_after,
+                    )
+                    return None
                 wait = min(wait, _MAX_WAIT_SEC)
                 jitter = random.uniform(0, wait * 0.2)
                 logger.warning(
@@ -237,6 +245,9 @@ def _parse_openalex_work(item: dict[str, Any]) -> Paper:
     primary_loc = item.get("primary_location") or {}
     source_info = primary_loc.get("source") or {}
     venue = str(source_info.get("display_name") or "").strip()
+    # BUG-33: arXiv category codes (e.g. cs.LG, stat.ML) are not proper venue names
+    if venue and re.match(r"^[a-z]{2,}\.[A-Z]{2}$", venue):
+        venue = ""
 
     # Citation count
     citation_count = int(item.get("cited_by_count") or 0)

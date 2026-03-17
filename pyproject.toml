@@ -13,6 +13,9 @@ license = {text = "MIT"}
 [project.scripts]
 researchclaw = "researchclaw.cli:main"
 
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["researchclaw", "sibyl", "arc"]
 

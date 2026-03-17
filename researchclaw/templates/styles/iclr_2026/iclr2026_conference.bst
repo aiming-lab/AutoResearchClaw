@@ -194,6 +194,16 @@ FUNCTION {format.url}
   if$
 }
 
+FUNCTION {output.bibitem}
+{ newline$
+  "\bibitem{" write$
+  cite$ write$
+  "}" write$
+  newline$
+  ""
+  before.all 'output.state :=
+}
+
 FUNCTION {article}
 { output.bibitem
   format.authors "author" output.check
@@ -251,16 +261,6 @@ FUNCTION {mastersthesis} { misc }
 FUNCTION {unpublished} { misc }
 
 FUNCTION {default.type} { misc }
-
-FUNCTION {output.bibitem}
-{ newline$
-  "\bibitem{" write$
-  cite$ write$
-  "}" write$
-  newline$
-  ""
-  before.all 'output.state :=
-}
 
 READ
 FUNCTION {sortify}

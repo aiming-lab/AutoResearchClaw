@@ -315,17 +315,27 @@ class TestBuildBody:
         assert r"\section{Title}" not in body
         assert r"\section{Abstract}" not in body
 
-    def test_subsection(self) -> None:
+    def test_subsection_promoted_when_all_h2(self) -> None:
+        """T1.3: When all body sections are H2, they should be promoted to \\section."""
         md = "## Method\ntext"
         sections = _parse_sections(md)
         body = _build_body(sections)
-        assert r"\subsection{Method}" in body
+        # All-H2 document → auto-promoted to \section
+        assert r"\section{Method}" in body
+
+    def test_h2_promoted_under_h1_title(self) -> None:
+        """When title occupies H1, H2 body sections promote to \\section."""
+        md = "# My Paper\ntitle body\n## Method\ntext"
+        sections = _parse_sections(md)
+        body = _build_body(sections, title="My Paper")
+        assert r"\section{Method}" in body
 
     def test_subsubsection(self) -> None:
-        md = "### Details\ntext"
+        md = "## Intro\nintro\n### Details\ntext"
         sections = _parse_sections(md)
         body = _build_body(sections)
-        assert r"\subsubsection{Details}" in body
+        # H2 promoted to \section, H3 promoted to \subsection
+        assert r"\subsection{Details}" in body
 
 
 class TestListRendering:

@@ -13,7 +13,7 @@
 <p align="center">
   <a href="../LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
-  <a href="#testes"><img src="https://img.shields.io/badge/Tests-1183%20passed-brightgreen?logo=pytest&logoColor=white" alt="1183 Tests Passed"></a>
+  <a href="#testes"><img src="https://img.shields.io/badge/Tests-1284%20passed-brightgreen?logo=pytest&logoColor=white" alt="1284 Tests Passed"></a>
   <a href="https://github.com/aiming-lab/AutoResearchClaw"><img src="https://img.shields.io/badge/GitHub-AutoResearchClaw-181717?logo=github" alt="GitHub"></a>
   <a href="#integração-openclaw"><img src="https://img.shields.io/badge/OpenClaw-Compatible-ff4444?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==" alt="OpenClaw Compatible"></a>
 </p>
@@ -49,7 +49,7 @@ pip install -e . && researchclaw run --topic "Sua ideia de pesquisa aqui" --auto
 
 Você tem uma ideia. Você quer um artigo. **É só isso.**
 
-O AutoResearchClaw recebe um tópico de pesquisa e produz autonomamente um artigo acadêmico completo — com literatura real do arXiv e Semantic Scholar (multi-fonte, arXiv-first para evitar limitação de taxa), experimentos em sandbox com detecção automática de hardware (GPU/MPS/CPU), análise estatística, revisão por pares e LaTeX pronto para conferência (mirando 5.000-6.500 palavras para NeurIPS/ICML/ICLR). Sem babá. Sem copiar e colar entre ferramentas.
+O AutoResearchClaw recebe um tópico de pesquisa e produz autonomamente um artigo acadêmico completo — com literatura real do OpenAlex, Semantic Scholar e arXiv (multi-fonte), experimentos em sandbox com detecção automática de hardware (GPU/MPS/CPU), análise estatística, revisão por pares e LaTeX pronto para conferência (mirando 5.000-6.500 palavras para NeurIPS/ICML/ICLR). Sem babá. Sem copiar e colar entre ferramentas.
 
 <table>
 <tr><td>📄</td><td><code>paper_draft.md</code></td><td>Artigo acadêmico completo (Introdução, Trabalhos Relacionados, Método, Experimentos, Resultados, Conclusão)</td></tr>
@@ -229,7 +229,7 @@ Fase D: Design de Experimentos      Fase H: Finalização
 |------|----------------|
 | **A: Escopo** | O LLM decompõe o tópico em uma árvore de problemas estruturada com questões de pesquisa |
 | **A+: Hardware** | Detecta automaticamente GPU (NVIDIA CUDA / Apple MPS / apenas CPU), avisa se o hardware local é limitado, adapta a geração de código adequadamente |
-| **B: Literatura** | Busca multi-fonte (arXiv-first, depois Semantic Scholar) por artigos reais, triagem por relevância, extração de fichas de conhecimento |
+| **B: Literatura** | Busca multi-fonte (OpenAlex → Semantic Scholar → arXiv) por artigos reais, triagem por relevância, extração de fichas de conhecimento |
 | **C: Síntese** | Agrupa descobertas, identifica lacunas de pesquisa, gera hipóteses testáveis via debate multi-agente |
 | **D: Design** | Projeta plano de experimento, gera Python executável com consciência de hardware (tier de GPU → seleção de pacotes), estima necessidades de recursos |
 | **E: Execução** | Executa experimentos em sandbox, detecta NaN/Inf e bugs de runtime, auto-repara código via reparo direcionado por LLM |
@@ -331,7 +331,7 @@ A pasta `deliverables/` está **pronta para compilação** — inclui os arquivo
 
 ### 📚 Busca de Literatura Multi-Fonte
 
-O Estágio 4 consulta **APIs acadêmicas reais** — não artigos alucinados por LLM. Usa uma estratégia **arXiv-first** para evitar limitação de taxa do Semantic Scholar.
+O Estágio 4 consulta **APIs acadêmicas reais** — não artigos alucinados por LLM. Usa uma estratégia **OpenAlex-first** (OpenAlex → Semantic Scholar → arXiv) para cobertura ideal com mínimo de limitação de taxa.
 
 - **arXiv API** (primário) — preprints com IDs arXiv reais e metadados, sem limites de taxa
 - **Semantic Scholar API** (secundário) — artigos reais com títulos, resumos, venues, contagens de citação, DOIs

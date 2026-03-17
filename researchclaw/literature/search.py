@@ -288,37 +288,47 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
     result: list[Paper] = []
 
     for paper in papers:
+        is_dup = False
+
         # Check DOI
         if paper.doi:
             doi_key = paper.doi.lower().strip()
             if doi_key in seen_doi:
-                # Keep the one with more citations
                 idx = seen_doi[doi_key]
                 if paper.citation_count > result[idx].citation_count:
                     result[idx] = paper
-                continue
-            seen_doi[doi_key] = len(result)
+                is_dup = True
 
         # Check arXiv ID
-        if paper.arxiv_id:
+        if not is_dup and paper.arxiv_id:
             ax_key = paper.arxiv_id.strip()
             if ax_key in seen_arxiv:
                 idx = seen_arxiv[ax_key]
                 if paper.citation_count > result[idx].citation_count:
                     result[idx] = paper
-                continue
-            seen_arxiv[ax_key] = len(result)
+                is_dup = True
 
         # Check fuzzy title
-        norm = _normalise_title(paper.title)
-        if norm and norm in seen_title:
-            idx = seen_title[norm]
-            if paper.citation_count > result[idx].citation_count:
-                result[idx] = paper
-            continue
-        if norm:
-            seen_title[norm] = len(result)
+        if not is_dup:
+            norm = _normalise_title(paper.title)
+            if norm and norm in seen_title:
+                idx = seen_title[norm]
+                if paper.citation_count > result[idx].citation_count:
+                    result[idx] = paper
+                is_dup = True
 
+        if is_dup:
+            continue
+
+        # Not a duplicate — store indices and append
+        new_idx = len(result)
+        if paper.doi:
+            seen_doi[paper.doi.lower().strip()] = new_idx
+        if paper.arxiv_id:
+            seen_arxiv[paper.arxiv_id.strip()] = new_idx
+        norm = _normalise_title(paper.title)
+        if norm:
+            seen_title[norm] = new_idx
         result.append(paper)
 
     return result

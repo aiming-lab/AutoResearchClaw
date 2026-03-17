@@ -286,6 +286,30 @@ def _safe_json_loads(text: str, default: Any) -> Any:
         return default
 
 
+_METACLAW_SKILLS_DIR = str(Path.home() / ".metaclaw" / "skills")
+
+
+def _get_evolution_overlay(run_dir: Path | None, stage_name: str) -> str:
+    """Load evolution lessons + MetaClaw skills for prompt injection.
+
+    Combines intra-run lessons (from current run's evolution dir) with
+    cross-run arc-* skills (from ~/.metaclaw/skills/).
+
+    Returns empty string if no relevant lessons/skills exist or on any error.
+    """
+    if run_dir is None:
+        return ""
+    try:
+        from researchclaw.evolution import EvolutionStore
+
+        store = EvolutionStore(run_dir / "evolution")
+        return store.build_overlay(
+            stage_name, max_lessons=5, skills_dir=_METACLAW_SKILLS_DIR
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _chat_with_prompt(
     llm: LLMClient,
     system: str,
@@ -424,6 +448,132 @@ def _extract_paper_title(md_text: str) -> str:
         return candidates[0]
 
     return "Untitled Paper"
+
+
+def _generate_framework_diagram_prompt(
+    paper_text: str,
+    config: "RCConfig",
+    *,
+    llm: "LLMClient | None" = None,
+) -> str:
+    """Generate a text-to-image prompt for a methodology framework diagram.
+
+    Reads the paper's method section and produces a detailed prompt suitable
+    for AI image generators (DALL-E, Midjourney, etc.).  The prompt describes
+    an academic-style architecture/framework overview figure.
+
+    Returns the prompt as a Markdown string, or empty string on failure.
+    """
+    import re as _re
+
+    # Extract method/approach section from paper
+    _method_section = ""
+    _method_patterns = [
+        r"(?:^#{1,3}\s+(?:Method(?:ology)?|Approach|Proposed\s+(?:Method|Framework|Approach)|Our\s+Method|Technical\s+Approach|Model\s+Architecture).*?)(?=^#{1,3}\s+|\Z)",
+    ]
+    for _pat in _method_patterns:
+        _match = _re.search(_pat, paper_text, _re.MULTILINE | _re.DOTALL | _re.IGNORECASE)
+        if _match:
+            _method_section = _match.group(0)[:3000]
+            break
+
+    if not _method_section:
+        # Fallback: use abstract + first 1500 chars
+        _abs_match = _re.search(
+            r"(?:^#{1,2}\s+Abstract\s*\n)(.*?)(?=^#{1,2}\s+|\Z)",
+            paper_text, _re.MULTILINE | _re.DOTALL | _re.IGNORECASE,
+        )
+        _method_section = (_abs_match.group(1)[:1500] if _abs_match else paper_text[:2000])
+
+    title = _extract_paper_title(paper_text)
+    topic = config.research.topic
+
+    # Use LLM to generate the prompt if available
+    if llm is not None:
+        _system = (
+            "You are an expert academic figure designer. Generate a detailed text-to-image "
+            "prompt for creating a methodology framework/architecture overview diagram.\n\n"
+            "Requirements:\n"
+            "- Academic style: clean, professional, suitable for a top-tier ML conference paper\n"
+            "- Color palette: sophisticated and harmonious (suggest specific hex colors, "
+            "prefer muted blues #4477AA, teals #44AA99, warm accents #CCBB44, soft purples #AA3377)\n"
+            "- Layout: left-to-right or top-to-bottom data flow, with clearly labeled components\n"
+            "- Components: boxes/modules with rounded corners, directional arrows, clear labels\n"
+            "- Information density: high but not cluttered — each box should have a short label\n"
+            "- Text on figure: minimal, only component names and key annotations\n"
+            "- Background: white or very light grey\n"
+            "- Style: vector-art look, flat design with subtle shadows, NO photorealism\n\n"
+            "Output ONLY the prompt text (no markdown headers, no explanations). "
+            "The prompt should be 150-300 words, highly specific and actionable."
+        )
+        _user = (
+            f"Paper title: {title}\n"
+            f"Research topic: {topic}\n\n"
+            f"Method section excerpt:\n{_method_section}\n\n"
+            "Generate a detailed text-to-image prompt for the methodology framework diagram."
+        )
+        try:
+            resp = _chat_with_prompt(llm, _system, _user, max_tokens=1024)
+            _llm_prompt = resp.content.strip()
+            if len(_llm_prompt) > 50:
+                return (
+                    f"# Framework Diagram Prompt\n\n"
+                    f"**Paper**: {title}\n\n"
+                    f"## Image Generation Prompt\n\n"
+                    f"{_llm_prompt}\n\n"
+                    f"## Usage Instructions\n\n"
+                    f"1. Copy the prompt above into an AI image generator "
+                    f"(DALL-E 3, Midjourney, Ideogram, etc.)\n"
+                    f"2. Generate the image at high resolution (2048x1024 or similar landscape)\n"
+                    f"3. Save as `framework_diagram.png` in the same `charts/` folder\n"
+                    f"4. Insert into the paper's Method section using:\n"
+                    f"   - LaTeX: `\\includegraphics[width=\\textwidth]{{charts/framework_diagram.png}}`\n"
+                    f"   - Markdown: `![Framework Overview](charts/framework_diagram.png)`\n"
+                )
+        except Exception:
+            logger.debug("Framework prompt LLM generation failed, using template")
+
+    # Fallback: template-based prompt without LLM
+    _components = []
+    _component_patterns = [
+        (r"(?:encoder|decoder|transformer|attention|convolution|MLP|GNN|ResNet|ViT)", "Neural Network Module"),
+        (r"(?:loss|objective|criterion|training|optimization)", "Training/Optimization"),
+        (r"(?:data|dataset|input|preprocessing|augmentation)", "Data Pipeline"),
+        (r"(?:output|prediction|inference|evaluation)", "Output/Evaluation"),
+    ]
+    _method_lower = _method_section.lower()
+    for pat, label in _component_patterns:
+        if _re.search(pat, _method_lower):
+            _components.append(label)
+
+    if not _components:
+        _components = ["Input Processing", "Core Model", "Training Loop", "Evaluation"]
+
+    return (
+        f"# Framework Diagram Prompt\n\n"
+        f"**Paper**: {title}\n\n"
+        f"## Image Generation Prompt\n\n"
+        f"Create a clean, academic-style methodology framework diagram for a research paper "
+        f"titled \"{title}\". "
+        f"The diagram should show a left-to-right data flow pipeline with these main components: "
+        f"{', '.join(_components)}. "
+        f"Use a professional color palette with muted blues (#4477AA), teals (#44AA99), "
+        f"warm yellows (#CCBB44), and soft purples (#AA3377) on a white background. "
+        f"Each component should be a rounded rectangle with a short label inside. "
+        f"Connect components with clean directional arrows. "
+        f"Add subtle shadows for depth. Flat vector-art style, no photorealism. "
+        f"High information density but visually clean. "
+        f"Suitable for a top-tier machine learning conference paper (ICML/NeurIPS/ICLR). "
+        f"Landscape orientation, 2048x1024 resolution.\n\n"
+        f"## Usage Instructions\n\n"
+        f"1. Copy the prompt above into an AI image generator "
+        f"(DALL-E 3, Midjourney, Ideogram, etc.)\n"
+        f"2. Generate the image at high resolution (2048x1024 or similar landscape)\n"
+        f"3. Save as `framework_diagram.png` in the same `charts/` folder\n"
+        f"4. Insert into the paper's Method section using:\n"
+        f"   - LaTeX: `\\includegraphics[width=\\textwidth]{{charts/framework_diagram.png}}`\n"
+        f"   - Markdown: `![Framework Overview](charts/framework_diagram.png)`\n"
+    )
 
 
 def _safe_filename(name: str) -> str:
@@ -1180,8 +1330,10 @@ def _execute_topic_init(
     )
     if llm is not None:
         _pm = prompts or PromptManager()
+        _overlay = _get_evolution_overlay(run_dir, "topic_init")
         sp = _pm.for_stage(
             "topic_init",
+            evolution_overlay=_overlay,
             topic=topic,
             domains=domains,
             project_name=config.project.name,
@@ -1262,8 +1414,10 @@ def _execute_problem_decompose(
     goal_text = _read_prior_artifact(run_dir, "goal.md") or ""
     if llm is not None:
         _pm = prompts or PromptManager()
+        _overlay = _get_evolution_overlay(run_dir, "problem_decompose")
         sp = _pm.for_stage(
             "problem_decompose",
+            evolution_overlay=_overlay,
             topic=config.research.topic,
             goal_text=goal_text,
         )
@@ -1363,7 +1517,8 @@ def _execute_search_strategy(
     sources: list[dict[str, Any]] | None = None
     if llm is not None:
         _pm = prompts or PromptManager()
-        sp = _pm.for_stage("search_strategy", topic=topic, problem_tree=problem_tree)
+        _overlay = _get_evolution_overlay(run_dir, "search_strategy")
+        sp = _pm.for_stage("search_strategy", evolution_overlay=_overlay, topic=topic, problem_tree=problem_tree)
         resp = _chat_with_prompt(
             llm,
             sp.system,
@@ -1710,7 +1865,8 @@ def _execute_literature_collect(
     if not candidates and llm is not None:
         plan_text = _read_prior_artifact(run_dir, "search_plan.yaml") or ""
         _pm = prompts or PromptManager()
-        sp = _pm.for_stage("literature_collect", topic=topic, plan_text=plan_text)
+        _overlay = _get_evolution_overlay(run_dir, "literature_collect")
+        sp = _pm.for_stage("literature_collect", evolution_overlay=_overlay, topic=topic, plan_text=plan_text)
         resp = _chat_with_prompt(
             llm,
             sp.system,
@@ -1743,6 +1899,50 @@ def _execute_literature_collect(
     # Write candidates
     out = stage_dir / "candidates.jsonl"
     _write_jsonl(out, candidates)
+
+    # BUG-50 fix: Generate BibTeX from candidates when real search failed
+    # (LLM/placeholder fallback paths don't populate bibtex_entries)
+    if not bibtex_entries and candidates:
+        for c in candidates:
+            if c.get("is_placeholder"):
+                continue
+            _ck = c.get("cite_key", "")
+            if not _ck:
+                # Derive cite_key from first author surname + year
+                _authors = c.get("authors", [])
+                _surname = "unknown"
+                if isinstance(_authors, list) and _authors:
+                    _a0 = _authors[0] if isinstance(_authors[0], str) else (_authors[0].get("name", "") if isinstance(_authors[0], dict) else "")
+                    _surname = _a0.split()[-1].lower() if _a0.strip() else "unknown"
+                _yr = c.get("year", 2024)
+                _title_word = "".join(
+                    w[0] for w in str(c.get("title", "study")).split()[:3]
+                ).lower()
+                _ck = f"{_surname}{_yr}{_title_word}"
+            _title = c.get("title", "Untitled")
+            _year = c.get("year", 2024)
+            _author_str = ""
+            _raw_authors = c.get("authors", [])
+            if isinstance(_raw_authors, list):
+                _names = []
+                for _a in _raw_authors:
+                    if isinstance(_a, str):
+                        _names.append(_a)
+                    elif isinstance(_a, dict):
+                        _names.append(_a.get("name", ""))
+                _author_str = " and ".join(n for n in _names if n)
+            bibtex_entries.append(
+                f"@article{{{_ck},\n"
+                f"  title={{{_title}}},\n"
+                f"  author={{{_author_str or 'Unknown'}}},\n"
+                f"  year={{{_year}}},\n"
+                f"  url={{{c.get('url', '')}}},\n"
+                f"}}"
+            )
+        logger.info(
+            "Stage 4: Generated %d BibTeX entries from candidates (fallback)",
+            len(bibtex_entries),
+        )
 
     # Write references.bib (F2.4)
     artifacts = ["candidates.jsonl"]
@@ -1806,9 +2006,10 @@ def _execute_literature_screen(
         abstract = str(row.get("abstract", "")).lower()
         text_blob = f"{title} {abstract}"
         overlap = sum(1 for kw in topic_keywords if kw in text_blob)
-        # Require at least 2 keyword hits to survive pre-filter.
-        # A single hit (e.g. "network" in an unrelated field) is too permissive.
-        if overlap >= 2:
+        # T2.2: Relaxed from ≥2 to ≥1 keyword hit — previous threshold was
+        # too aggressive (94% rejection rate).  Single-keyword matches are
+        # still screened by the LLM in the next step.
+        if overlap >= 1:
             row["keyword_overlap"] = overlap
             filtered_rows.append(row)
         else:
@@ -1830,8 +2031,10 @@ def _execute_literature_screen(
     shortlist: list[dict[str, Any]] = []
     if llm is not None:
         _pm = prompts or PromptManager()
+        _overlay = _get_evolution_overlay(run_dir, "literature_screen")
         sp = _pm.for_stage(
             "literature_screen",
+            evolution_overlay=_overlay,
             topic=config.research.topic,
             domains=", ".join(config.research.domains)
             if config.research.domains
@@ -1849,17 +2052,38 @@ def _execute_literature_screen(
         payload = _safe_json_loads(resp.content, {})
         if isinstance(payload, dict) and isinstance(payload.get("shortlist"), list):
             shortlist = [row for row in payload["shortlist"] if isinstance(row, dict)]
+    # T2.2: Ensure minimum shortlist size of 15 for adequate related work
+    _MIN_SHORTLIST = 15
     if not shortlist:
         rows = (
-            filtered_rows[:6]
+            filtered_rows[:_MIN_SHORTLIST]
             if filtered_rows
-            else _parse_jsonl_rows(candidates_text)[:6]
+            else _parse_jsonl_rows(candidates_text)[:_MIN_SHORTLIST]
         )
         for idx, item in enumerate(rows):
-            item["relevance_score"] = round(0.75 - idx * 0.04, 3)
-            item["quality_score"] = round(0.72 - idx * 0.03, 3)
+            item["relevance_score"] = round(0.75 - idx * 0.02, 3)
+            item["quality_score"] = round(0.72 - idx * 0.015, 3)
             item["keep_reason"] = "Template screened entry"
             shortlist.append(item)
+    elif len(shortlist) < _MIN_SHORTLIST:
+        # T2.2: LLM returned too few — supplement from filtered candidates
+        existing_titles = {
+            str(s.get("title", "")).lower().strip() for s in shortlist
+        }
+        for row in filtered_rows:
+            if len(shortlist) >= _MIN_SHORTLIST:
+                break
+            title_lower = str(row.get("title", "")).lower().strip()
+            if title_lower and title_lower not in existing_titles:
+                row.setdefault("relevance_score", 0.5)
+                row.setdefault("quality_score", 0.5)
+                row.setdefault("keep_reason", "Supplemented to meet minimum shortlist")
+                shortlist.append(row)
+                existing_titles.add(title_lower)
+        logger.info(
+            "Stage 5: Supplemented shortlist to %d papers (minimum: %d)",
+            len(shortlist), _MIN_SHORTLIST,
+        )
     out = stage_dir / "shortlist.jsonl"
     _write_jsonl(out, shortlist)
     return StageResult(
@@ -1885,7 +2109,8 @@ def _execute_knowledge_extract(
     cards: list[dict[str, Any]] = []
     if llm is not None:
         _pm = prompts or PromptManager()
-        sp = _pm.for_stage("knowledge_extract", shortlist=shortlist)
+        _overlay = _get_evolution_overlay(run_dir, "knowledge_extract")
+        sp = _pm.for_stage("knowledge_extract", evolution_overlay=_overlay, shortlist=shortlist)
         resp = _chat_with_prompt(
             llm,
             sp.system,
@@ -1957,8 +2182,10 @@ def _execute_synthesis(
         cards_context = "\n\n".join(snippets)
     if llm is not None:
         _pm = prompts or PromptManager()
+        _overlay = _get_evolution_overlay(run_dir, "synthesis")
         sp = _pm.for_stage(
             "synthesis",
+            evolution_overlay=_overlay,
             topic=config.research.topic,
             cards_context=cards_context,
         )
@@ -2155,8 +2382,10 @@ def _execute_experiment_design(
                     _dg_block += _fw_docs
         except Exception:  # noqa: BLE001
             pass
+        _overlay = _get_evolution_overlay(run_dir, "experiment_design")
         sp = _pm.for_stage(
             "experiment_design",
+            evolution_overlay=_overlay,
             preamble=preamble,
             hypotheses=hypotheses,
             dataset_guidance=_dg_block,
@@ -2219,7 +2448,65 @@ def _execute_experiment_design(
                 resp.content[:200],
                 raw_yaml[:200] if raw_yaml else "<empty>",
             )
+            # BUG-12: Retry with a stricter, shorter prompt
+            if llm is not None:
+                logger.info("Stage 09: Retrying with strict YAML-only prompt...")
+                _retry_prompt = (
+                    "Output ONLY valid YAML. No prose, no markdown fences, no explanation.\n"
+                    f"Topic: {config.research.topic}\n"
+                    "Required keys: baselines, proposed_methods, ablations, "
+                    "datasets, metrics, objectives, risks, compute_budget.\n"
+                    "Each key maps to a list of strings."
+                )
+                _retry_resp = _chat_with_prompt(
+                    llm,
+                    "You output ONLY valid YAML. Nothing else.",
+                    _retry_prompt,
+                    max_tokens=4096,
+                )
+                try:
+                    _retry_parsed = yaml.safe_load(_retry_resp.content)
+                    if isinstance(_retry_parsed, dict):
+                        plan = _retry_parsed
+                        logger.info("Stage 09: Strict YAML retry succeeded.")
+                except yaml.YAMLError:
+                    pass
+
+    # BUG-12: Fallback 4 — extract method/baseline names from Stage 8 hypotheses
     if plan is None:
+        _hyp_text = _read_prior_artifact(run_dir, "hypotheses.md") or ""
+        if _hyp_text:
+            import re as _re_hyp
+            # Extract method-like names from hypothesis text
+            _method_candidates = _re_hyp.findall(
+                r"(?:proposed|our|novel|new)\s+(?:method|approach|algorithm|framework|model)[:\s]+[\"']?([A-Za-z][\w-]+)",
+                _hyp_text, _re_hyp.IGNORECASE,
+            )
+            _baseline_candidates = _re_hyp.findall(
+                r"(?:baseline|compare|existing|standard|traditional)\s+(?:method|approach|model)?[:\s]+[\"']?([A-Za-z][\w-]+)",
+                _hyp_text, _re_hyp.IGNORECASE,
+            )
+            if _method_candidates or _baseline_candidates:
+                logger.info(
+                    "Stage 09: Extracted names from hypotheses: methods=%s, baselines=%s",
+                    _method_candidates[:3], _baseline_candidates[:3],
+                )
+                plan = {
+                    "topic": config.research.topic,
+                    "generated": _utcnow_iso(),
+                    "objectives": ["Evaluate hypotheses with controlled experiments"],
+                    "datasets": ["primary_dataset"],
+                    "baselines": _baseline_candidates[:3] or ["baseline_1", "baseline_2"],
+                    "proposed_methods": _method_candidates[:3] or ["proposed_method"],
+                    "ablations": ["without_key_component", "simplified_version"],
+                    "metrics": [config.experiment.metric_key, "secondary_metric"],
+                    "risks": ["validity threats", "confounding variables"],
+                    "compute_budget": {"max_gpu": 1, "max_hours": 4},
+                }
+
+    if plan is None:
+        # BUG-12: Use domain-aware names instead of fully generic placeholders
+        _topic_prefix = config.research.topic.split()[0] if config.research.topic else "method"
         logger.warning(
             "Stage 09: LLM failed to produce valid experiment plan YAML. "
             "Using topic-derived fallback."
@@ -2229,8 +2516,8 @@ def _execute_experiment_design(
             "generated": _utcnow_iso(),
             "objectives": ["Evaluate hypotheses with controlled experiments"],
             "datasets": ["primary_dataset", "secondary_dataset"],
-            "baselines": ["established_method_1", "established_method_2"],
-            "proposed_methods": ["proposed_approach", "proposed_variant"],
+            "baselines": [f"{_topic_prefix}_baseline_1", f"{_topic_prefix}_baseline_2"],
+            "proposed_methods": [f"{_topic_prefix}_proposed", f"{_topic_prefix}_variant"],
             "ablations": ["without_key_component", "simplified_version"],
             "metrics": [config.experiment.metric_key, "secondary_metric"],
             "risks": ["validity threats", "confounding variables"],
@@ -2287,11 +2574,18 @@ def _execute_experiment_design(
                 plan["datasets"] = [
                     b["name"] for b in _benchmark_plan.selected_benchmarks
                 ]
-                # Normalize existing baselines to list (LLM may emit dict)
+                # Normalize existing baselines to list of strings
+                # BUG-35: LLM may emit baselines as dict, list of dicts,
+                # or list of strings — normalize all to list[str].
                 _baselines_from_plan = plan.get("baselines", [])
                 if isinstance(_baselines_from_plan, dict):
                     _baselines_from_plan = list(_baselines_from_plan.keys())
-                elif not isinstance(_baselines_from_plan, list):
+                elif isinstance(_baselines_from_plan, list):
+                    _baselines_from_plan = [
+                        item["name"] if isinstance(item, dict) else str(item)
+                        for item in _baselines_from_plan
+                    ]
+                else:
                     _baselines_from_plan = []
                 plan["baselines"] = [
                     bl["name"] for bl in _benchmark_plan.selected_baselines
@@ -2343,7 +2637,7 @@ def _execute_code_generation(
 ) -> StageResult:
     exp_plan = _read_prior_artifact(run_dir, "exp_plan.yaml") or ""
     metric = config.experiment.metric_key
-    max_repair = 3
+    max_repair = 5  # BUG-14: Increased from 3 to give more chances for critical bugs
     files: dict[str, str] = {}
     validation_log: list[str] = []
 
@@ -2635,8 +2929,10 @@ def _execute_code_generation(
             f"`{_md}` — use direction={'lower' if _md == 'minimize' else 'higher'} "
             f"in METRIC_DEF. You MUST NOT use the opposite direction."
         )
+        _overlay = _get_evolution_overlay(run_dir, "code_generation")
         sp = _pm.for_stage(
             "code_generation",
+            evolution_overlay=_overlay,
             topic=topic,
             metric=metric,
             pkg_hint=pkg_hint + "\n" + compute_budget + "\n" + extra_guidance,
@@ -2747,6 +3043,40 @@ def _execute_code_generation(
             validation = validate_code(files[fname])
         if not validation.ok:
             all_valid = False
+            # BUG-14: Log remaining issues prominently
+            logger.warning(
+                "Code validation FAILED for %s after %d repair attempts: %s",
+                fname, max_repair, validation.summary(),
+            )
+
+    # BUG-14: Block on critical validation failures (syntax/import errors)
+    if not all_valid:
+        _has_critical = False
+        for fname, code in files.items():
+            _v = validate_code(code)
+            if not _v.ok:
+                for issue in _v.issues:
+                    if issue.severity == "error" and issue.category in (
+                        "syntax", "import",
+                    ):
+                        _has_critical = True
+        if _has_critical:
+            logger.error(
+                "Stage 10: CRITICAL validation issues remain after %d repair "
+                "attempts. Blocking stage.", max_repair,
+            )
+            (stage_dir / "validation_report.md").write_text(
+                "# Code Validation Report\n\n"
+                f"**Status**: BLOCKED — critical issues remain after {max_repair} repairs\n\n"
+                + "\n".join(f"- {e}" for e in validation_log),
+                encoding="utf-8",
+            )
+            return StageResult(
+                stage=Stage.CODE_GENERATION,
+                status=StageStatus.FAILED,
+                artifacts=("validation_report.md",),
+                evidence_refs=(),
+            )
 
     # --- Write experiment directory ---
     exp_dir = stage_dir / "experiment"
@@ -2811,7 +3141,11 @@ def _execute_code_generation(
     # --- P1.2: If critical deep issues found, attempt one repair cycle ---
     critical_deep = [w for w in deep_warnings if any(
         kw in w for kw in ("UnboundLocalError", "unregistered", "does not exist",
-                           "empty or trivial subclass", "does NOT override")
+                           "empty or trivial subclass", "does NOT override",
+                           "Import-usage mismatch", "NameError",
+                           "was removed", "ptp()",
+                           "copy-paste", "identical method signatures",
+                           "identical AST", "NOT a real ablation")
     )]
     if critical_deep and llm is not None:
         logger.info(
@@ -2834,13 +3168,24 @@ def _execute_code_generation(
             f"- Every class must have a real implementation, not just `pass`\n"
             f"- Ablation classes MUST override the parent method that implements "
             f"the component being ablated (e.g., if ablating attention, override "
-            f"the attention method with a simpler alternative like mean pooling)\n\n"
+            f"the attention method with a simpler alternative like mean pooling)\n"
+            f"- IMPORT CONSISTENCY: if you write `from X import Y`, call `Y()` "
+            f"directly — NOT `X.Y()`. Mixing styles causes NameError.\n"
+            f"- NumPy 2.0: ndarray.ptp() was removed — use arr.max()-arr.min()\n"
+            f"- NumPy 2.0: np.bool/np.int/np.float removed — use builtins\n"
+            f"- Pretrained models (EfficientNet, ResNet, ViT) expect 224×224 input "
+            f"— add `transforms.Resize(224)` when using CIFAR (32×32) or similar\n"
+            f"- Copy-paste ablation: if two classes have identical bodies, REWRITE "
+            f"the ablation to genuinely remove/reduce a component (e.g., zero out "
+            f"attention weights, halve hidden dimensions, remove a loss term)\n"
+            f"- KD: teacher must be frozen, add projection layers if teacher_dim != "
+            f"student_dim, use temperature T=4 for soft targets\n\n"
             f"Current code:\n{all_code_ctx}\n"
         )
         try:
             repair_resp = _chat_with_prompt(
                 llm,
-                _pm.system("code_generation"),
+                _pm.prompts["code_generation"]["system"],
                 repair_prompt,
                 max_tokens=_code_max_tokens,
             )
@@ -2855,7 +3200,11 @@ def _execute_code_generation(
                     w for w in deep_warnings_after
                     if any(kw in w for kw in (
                         "UnboundLocalError", "unregistered", "does not exist",
-                        "empty or trivial subclass", "does NOT override"
+                        "empty or trivial subclass", "does NOT override",
+                        "Import-usage mismatch", "NameError",
+                        "was removed", "ptp()",
+                        "copy-paste", "identical method signatures",
+                        "identical AST", "NOT a real ablation"
                     ))
                 ])
                 logger.info(
@@ -2904,6 +3253,10 @@ def _execute_code_generation(
             f"API usage, tensor shape compatibility.\n"
             f"5. Is the code complex enough for a research paper? (Not trivial)\n"
             f"6. Are experimental conditions fairly compared (same seeds, data)?\n"
+            f"7. If using pretrained models (EfficientNet, ResNet, ViT), are input "
+            f"images resized to the model's expected size (e.g., 224x224)? CIFAR "
+            f"images are 32x32 and MUST be resized for pretrained models.\n"
+            f"8. Are imports consistent? `from X import Y` must use `Y()`, not `X.Y()`.\n"
         )
         try:
             review_resp = llm.chat(
@@ -2913,6 +3266,7 @@ def _execute_code_generation(
             )
             # Extract JSON from LLM response (may be wrapped in markdown fences)
             _review_text = review_resp.content if hasattr(review_resp, "content") else str(review_resp)
+            # Strip markdown JSON fences if present
             _review_text = _review_text.strip()
             if _review_text.startswith("```"):
                 _lines = _review_text.splitlines()
@@ -2966,7 +3320,7 @@ def _execute_code_generation(
                     try:
                         fix_resp = _chat_with_prompt(
                             llm,
-                            _pm.system("code_generation"),
+                            _pm.prompts["code_generation"]["system"],
                             fix_prompt,
                             max_tokens=_code_max_tokens,
                         )
@@ -3041,7 +3395,7 @@ def _execute_code_generation(
                 )
                 regen_resp = _chat_with_prompt(
                     llm,
-                    system=_pm.system("code_generation"),
+                    system=_pm.prompts["code_generation"]["system"],
                     user=regen_prompt,
                     max_tokens=_code_max_tokens,
                 )
@@ -3142,7 +3496,8 @@ def _execute_resource_planning(
     schedule: dict[str, Any] | None = None
     if llm is not None:
         _pm = prompts or PromptManager()
-        sp = _pm.for_stage("resource_planning", exp_plan=exp_plan)
+        _overlay = _get_evolution_overlay(run_dir, "resource_planning")
+        sp = _pm.for_stage("resource_planning", evolution_overlay=_overlay, exp_plan=exp_plan)
         resp = _chat_with_prompt(
             llm,
             sp.system,
@@ -4700,7 +5055,8 @@ def _execute_research_decision(
 
     if llm is not None:
         _pm = prompts or PromptManager()
-        sp = _pm.for_stage("research_decision", analysis=analysis)
+        _overlay = _get_evolution_overlay(run_dir, "research_decision")
+        sp = _pm.for_stage("research_decision", evolution_overlay=_overlay, analysis=analysis)
         _user = sp.user + _degenerate_hint
         resp = llm.chat(
             [{"role": "user", "content": _user}],
@@ -4726,9 +5082,23 @@ Generated: {_utcnow_iso()}
 
     # --- Extract structured decision ---
     decision = _parse_decision(decision_md)
+
+    # T3.1: Validate decision quality — check for minimum experiment rigor
+    _quality_warnings: list[str] = []
+    _dec_lower = decision_md.lower()
+    if "baseline" not in _dec_lower and "control" not in _dec_lower:
+        _quality_warnings.append("Decision text does not mention baselines")
+    if "seed" not in _dec_lower and "replicat" not in _dec_lower and "run" not in _dec_lower:
+        _quality_warnings.append("Decision text does not mention multi-seed/replicate runs")
+    if "metric" not in _dec_lower and "accuracy" not in _dec_lower and "loss" not in _dec_lower:
+        _quality_warnings.append("Decision text does not mention evaluation metrics")
+    if _quality_warnings:
+        logger.warning("T3.1: Decision quality warnings: %s", _quality_warnings)
+
     decision_payload = {
         "decision": decision,
         "raw_text_excerpt": decision_md[:500],
+        "quality_warnings": _quality_warnings,
         "generated": _utcnow_iso(),
     }
     (stage_dir / "decision_structured.json").write_text(
@@ -4790,8 +5160,10 @@ def _execute_paper_outline(
             _asg = _pm.block("academic_style_guide")
         except (KeyError, Exception):
             _asg = ""
+        _overlay = _get_evolution_overlay(run_dir, "paper_outline")
         sp = _pm.for_stage(
             "paper_outline",
+            evolution_overlay=_overlay,
             preamble=preamble,
             topic_constraint=_pm.block("topic_constraint", topic=config.research.topic),
             feedback=feedback,
@@ -4832,13 +5204,16 @@ def _execute_paper_outline(
     )
 
 
-def _collect_raw_experiment_metrics(run_dir: Path) -> str:
+def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
     """Collect raw experiment metric lines from stdout for paper writing.
 
-    Returns a formatted block that constrains the LLM to use only real numbers.
+    Returns a tuple of (formatted block, has_parsed_metrics).
+    ``has_parsed_metrics`` is True when at least one run had a non-empty
+    ``metrics`` dict in its JSON payload — a reliable signal of real data.
     """
     metric_lines: list[str] = []
     run_count = 0
+    has_parsed_metrics = False
 
     for stage_subdir in sorted(run_dir.glob("stage-*/runs")):
         for run_file in sorted(stage_subdir.glob("*.json")):
@@ -4860,10 +5235,18 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> str:
             # Extract from parsed metrics (check both 'metrics' and 'key_metrics')
             metrics = payload.get("metrics", {}) or payload.get("key_metrics", {})
             if isinstance(metrics, dict) and metrics:
+                has_parsed_metrics = True
                 for k, v in metrics.items():
                     metric_lines.append(f"  {k}: {v}")
 
             # Also extract from stdout for full detail
+            # BUG-23: Filter out infrastructure lines that are NOT experiment results
+            _INFRA_KEYS = {
+                "SEED_COUNT", "TIME_ESTIMATE", "TRAINING_STEPS",
+                "REGISTERED_CONDITIONS", "METRIC_DEF", "GPU_MEMORY",
+                "BATCH_SIZE", "NUM_WORKERS", "TOTAL_PARAMS",
+                "time_budget_sec", "max_epochs", "num_seeds",
+            }
             stdout = payload.get("stdout", "")
             if stdout:
                 for line in stdout.splitlines():
@@ -4872,6 +5255,9 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> str:
                         parts = line.rsplit(":", 1)
                         try:
                             float(parts[1].strip())
+                            key_part = parts[0].strip().split("/")[-1]  # last segment
+                            if key_part in _INFRA_KEYS:
+                                continue  # skip infrastructure lines
                             metric_lines.append(f"  {line}")
                         except (ValueError, TypeError, IndexError):
                             pass
@@ -4931,7 +5317,7 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> str:
                     metric_lines.append(f"  {_line}")
 
     if not metric_lines:
-        return ""
+        return "", has_parsed_metrics
 
     # Deduplicate while preserving order
     seen: set[str] = set()
@@ -4941,22 +5327,47 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> str:
             seen.add(line)
             unique.append(line)
 
-    # R19-5: Increase cap to 200 lines — rich experiments easily exceed 100
+    # BUG-29: Reformat raw metric lines into human-readable condition summaries
+    # to prevent LLM from pasting raw path-style lines into the paper
+    _grouped: dict[str, list[str]] = {}
+    _ungrouped: list[str] = []
+    for line in unique[:200]:
+        stripped = line.strip()
+        # Match pattern: condition/env/step/metric: value
+        parts = stripped.split("/")
+        if len(parts) >= 3 and ":" in parts[-1]:
+            cond = parts[0]
+            detail = "/".join(parts[1:])
+            _grouped.setdefault(cond, []).append(f"  - {detail}")
+        else:
+            _ungrouped.append(stripped)
+
+    formatted_lines: list[str] = []
+    if _grouped:
+        for cond, details in sorted(_grouped.items()):
+            formatted_lines.append(f"## Condition: {cond}")
+            formatted_lines.extend(details[:30])
+    if _ungrouped:
+        formatted_lines.extend(_ungrouped)
+
     return (
         f"\n\nACTUAL EXPERIMENT DATA (from {run_count} run(s) — use ONLY these numbers):\n"
         "```\n"
-        + "\n".join(unique[:200])
+        + "\n".join(formatted_lines[:200])
         + "\n```\n"
         "CRITICAL: Every number in the Results table MUST come from the data above. "
         "Do NOT round excessively, do NOT invent numbers, do NOT change values. "
         f"The experiment ran {run_count} time(s) — state this accurately in the methodology.\n"
-    )
+        "NEVER paste raw metric paths (like 'condition/env/step/metric: value') "
+        "into the paper. Always convert to formatted LaTeX tables or inline prose.\n"
+    ), has_parsed_metrics
 
 
 def _write_paper_sections(
     *,
     llm: LLMClient,
     pm: PromptManager,
+    run_dir: Path | None = None,
     preamble: str,
     topic_constraint: str,
     exp_metrics_instruction: str,
@@ -4978,8 +5389,10 @@ def _write_paper_sections(
     except (KeyError, Exception):  # noqa: BLE001
         _writing_structure = ""
 
+    _overlay = _get_evolution_overlay(run_dir, "paper_draft")
     system = pm.for_stage(
         "paper_draft",
+        evolution_overlay=_overlay,
         preamble=preamble,
         topic_constraint=topic_constraint,
         exp_metrics_instruction=exp_metrics_instruction,
@@ -5051,8 +5464,19 @@ def _write_paper_sections(
     if any(model_name.startswith(p) for p in ("gpt-5", "o3", "o4")):
         _paper_max_tokens = 24000
 
-    resp1 = _chat_with_prompt(llm, system, call1_user, max_tokens=_paper_max_tokens)
-    part1 = resp1.content.strip()
+    # T3.5: Retry once on failure, use placeholder if still fails
+    try:
+        resp1 = _chat_with_prompt(llm, system, call1_user, max_tokens=_paper_max_tokens, retries=1)
+        part1 = resp1.content.strip()
+    except Exception:  # noqa: BLE001
+        logger.error("Stage 17: Part 1 LLM call failed after retry — using placeholder")
+        part1 = (
+            "## Title\n[PLACEHOLDER — LLM call failed]\n\n"
+            "## Abstract\n[This section could not be generated due to an LLM error. "
+            "Please regenerate this stage.]\n\n"
+            "## Introduction\n[PLACEHOLDER]\n\n"
+            "## Related Work\n[PLACEHOLDER]"
+        )
     sections.append(part1)
     logger.info("Stage 17: Part 1 (Title+Abstract+Intro+Related Work) — %d chars", len(part1))
 
@@ -5084,8 +5508,15 @@ def _write_paper_sections(
         f"Outline:\n{outline}\n\n"
         "Output markdown with ## headers. Continue from where Part 1 ended."
     )
-    resp2 = _chat_with_prompt(llm, system, call2_user, max_tokens=_paper_max_tokens)
-    part2 = resp2.content.strip()
+    try:
+        resp2 = _chat_with_prompt(llm, system, call2_user, max_tokens=_paper_max_tokens, retries=1)
+        part2 = resp2.content.strip()
+    except Exception:  # noqa: BLE001
+        logger.error("Stage 17: Part 2 LLM call failed after retry — using placeholder")
+        part2 = (
+            "## Method\n[PLACEHOLDER — LLM call failed. Please regenerate this stage.]\n\n"
+            "## Experiments\n[PLACEHOLDER]"
+        )
     sections.append(part2)
     logger.info("Stage 17: Part 2 (Method+Experiments) — %d chars", len(part2))
 
@@ -5133,8 +5564,17 @@ def _write_paper_sections(
         "- Use \\begin{algorithm} or pseudocode notation, NOT \\begin{verbatim}\n\n"
         "Output markdown with ## headers. Do NOT include a References section."
     )
-    resp3 = _chat_with_prompt(llm, system, call3_user, max_tokens=_paper_max_tokens)
-    part3 = resp3.content.strip()
+    try:
+        resp3 = _chat_with_prompt(llm, system, call3_user, max_tokens=_paper_max_tokens, retries=1)
+        part3 = resp3.content.strip()
+    except Exception:  # noqa: BLE001
+        logger.error("Stage 17: Part 3 LLM call failed after retry — using placeholder")
+        part3 = (
+            "## Results\n[PLACEHOLDER — LLM call failed. Please regenerate this stage.]\n\n"
+            "## Discussion\n[PLACEHOLDER]\n\n"
+            "## Limitations\n[PLACEHOLDER]\n\n"
+            "## Conclusion\n[PLACEHOLDER]"
+        )
     sections.append(part3)
     logger.info("Stage 17: Part 3 (Results+Discussion+Limitations+Conclusion) — %d chars", len(part3))
 
@@ -5219,12 +5659,26 @@ def _validate_draft_quality(
     _bullet_re = re.compile(r"^\s*[-*]\s+", re.MULTILINE)
     _numbered_re = re.compile(r"^\s*\d+\.\s+", re.MULTILINE)
 
+    # BUG-24: Accumulate subsection (H3+) word counts into parent H2 sections
+    _subsection_words: dict[str, int] = {}
+    _current_parent = ""
+    for sec in sections_data:
+        if sec["level"] <= 2:
+            _current_parent = sec["heading_lower"]
+            _subsection_words.setdefault(_current_parent, 0)
+        else:
+            # Add subsection words to parent
+            _subsection_words[_current_parent] = (
+                _subsection_words.get(_current_parent, 0) + len(sec["body"].split())
+            )
+
     for sec in sections_data:
         if sec["level"] > 2:
             continue
         heading_lower: str = sec["heading_lower"]
         body: str = sec["body"]
-        word_count = len(body.split())
+        # BUG-24: Include subsection words in the parent's word count
+        word_count = len(body.split()) + _subsection_words.get(heading_lower, 0)
         canon = heading_lower
         if canon not in SECTION_WORD_TARGETS:
             canon = _SECTION_TARGET_ALIASES.get(heading_lower, "")
@@ -5833,9 +6287,16 @@ def _execute_paper_draft(
             )
 
     # Collect raw experiment stdout metrics as hard constraint for the paper
-    raw_metrics_block = _collect_raw_experiment_metrics(run_dir)
+    raw_metrics_block, _has_parsed_metrics = _collect_raw_experiment_metrics(run_dir)
     if raw_metrics_block:
-        has_real_metrics = True
+        # BUG-23: Raw stdout alone is not sufficient — require either
+        # metrics_summary data, parsed metrics from run JSONs,
+        # OR at least 3 condition= patterns in raw block
+        _has_condition_pattern = len(re.findall(
+            r"condition[=:]", raw_metrics_block, re.IGNORECASE
+        )) >= 3
+        if has_real_metrics or _has_parsed_metrics or _has_condition_pattern:
+            has_real_metrics = True
         exp_metrics_instruction += raw_metrics_block
 
     # R18-1 + R19-6: Inject paired statistical comparisons AND condition summaries
@@ -6102,6 +6563,15 @@ def _execute_paper_draft(
             _quality_warnings.append(
                 f"Analysis rated experiment quality {_analysis_rating}/10"
             )
+        # BUG-23: If quality rating is ≤ 2, force has_real_metrics = False
+        # to prevent fabricated results even if stdout had stray numbers
+        if _analysis_rating <= 2 and has_real_metrics:
+            logger.warning(
+                "BUG-23 guard: Analysis quality %d/10 ≤ 2 — "
+                "overriding has_real_metrics to False (experiment likely failed)",
+                _analysis_rating,
+            )
+            has_real_metrics = False
 
     # Check 2: Are baselines missing?
     _analysis_lower = analysis_text.lower()
@@ -6233,6 +6703,21 @@ def _execute_paper_draft(
                 len(_chart_files),
             )
 
+    # WS-5.5: Framework diagram placeholder instruction
+    exp_metrics_instruction += (
+        "\n\n## FRAMEWORK DIAGRAM PLACEHOLDER\n"
+        "In the Method/Approach section, include a placeholder for the methodology "
+        "framework overview figure. Insert this exactly:\n\n"
+        "```\n"
+        "![Framework Overview](charts/framework_diagram.png)\n"
+        "**Figure N.** Overview of the proposed methodology. "
+        "[A detailed framework diagram will be generated separately and inserted here.]\n"
+        "```\n\n"
+        "This figure should be referenced in the text as 'Figure N' and discussed briefly "
+        "(1-2 sentences describing the overall pipeline/architecture flow). "
+        "The actual image will be generated post-hoc using a text-to-image model.\n"
+    )
+
     # P5: Extract hyperparameters from results.json for paper Method section
     _hp_table = ""
     for _s14_dir in sorted(run_dir.glob("stage-14*")):
@@ -6317,7 +6802,9 @@ def _execute_paper_draft(
                 if isinstance(row.get("authors"), list) and row["authors"]:
                     first_author = row["authors"][0]
                     if isinstance(first_author, dict):
-                        authors_info = first_author.get("name", "")
+                        # BUG-38: name may be non-str (tuple/list) — force str
+                        _name = first_author.get("name", "")
+                        authors_info = _name if isinstance(_name, str) else str(_name)
                     elif isinstance(first_author, str):
                         authors_info = first_author
                     if len(row["authors"]) > 1:
@@ -6365,6 +6852,7 @@ def _execute_paper_draft(
         draft = _write_paper_sections(
             llm=llm,
             pm=_pm,
+            run_dir=run_dir,
             preamble=preamble,
             topic_constraint=topic_constraint,
             exp_metrics_instruction=exp_metrics_instruction,
@@ -6541,8 +7029,10 @@ def _execute_peer_review(
 
     if llm is not None:
         _pm = prompts or PromptManager()
+        _overlay = _get_evolution_overlay(run_dir, "peer_review")
         sp = _pm.for_stage(
             "peer_review",
+            evolution_overlay=_overlay,
             topic=config.research.topic,
             draft=draft,
             experiment_evidence=experiment_evidence,
@@ -6592,7 +7082,9 @@ def _execute_paper_revision(
     draft_word_count = len(draft.split())
 
     # R4-2: Collect real metrics for anti-fabrication guard in revision
-    raw_metrics_revision = _collect_raw_experiment_metrics(run_dir)
+    # BUG-47: _collect_raw_experiment_metrics returns tuple[str, bool], must unpack
+    _raw_metrics_tuple = _collect_raw_experiment_metrics(run_dir)
+    raw_metrics_revision = _raw_metrics_tuple[0] if isinstance(_raw_metrics_tuple, tuple) else (_raw_metrics_tuple or "")
     data_integrity_revision = ""
     if raw_metrics_revision:
         data_integrity_revision = (
@@ -6633,8 +7125,10 @@ def _execute_paper_revision(
             except Exception:  # noqa: BLE001
                 pass
 
+        _overlay = _get_evolution_overlay(run_dir, "paper_revision")
         sp = _pm.for_stage(
             "paper_revision",
+            evolution_overlay=_overlay,
             topic_constraint=_pm.block("topic_constraint", topic=config.research.topic),
             writing_structure=_ws_revision,
             draft=draft,
@@ -6740,15 +7234,55 @@ def _execute_quality_gate(
 ) -> StageResult:
     revised = _read_prior_artifact(run_dir, "paper_revised.md") or ""
     report: dict[str, Any] | None = None
+
+    # BUG-25: Load experiment summary for cross-checking
+    _exp_summary_text = _read_prior_artifact(run_dir, "experiment_summary.json") or ""
+    _exp_summary = _safe_json_loads(_exp_summary_text, {}) if _exp_summary_text else {}
+    _exp_failed = False
+    if isinstance(_exp_summary, dict):
+        _best_run = _exp_summary.get("best_run", {})
+        if isinstance(_best_run, dict):
+            _exp_failed = (
+                _best_run.get("status") == "failed"
+                and not _best_run.get("metrics")
+            )
+        # Also check if metrics_summary is empty
+        if not _exp_summary.get("metrics_summary"):
+            _exp_failed = True
+
     if llm is not None:
         _pm = prompts or PromptManager()
         # IMP-33: Evaluate the full paper instead of truncating to 12K chars.
         # Split into chunks if very long, but prefer sending the full text.
         paper_for_eval = revised[:40000] if len(revised) > 40000 else revised
+
+        # BUG-25: Inject experiment status into quality gate prompt
+        _exp_context = ""
+        if _exp_summary and isinstance(_exp_summary, dict):
+            _exp_status_keys = {
+                k: _exp_summary.get(k) for k in (
+                    "total_conditions", "total_metric_keys",
+                    "metrics_summary",
+                ) if _exp_summary.get(k) is not None
+            }
+            if _best_run := _exp_summary.get("best_run"):
+                _exp_status_keys["best_run_status"] = (
+                    _best_run.get("status") if isinstance(_best_run, dict) else str(_best_run)
+                )
+            _exp_context = (
+                "\n\nExperiment summary (for cross-checking reported numbers):\n"
+                + json.dumps(_exp_status_keys, indent=2, default=str)[:4000]
+                + "\n\nCross-check: If the experiment status is 'failed' with "
+                "empty metrics, any numerical results in tables constitute "
+                "fabrication. Penalize severely.\n"
+            )
+
+        _overlay = _get_evolution_overlay(run_dir, "quality_gate")
         sp = _pm.for_stage(
             "quality_gate",
+            evolution_overlay=_overlay,
             quality_threshold=str(config.research.quality_threshold),
-            revised=paper_for_eval,
+            revised=paper_for_eval + _exp_context,
         )
         resp = _chat_with_prompt(
             llm,
@@ -6760,11 +7294,48 @@ def _execute_quality_gate(
         parsed = _safe_json_loads(resp.content, {})
         if isinstance(parsed, dict):
             report = parsed
+    # BUG-25: If experiment failed with no metrics, cap the quality score
+    if report is not None and _exp_failed:
+        _orig_score = report.get("score_1_to_10", 5)
+        if isinstance(_orig_score, (int, float)) and _orig_score > 3:
+            report["score_1_to_10"] = min(_orig_score, 3.0)
+            report.setdefault("weaknesses", []).append(
+                "Experiment failed with no metrics — any reported numerical "
+                "results are unsupported and likely fabricated."
+            )
+            logger.warning(
+                "BUG-25: Experiment failed — capping quality score from %.1f to 3.0",
+                _orig_score,
+            )
     if report is None:
         report = _default_quality_report(config.research.quality_threshold)
     report.setdefault("generated", _utcnow_iso())
     (stage_dir / "quality_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"
+    )
+
+    # T2.1: Enforce quality gate — fail if score below threshold
+    score = report.get("score_1_to_10", 0)
+    verdict = report.get("verdict", "proceed")
+    threshold = config.research.quality_threshold or 5.0
+
+    if isinstance(score, (int, float)) and score < threshold:
+        logger.warning(
+            "Quality gate FAILED: score %.1f < threshold %.1f (verdict=%s)",
+            score, threshold, verdict,
+        )
+        return StageResult(
+            stage=Stage.QUALITY_GATE,
+            status=StageStatus.FAILED,
+            artifacts=("quality_report.json",),
+            evidence_refs=("stage-20/quality_report.json",),
+            error=f"Quality score {score:.1f}/10 below threshold {threshold:.1f}. "
+                  f"Paper needs revision before export.",
+        )
+
+    logger.info(
+        "Quality gate PASSED: score %.1f >= threshold %.1f",
+        score, threshold,
     )
     return StageResult(
         stage=Stage.QUALITY_GATE,
@@ -6789,8 +7360,10 @@ def _execute_knowledge_archive(
     preamble = _build_context_preamble(config, run_dir, include_goal=True)
     if llm is not None:
         _pm = prompts or PromptManager()
+        _overlay = _get_evolution_overlay(run_dir, "knowledge_archive")
         sp = _pm.for_stage(
             "knowledge_archive",
+            evolution_overlay=_overlay,
             preamble=preamble,
             decision=decision,
             analysis=analysis,
@@ -6856,7 +7429,8 @@ def _execute_export_publish(
     revised = _read_prior_artifact(run_dir, "paper_revised.md") or ""
     if llm is not None:
         _pm = prompts or PromptManager()
-        sp = _pm.for_stage("export_publish", revised=revised)
+        _overlay = _get_evolution_overlay(run_dir, "export_publish")
+        sp = _pm.for_stage("export_publish", evolution_overlay=_overlay, revised=revised)
         resp = _chat_with_prompt(
             llm,
             sp.system,
@@ -7187,6 +7761,14 @@ def _execute_export_publish(
                         encoding="utf-8",
                     )
                     artifacts.append("compilation_quality.json")
+                    # BUG-27: Warn if page count exceeds limit
+                    _page_limit = 10
+                    if _qc.page_count and _qc.page_count > _page_limit:
+                        logger.warning(
+                            "BUG-27: Paper is %d pages (limit %d). "
+                            "Consider tightening content in revision.",
+                            _qc.page_count, _page_limit,
+                        )
                 except Exception as _qc_exc:  # noqa: BLE001
                     logger.debug("Stage 22: Quality checks skipped: %s", _qc_exc)
             else:
@@ -7208,69 +7790,43 @@ def _execute_export_publish(
         logger.warning("LaTeX generation skipped: %s", exc)
 
     # WS-5.4: Generate result visualizations
+    # Priority: FigureAgent charts (stage-14) > fallback visualize.py charts
     try:
+        chart_dir = stage_dir / "charts"
+        chart_dir.mkdir(parents=True, exist_ok=True)
+        charts: list[Path] = []
+
+        # Check if FigureAgent produced charts in stage-14 (any version)
+        _fa_charts_found = False
+        for _fa_dir in sorted(run_dir.glob("stage-14*/charts"), reverse=True):
+            _fa_pngs = list(_fa_dir.glob("fig_*.png"))
+            if _fa_pngs:
+                import shutil
+                for _fa_png in _fa_pngs:
+                    dest = chart_dir / _fa_png.name
+                    shutil.copy2(_fa_png, dest)
+                    charts.append(dest)
+                _fa_charts_found = True
+                logger.info(
+                    "Stage 22: Copied %d FigureAgent charts from %s",
+                    len(_fa_pngs), _fa_dir,
+                )
+                break
+
+        # Always generate structured charts from visualize.py (different names)
         from researchclaw.experiment.visualize import generate_all_charts
-
-        charts = generate_all_charts(
+        _metric_dir = getattr(config.experiment, "metric_direction", "minimize")
+        _viz_charts = generate_all_charts(
             run_dir,
-            stage_dir / "charts",
+            chart_dir,
             metric_key=config.experiment.metric_key,
+            metric_direction=_metric_dir,
         )
-
-        # FIX-4: Also generate per-condition comparison from structured results
-        results_json_path = None
-        for sd in sorted(run_dir.glob("stage-*/runs/results.json")):
-            results_json_path = sd
-        if results_json_path is None:
-            for sd in sorted(run_dir.glob("stage-*/runs/sandbox/_project/results.json")):
-                results_json_path = sd
-
-        if results_json_path and results_json_path.exists():
-            try:
-                import matplotlib
-                matplotlib.use("Agg")
-                import matplotlib.pyplot as plt
-
-                chart_dir = stage_dir / "charts"
-                chart_dir.mkdir(parents=True, exist_ok=True)
-                sr = json.loads(results_json_path.read_text(encoding="utf-8"))
-                conditions = sr.get("conditions", sr.get("per_condition", {}))
-                if isinstance(conditions, dict) and conditions:
-                    cond_names = list(conditions.keys())
-                    metric_key = config.experiment.metric_key
-                    means = []
-                    stds = []
-                    for cn in cond_names:
-                        cd = conditions[cn]
-                        if isinstance(cd, dict):
-                            m = cd.get(f"{metric_key}_mean", cd.get("mean", cd.get(metric_key, 0)))
-                            s = cd.get(f"{metric_key}_std", cd.get("std", 0))
-                        else:
-                            m, s = 0, 0
-                        means.append(float(m) if m else 0)
-                        stds.append(float(s) if s else 0)
-
-                    fig, ax = plt.subplots(figsize=(max(6, len(cond_names) * 1.2), 5))
-                    x = range(len(cond_names))
-                    ax.bar(x, means, yerr=stds, color="#2196F3", alpha=0.8, capsize=4)
-                    ax.set_xlabel("Method")
-                    ax.set_ylabel(metric_key)
-                    ax.set_title(f"Method Comparison: {metric_key}")
-                    ax.set_xticks(list(x))
-                    ax.set_xticklabels(cond_names, rotation=30, ha="right", fontsize=9)
-                    ax.grid(True, axis="y", alpha=0.3)
-                    fig.tight_layout()
-                    chart_path = chart_dir / "method_comparison.png"
-                    fig.savefig(chart_path, dpi=150)
-                    plt.close(fig)
-                    charts.append(chart_path)
-                    logger.info("Stage 22: Generated method comparison chart")
-            except Exception as exc:
-                logger.warning("Stage 22: Method comparison chart failed: %s", exc)
+        charts.extend(_viz_charts)
 
         if charts:
             artifacts.append("charts/")
-            logger.info("Stage 22: Generated %d chart(s)", len(charts))
+            logger.info("Stage 22: Generated %d chart(s) total", len(charts))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Chart generation failed: %s", exc)
 
@@ -7408,6 +7964,21 @@ def _execute_export_publish(
                 "Stage 22: Packaged single-file code release with %d deps",
                 len(requirements),
             )
+    # WS-5.5: Generate framework diagram prompt for methodology section
+    try:
+        _framework_prompt = _generate_framework_diagram_prompt(
+            final_paper, config, llm=llm
+        )
+        if _framework_prompt:
+            _chart_dir = stage_dir / "charts"
+            _chart_dir.mkdir(parents=True, exist_ok=True)
+            (_chart_dir / "framework_diagram_prompt.md").write_text(
+                _framework_prompt, encoding="utf-8"
+            )
+            logger.info("Stage 22: Generated framework diagram prompt → charts/framework_diagram_prompt.md")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Stage 22: Framework diagram prompt generation skipped: %s", exc)
+
     return StageResult(
         stage=Stage.EXPORT_PUBLISH,
         status=StageStatus.DONE,
@@ -7635,6 +8206,18 @@ def _execute_citation_verify(
     if low_relevance_keys:
         verified_bib = _remove_bibtex_entries(verified_bib, low_relevance_keys)
 
+    # BUG-26: If verification stripped >50% of entries (e.g. due to rate limiting),
+    # fall back to the original bib to avoid breaking the paper's references
+    original_count = len(re.findall(r"@\w+\{", bib_text))
+    verified_count = len(re.findall(r"@\w+\{", verified_bib))
+    if original_count > 0 and verified_count < original_count * 0.5:
+        logger.warning(
+            "Stage 23: Verification stripped %d→%d entries (>50%% loss). "
+            "Keeping original bib to avoid breaking references.",
+            original_count, verified_count,
+        )
+        verified_bib = bib_text
+
     # IMP-1: Also prune uncited entries from verified bib
     if paper_text.strip():
         _vbib_keys = set(re.findall(r"@\w+\{([^,]+),", verified_bib))
@@ -7814,7 +8397,69 @@ def execute_stage(
                     )
                     break
 
-    if result.status == StageStatus.DONE and gate_required(stage, config.security.hitl_required_stages):
+    # --- MetaClaw PRM quality gate evaluation ---
+    try:
+        mc_bridge = getattr(config, "metaclaw_bridge", None)
+        if (
+            mc_bridge
+            and getattr(mc_bridge, "enabled", False)
+            and result.status == StageStatus.DONE
+        ):
+            mc_prm = getattr(mc_bridge, "prm", None)
+            if mc_prm and getattr(mc_prm, "enabled", False):
+                prm_stages = getattr(mc_prm, "gate_stages", (5, 9, 15, 20))
+                if int(stage) in prm_stages:
+                    from researchclaw.metaclaw_bridge.prm_gate import ResearchPRMGate
+
+                    prm_gate = ResearchPRMGate.from_bridge_config(mc_prm)
+                    if prm_gate is not None:
+                        # Read stage output for PRM evaluation
+                        output_text = ""
+                        for art in result.artifacts:
+                            art_path = stage_dir / art
+                            if art_path.exists() and art_path.is_file():
+                                try:
+                                    output_text += art_path.read_text(encoding="utf-8")[:4000]
+                                except (UnicodeDecodeError, OSError):
+                                    pass
+                        if output_text:
+                            prm_score = prm_gate.evaluate_stage(int(stage), output_text)
+                            logger.info(
+                                "MetaClaw PRM score for stage %d: %.1f",
+                                int(stage),
+                                prm_score,
+                            )
+                            # Write PRM score to stage health
+                            import json as _prm_json
+
+                            prm_report = {
+                                "stage": int(stage),
+                                "prm_score": prm_score,
+                                "model": prm_gate.model,
+                                "votes": prm_gate.votes,
+                            }
+                            (stage_dir / "prm_score.json").write_text(
+                                _prm_json.dumps(prm_report, indent=2),
+                                encoding="utf-8",
+                            )
+                            # If PRM score is -1 (fail), mark stage as failed
+                            if prm_score == -1.0:
+                                logger.warning(
+                                    "MetaClaw PRM rejected stage %d output",
+                                    int(stage),
+                                )
+                                result = StageResult(
+                                    stage=result.stage,
+                                    status=StageStatus.FAILED,
+                                    artifacts=result.artifacts,
+                                    error="PRM quality gate: output below quality threshold",
+                                    decision="retry",
+                                    evidence_refs=result.evidence_refs,
+                                )
+    except Exception:  # noqa: BLE001
+        logger.warning("MetaClaw PRM evaluation failed (non-blocking)")
+
+    if gate_required(stage, config.security.hitl_required_stages):
         if auto_approve_gates:
             if bridge.use_memory:
                 adapters.memory.append("gates", f"{run_id}:{int(stage)}:auto-approved")

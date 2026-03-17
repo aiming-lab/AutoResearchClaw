@@ -71,6 +71,11 @@ class LLMConfig:
     retry_base_delay: float = 2.0
     timeout_sec: int = 300
     user_agent: str = _DEFAULT_USER_AGENT
+    # MetaClaw bridge: extra headers for proxy requests
+    extra_headers: dict[str, str] = field(default_factory=dict)
+    # MetaClaw bridge: fallback URL if primary (proxy) is unreachable
+    fallback_url: str = ""
+    fallback_api_key: str = ""
 
 
 class LLMClient:
@@ -82,16 +87,38 @@ class LLMClient:
 
     @classmethod
     def from_rc_config(cls, rc_config: Any) -> LLMClient:
+        api_key = str(
+            rc_config.llm.api_key
+            or os.environ.get(rc_config.llm.api_key_env, "")
+            or ""
+        )
+
+        # MetaClaw bridge: if enabled, point to proxy and set up fallback
+        bridge = getattr(rc_config, "metaclaw_bridge", None)
+        base_url = rc_config.llm.base_url
+        fallback_url = ""
+        fallback_api_key = ""
+
+        if bridge and getattr(bridge, "enabled", False):
+            # Redirect to MetaClaw proxy; original URL becomes fallback
+            fallback_url = base_url
+            fallback_api_key = api_key
+            base_url = bridge.proxy_url
+            if bridge.fallback_url:
+                fallback_url = bridge.fallback_url
+            if bridge.fallback_api_key:
+                fallback_api_key = bridge.fallback_api_key
+            # Proxy doesn't require auth if proxy_api_key is empty
+            api_key = api_key  # keep same key — proxy passes it through
+
         return cls(
             LLMConfig(
-                base_url=rc_config.llm.base_url,
-                api_key=str(
-                    rc_config.llm.api_key
-                    or os.environ.get(rc_config.llm.api_key_env, "")
-                    or ""
-                ),
+                base_url=base_url,
+                api_key=api_key,
                 primary_model=rc_config.llm.primary_model,
                 fallback_models=list(rc_config.llm.fallback_models or []),
+                fallback_url=fallback_url,
+                fallback_api_key=fallback_api_key,
             )
         )
 
@@ -260,18 +287,45 @@ class LLMClient:
         payload = json.dumps(body).encode("utf-8")
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
 
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={
-                "Authorization": f"Bearer {self.config.api_key}",
-                "Content-Type": "application/json",
-                "User-Agent": self.config.user_agent,
-            },
-        )
+        headers = {
+            "Authorization": f"Bearer {self.config.api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": self.config.user_agent,
+        }
+        # MetaClaw bridge: inject extra headers (session ID, stage info, etc.)
+        headers.update(self.config.extra_headers)
 
-        with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
-            data = json.loads(resp.read())
+        req = urllib.request.Request(url, data=payload, headers=headers)
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
+                data = json.loads(resp.read())
+        except (urllib.error.URLError, OSError) as exc:
+            # MetaClaw bridge: fallback to direct LLM if proxy unreachable
+            if self.config.fallback_url:
+                logger.warning(
+                    "Primary endpoint unreachable, falling back to %s: %s",
+                    self.config.fallback_url,
+                    exc,
+                )
+                fallback_url = (
+                    f"{self.config.fallback_url.rstrip('/')}/chat/completions"
+                )
+                fallback_key = self.config.fallback_api_key or self.config.api_key
+                fallback_headers = {
+                    "Authorization": f"Bearer {fallback_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": self.config.user_agent,
+                }
+                fallback_req = urllib.request.Request(
+                    fallback_url, data=payload, headers=fallback_headers
+                )
+                with urllib.request.urlopen(
+                    fallback_req, timeout=self.config.timeout_sec
+                ) as resp:
+                    data = json.loads(resp.read())
+            else:
+                raise
 
         # Handle API error responses (e.g., {"error": {"message": "..."}})
         if "error" in data:

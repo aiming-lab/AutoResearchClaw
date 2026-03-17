@@ -13,7 +13,7 @@
 <p align="center">
   <a href="../LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
-  <a href="#testing"><img src="https://img.shields.io/badge/Tests-1183%20passed-brightgreen?logo=pytest&logoColor=white" alt="1183 Tests Passed"></a>
+  <a href="#testing"><img src="https://img.shields.io/badge/Tests-1284%20passed-brightgreen?logo=pytest&logoColor=white" alt="1284 Tests Passed"></a>
   <a href="https://github.com/aiming-lab/AutoResearchClaw"><img src="https://img.shields.io/badge/GitHub-AutoResearchClaw-181717?logo=github" alt="GitHub"></a>
   <a href="#openclaw-integration"><img src="https://img.shields.io/badge/OpenClaw-Compatible-ff4444?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==" alt="OpenClaw Compatible"></a>
 </p>
@@ -49,7 +49,7 @@ pip install -e . && researchclaw run --topic "Your research idea here" --auto-ap
 
 Du hast eine Idee. Du willst ein Paper. **Das war's.**
 
-AutoResearchClaw nimmt ein Forschungsthema und erstellt autonom ein vollständiges wissenschaftliches Paper — mit echter Literatur von arXiv und Semantic Scholar (Multi-Source, arXiv-first zur Vermeidung von Rate-Limiting), hardwarebewussten Sandbox-Experimenten (automatische GPU/MPS/CPU-Erkennung), statistischer Analyse, Peer-Review und konferenzfertigem LaTeX (Ziel: 5.000–6.500 Wörter für NeurIPS/ICML/ICLR). Kein Babysitting. Kein Hin-und-her-Kopieren zwischen Tools.
+AutoResearchClaw nimmt ein Forschungsthema und erstellt autonom ein vollständiges wissenschaftliches Paper — mit echter Literatur von OpenAlex, Semantic Scholar und arXiv (Multi-Source), hardwarebewussten Sandbox-Experimenten (automatische GPU/MPS/CPU-Erkennung), statistischer Analyse, Peer-Review und konferenzfertigem LaTeX (Ziel: 5.000–6.500 Wörter für NeurIPS/ICML/ICLR). Kein Babysitting. Kein Hin-und-her-Kopieren zwischen Tools.
 
 <table>
 <tr><td>📄</td><td><code>paper_draft.md</code></td><td>Vollständiges wissenschaftliches Paper (Einleitung, Verwandte Arbeiten, Methode, Experimente, Ergebnisse, Fazit)</td></tr>
@@ -229,7 +229,7 @@ Phase D: Experimentdesign             Phase H: Finalisierung
 |-------|-------------|
 | **A: Planung** | LLM zerlegt das Thema in einen strukturierten Problembaum mit Forschungsfragen |
 | **A+: Hardware** | Automatische GPU-Erkennung (NVIDIA CUDA / Apple MPS / nur CPU), Warnung bei eingeschränkter Hardware, Codegenerierung wird entsprechend angepasst |
-| **B: Literatur** | Multi-Source-Suche (arXiv-first, dann Semantic Scholar) nach echten Papern, Relevanzscreening, Extraktion von Wissenskarten |
+| **B: Literatur** | Multi-Source-Suche (OpenAlex → Semantic Scholar → arXiv) nach echten Papern, Relevanzscreening, Extraktion von Wissenskarten |
 | **C: Synthese** | Clustering der Ergebnisse, Identifizierung von Forschungslücken, Generierung testbarer Hypothesen via Multi-Agenten-Debatte |
 | **D: Design** | Experimentplan entwerfen, hardwarebewussten ausführbaren Python-Code generieren (GPU-Stufe → Paketauswahl), Ressourcenbedarf schätzen |
 | **E: Ausführung** | Experimente in Sandbox ausführen, NaN/Inf und Laufzeitfehler erkennen, Code via gezielter LLM-Reparatur selbst heilen |
@@ -331,7 +331,7 @@ Der `deliverables/`-Ordner ist **kompilierbereit** — er enthält die Konferenz
 
 ### 📚 Multi-Source-Literatursuche
 
-Stufe 4 durchsucht **echte akademische APIs** — keine LLM-halluzinierten Paper. Verwendet eine **arXiv-first**-Strategie zur Vermeidung von Semantic-Scholar-Rate-Limiting.
+Stufe 4 durchsucht **echte akademische APIs** — keine LLM-halluzinierten Paper. Verwendet eine **OpenAlex-first**-Strategie (OpenAlex → Semantic Scholar → arXiv) zur optimalen Abdeckung bei minimalem Rate-Limiting.
 
 - **arXiv API** (primär) — Preprints mit echten arXiv-IDs und Metadaten, keine Rate-Limits
 - **Semantic Scholar API** (sekundär) — echte Paper mit Titeln, Abstracts, Venues, Zitationszahlen, DOIs
