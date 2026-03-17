@@ -705,6 +705,65 @@ def test_package_deliverables_includes_style_files(
     assert "neurips_2025.sty" in manifest["files"]
 
 
+# ── Atomic checkpoint write tests ──
+
+
+def test_write_checkpoint_uses_atomic_rename(run_dir: Path) -> None:
+    """Checkpoint must be written via temp file + rename, not direct write"""
+    rc_runner._write_checkpoint(run_dir, Stage.TOPIC_INIT, "run-atomic")
+    cp = run_dir / "checkpoint.json"
+    assert cp.exists()
+    data = json.loads(cp.read_text(encoding="utf-8"))
+    assert data["last_completed_stage"] == int(Stage.TOPIC_INIT)
+    assert data["run_id"] == "run-atomic"
+
+
+def test_write_checkpoint_leaves_no_temp_files(run_dir: Path) -> None:
+    """Atomic write must clean up temp files on success"""
+    rc_runner._write_checkpoint(run_dir, Stage.TOPIC_INIT, "run-clean")
+    temps = list(run_dir.glob("*.tmp"))
+    assert temps == [], f"Leftover temp files: {temps}"
+
+
+def test_write_checkpoint_preserves_old_on_write_failure(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the temp-file write fails, the existing checkpoint must survive"""
+    import builtins
+
+    rc_runner._write_checkpoint(run_dir, Stage.TOPIC_INIT, "run-ok")
+
+    original_open = builtins.open
+
+    def _exploding_open(path, *args, **kwargs):
+        # mkstemp returns an fd (int), then we open(fd, ...) — intercept that
+        if isinstance(path, int):
+            import os
+            real_path = os.fspath(os.readlink(f"/dev/fd/{path}")) if hasattr(os, "readlink") else ""
+            # Just blow up on any fd-based open to simulate write failure
+            raise OSError("disk full")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _exploding_open)
+    with pytest.raises(OSError):
+        rc_runner._write_checkpoint(run_dir, Stage.PROBLEM_DECOMPOSE, "run-ok")
+
+    # Original checkpoint must be intact
+    data = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    assert data["last_completed_stage"] == int(Stage.TOPIC_INIT)
+    # Temp file must be cleaned up
+    assert list(run_dir.glob("checkpoint_*.tmp")) == []
+
+
+def test_write_checkpoint_overwrites_previous(run_dir: Path) -> None:
+    """A second checkpoint call must fully replace the first"""
+    rc_runner._write_checkpoint(run_dir, Stage.TOPIC_INIT, "run-1")
+    rc_runner._write_checkpoint(run_dir, Stage.PROBLEM_DECOMPOSE, "run-1")
+    data = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    assert data["last_completed_stage"] == int(Stage.PROBLEM_DECOMPOSE)
+    assert data["last_completed_name"] == Stage.PROBLEM_DECOMPOSE.name
+
+
 def test_package_deliverables_called_after_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     run_dir: Path,
