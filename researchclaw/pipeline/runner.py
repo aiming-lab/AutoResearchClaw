@@ -4,6 +4,7 @@ import json
 import importlib
 import logging
 import shutil
+import tempfile
 import time as _time
 from pathlib import Path
 
@@ -68,16 +69,22 @@ def _write_pipeline_summary(run_dir: Path, summary: dict[str, object]) -> None:
 
 
 def _write_checkpoint(run_dir: Path, stage: Stage, run_id: str) -> None:
-    """Write checkpoint after successful stage completion."""
+    """Write checkpoint atomically via temp file + rename to prevent corruption"""
     checkpoint = {
         "last_completed_stage": int(stage),
         "last_completed_name": stage.name,
         "run_id": run_id,
         "timestamp": _utcnow_iso(),
     }
-    (run_dir / "checkpoint.json").write_text(
-        json.dumps(checkpoint, indent=2), encoding="utf-8"
-    )
+    target = run_dir / "checkpoint.json"
+    fd, tmp_path = tempfile.mkstemp(dir=run_dir, suffix=".tmp", prefix="checkpoint_")
+    try:
+        with open(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(checkpoint, indent=2))
+        Path(tmp_path).replace(target)
+    except BaseException:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
 
 
 def _write_heartbeat(run_dir: Path, stage: Stage, run_id: str) -> None:
