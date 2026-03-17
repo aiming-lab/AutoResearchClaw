@@ -622,3 +622,159 @@ class TestRendererCwd:
             cwd = call_kwargs[1]["cwd"] if isinstance(call_kwargs[1], dict) else None
             # CWD should be output_dir, NOT output_dir.parent
             assert cwd == str(output_dir.resolve())
+
+
+# =========================================================================
+# chat(strip_thinking=True) — opt-in parameter (Issue #1 fix)
+# =========================================================================
+
+class TestChatStripThinking:
+    """Verify the opt-in strip_thinking parameter on LLMClient.chat()."""
+
+    def test_strip_thinking_false_by_default(self):
+        """Default chat() should NOT strip <think> tags."""
+        from researchclaw.llm.client import LLMClient, LLMConfig, LLMResponse
+
+        config = LLMConfig(
+            base_url="http://fake",
+            api_key="fake-key",
+            primary_model="test-model",
+        )
+        client = LLMClient(config)
+
+        response_with_think = (
+            '<think>internal reasoning</think>The actual answer is 42.'
+        )
+        fake_api_response = {
+            "choices": [{
+                "message": {"content": response_with_think},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            "model": "test-model",
+        }
+
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = json.dumps(fake_api_response).encode()
+            mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = mock.MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+
+            result = client.chat(
+                [{"role": "user", "content": "test"}],
+                strip_thinking=False,
+            )
+            # With strip_thinking=False, <think> tags are preserved
+            assert "<think>" in result.content
+
+    def test_strip_thinking_true_removes_tags(self):
+        """chat(strip_thinking=True) should strip <think> tags."""
+        from researchclaw.llm.client import LLMClient, LLMConfig
+
+        config = LLMConfig(
+            base_url="http://fake",
+            api_key="fake-key",
+            primary_model="test-model",
+        )
+        client = LLMClient(config)
+
+        response_with_think = (
+            '<think>internal reasoning</think>The actual answer is 42.'
+        )
+        fake_api_response = {
+            "choices": [{
+                "message": {"content": response_with_think},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            "model": "test-model",
+        }
+
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = json.dumps(fake_api_response).encode()
+            mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+            mock_resp.__exit__ = mock.MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_resp
+
+            result = client.chat(
+                [{"role": "user", "content": "test"}],
+                strip_thinking=True,
+            )
+            # With strip_thinking=True, <think> tags are removed
+            assert "<think>" not in result.content
+            assert "The actual answer is 42." in result.content
+
+
+# =========================================================================
+# LaTeX converter — display math $$...$$ fix
+# =========================================================================
+
+class TestLatexDisplayMath:
+    """Verify the $$...$$ → equation environment fix in converter.py."""
+
+    def test_dollar_dollar_to_equation(self):
+        """$$...$$ display math should become \\begin{equation}."""
+        from researchclaw.templates.converter import _convert_block
+
+        md = (
+            "Some text before.\n"
+            "\n"
+            "$$\\alpha_{ij} = \\frac{x}{y}$$\n"
+            "\n"
+            "Some text after."
+        )
+        result = _convert_block(md)
+        assert "\\begin{equation}" in result
+        assert "\\end{equation}" in result
+        assert "\\alpha_{ij}" in result
+        # Should NOT contain escaped $$
+        assert "\\$\\$" not in result
+
+    def test_multiline_dollar_dollar(self):
+        """$$...$$ spanning multiple lines should also convert."""
+        from researchclaw.templates.converter import _convert_block
+
+        md = (
+            "$$\n"
+            "\\mathcal{L} = -\\log \\frac{a}{b}\n"
+            "$$\n"
+        )
+        result = _convert_block(md)
+        assert "\\begin{equation}" in result
+        assert "\\mathcal{L}" in result
+
+    def test_inline_dollar_dollar_not_escaped(self):
+        """$$ in inline context should not be escaped to \\$\\$."""
+        from researchclaw.templates.converter import _convert_inline
+
+        text = "The formula $$x+y$$ is important"
+        result = _convert_inline(text)
+        # Should not contain \\textasciicircum or \\$
+        assert "\\textasciicircum" not in result
+
+
+# =========================================================================
+# LaTeX converter — figure [t] placement
+# =========================================================================
+
+class TestLatexFigurePlacement:
+    """Verify figures use [t] placement specifier."""
+
+    def test_figure_uses_top_placement(self):
+        from researchclaw.templates.converter import _render_figure
+
+        result = _render_figure("Test Caption", "charts/test.png")
+        assert "\\begin{figure}[t]" in result
+        assert "[ht]" not in result
+
+    def test_figure_has_centering(self):
+        from researchclaw.templates.converter import _render_figure
+
+        result = _render_figure("My Figure", "path/to/image.png")
+        assert "\\centering" in result
+        assert "\\includegraphics" in result
+        assert "\\caption{My Figure}" in result
+        assert "\\label{fig:" in result
+
