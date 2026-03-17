@@ -37,7 +37,7 @@ class ACPConfig:
     cwd: str = "."
     acpx_command: str = ""  # auto-detect if empty
     session_name: str = "researchclaw"
-    timeout_sec: int = 600  # per-prompt timeout
+    timeout_sec: int = 1800  # per-prompt timeout
 
 
 def _find_acpx() -> str | None:
