@@ -270,6 +270,9 @@ def _load_hardware_profile(run_dir: Path) -> dict[str, Any] | None:
 
 
 def _extract_yaml_block(text: str) -> str:
+    # Strip Claude extended thinking tags that break YAML parsing (#27)
+    import re
+    text = re.sub(r"\[thinking\].*?\[/thinking\]", "", text, flags=re.DOTALL).strip()
     if "```yaml" in text:
         return text.split("```yaml", 1)[1].split("```", 1)[0].strip()
     if "```yml" in text:
@@ -280,6 +283,9 @@ def _extract_yaml_block(text: str) -> str:
 
 
 def _safe_json_loads(text: str, default: Any) -> Any:
+    # Strip Claude extended thinking tags before JSON parsing (#27)
+    import re
+    text = re.sub(r"\[thinking\].*?\[/thinking\]", "", text, flags=re.DOTALL).strip()
     try:
         return json.loads(text)
     except Exception:  # noqa: BLE001
