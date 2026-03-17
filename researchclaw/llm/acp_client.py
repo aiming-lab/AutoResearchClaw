@@ -136,7 +136,7 @@ class ACPClient:
             return
         try:
             subprocess.run(
-                [acpx, "--cwd", self._abs_cwd(),
+                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "sessions", "close",
                  self.config.session_name],
                 capture_output=True, timeout=15,
@@ -176,7 +176,7 @@ class ACPClient:
 
         # Use 'ensure' which finds existing or creates new
         result = subprocess.run(
-            [acpx, "--cwd", self._abs_cwd(),
+            [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
              self.config.agent, "sessions", "ensure",
              "--name", self.config.session_name],
             capture_output=True, text=True, timeout=30,
@@ -184,7 +184,7 @@ class ACPClient:
         if result.returncode != 0:
             # Fall back to 'new'
             result = subprocess.run(
-                [acpx, "--cwd", self._abs_cwd(),
+                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "sessions", "new",
                  "--name", self.config.session_name],
                 capture_output=True, text=True, timeout=30,
@@ -224,7 +224,7 @@ class ACPClient:
     def _send_prompt_cli(self, acpx: str, prompt: str) -> str:
         """Send prompt as a CLI argument (original path)."""
         result = subprocess.run(
-            [acpx, "--approve-all", "--cwd", self._abs_cwd(),
+            [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
              self.config.agent, "-s", self.config.session_name,
              prompt],
             capture_output=True, text=True,
@@ -254,7 +254,7 @@ class ACPClient:
             )
 
             result = subprocess.run(
-                [acpx, "--approve-all", "--cwd", self._abs_cwd(),
+                [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "-s", self.config.session_name,
                  short_prompt],
                 capture_output=True, text=True,
