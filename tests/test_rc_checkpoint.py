@@ -127,6 +127,33 @@ class TestContentMetrics:
         metrics = _collect_content_metrics(tmp_path)
         assert metrics["citation_verify_score"] is None
 
+    def test_metrics_with_non_dict_summary(self, tmp_path: Path):
+        """Must not raise NameError when 'summary' is not a dict"""
+        verify_dir = tmp_path / "stage-23"
+        verify_dir.mkdir()
+        (verify_dir / "verification_report.json").write_text(
+            json.dumps({"summary": "unexpected string"}),
+            encoding="utf-8",
+        )
+        metrics = _collect_content_metrics(tmp_path)
+        assert metrics["total_citations"] is None
+        assert metrics["verified_citations"] is None
+        assert metrics["citation_verify_score"] is None
+
+    def test_metrics_with_summary_missing_fields(self, tmp_path: Path):
+        """summary dict without total/verified should not crash"""
+        verify_dir = tmp_path / "stage-23"
+        verify_dir.mkdir()
+        (verify_dir / "verification_report.json").write_text(
+            json.dumps({"summary": {"notes": "incomplete"}}),
+            encoding="utf-8",
+        )
+        metrics = _collect_content_metrics(tmp_path)
+        # total and verified default to 0; no division by zero
+        assert metrics["total_citations"] == 0
+        assert metrics["verified_citations"] == 0
+        assert metrics["citation_verify_score"] is None
+
     def test_summary_includes_content_metrics(self, tmp_path: Path):
         results = [
             StageResult(
