@@ -20,6 +20,8 @@ from typing import Any
 
 from researchclaw.agents.base import BaseAgent, AgentStepResult
 from researchclaw.agents.figure_agent.style_config import get_style_preamble
+from researchclaw.utils.sanitize import sanitize_figure_id
+from researchclaw.utils.thinking_tags import strip_thinking_tags
 
 logger = logging.getLogger(__name__)
 
@@ -448,7 +450,7 @@ class CodeGenAgent(BaseAgent):
         critic_feedback: dict[str, Any] | None,
     ) -> str:
         """Generate a plotting script for a single figure."""
-        figure_id = fig_spec.get("figure_id", "figure")
+        figure_id = sanitize_figure_id(fig_spec.get("figure_id", "figure"))
         # BUG-20: Use absolute path to avoid CWD-relative savefig errors
         output_path = str((Path(output_dir) / f"{figure_id}.png").resolve())
         title = fig_spec.get("title", "")
@@ -805,6 +807,9 @@ class CodeGenAgent(BaseAgent):
 
         raw = self._chat(system_prompt, user_prompt, max_tokens=4096, temperature=0.3)
 
+        # Strip reasoning model thinking tags before parsing
+        raw = strip_thinking_tags(raw)
+
         # Strip markdown fences
         script = self._strip_fences(raw)
 
@@ -875,6 +880,11 @@ class CodeGenAgent(BaseAgent):
             )
 
         raw = self._chat(system_prompt, user_prompt, max_tokens=4096, temperature=0.3)
+
+
+        # Strip reasoning model thinking tags before parsing
+        raw = strip_thinking_tags(raw)
+
 
         # Strip markdown fences (```latex ... ```)
         return self._strip_latex_fences(raw)

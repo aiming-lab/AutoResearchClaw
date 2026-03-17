@@ -22,6 +22,7 @@ import logging
 from typing import Any
 
 from researchclaw.agents.base import BaseAgent, AgentStepResult
+from researchclaw.utils.thinking_tags import strip_thinking_tags
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,11 @@ class FigureDecisionAgent(BaseAgent):
             max_tokens=2048,
             temperature=0.3,
         )
+
+
+        # Strip reasoning model thinking tags before JSON parsing
+        raw = strip_thinking_tags(raw)
+
 
         # Parse JSON response
         return self._parse_decisions(raw)

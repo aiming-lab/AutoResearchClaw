@@ -9,12 +9,14 @@ Key advantage: a single persistent session maintains context across all
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import weakref
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,7 +39,7 @@ class ACPConfig:
     cwd: str = "."
     acpx_command: str = ""  # auto-detect if empty
     session_name: str = "researchclaw"
-    timeout_sec: int = 600  # per-prompt timeout
+    timeout_sec: int = 1800  # per-prompt timeout
 
 
 def _find_acpx() -> str | None:
@@ -62,10 +64,16 @@ class ACPClient:
     23-stage pipeline.
     """
 
+    # Track live instances for atexit cleanup (weak refs to avoid preventing GC)
+    _live_instances: list[weakref.ref[ACPClient]] = []
+
     def __init__(self, acp_config: ACPConfig) -> None:
         self.config = acp_config
         self._acpx: str | None = acp_config.acpx_command or None
         self._session_ready = False
+        # Register for atexit cleanup to prevent zombie acpx processes
+        ACPClient._live_instances.append(weakref.ref(self))
+        atexit.register(ACPClient._atexit_cleanup)
 
     @classmethod
     def from_rc_config(cls, rc_config: Any) -> ACPClient:
@@ -76,7 +84,7 @@ class ACPClient:
             cwd=acp.cwd,
             acpx_command=getattr(acp, "acpx_command", ""),
             session_name=getattr(acp, "session_name", "researchclaw"),
-            timeout_sec=getattr(acp, "timeout_sec", 600),
+            timeout_sec=getattr(acp, "timeout_sec", 1800),
         ))
 
     # ------------------------------------------------------------------
@@ -136,7 +144,7 @@ class ACPClient:
             return
         try:
             subprocess.run(
-                [acpx, "--cwd", self._abs_cwd(),
+                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "sessions", "close",
                  self.config.session_name],
                 capture_output=True, timeout=15,
@@ -151,6 +159,18 @@ class ACPClient:
             self.close()
         except Exception:  # noqa: BLE001
             pass
+
+    @classmethod
+    def _atexit_cleanup(cls) -> None:
+        """Close all live ACP sessions on interpreter shutdown."""
+        for ref in cls._live_instances:
+            inst = ref()
+            if inst is not None:
+                try:
+                    inst.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        cls._live_instances.clear()
 
     # ------------------------------------------------------------------
     # Internals
@@ -176,7 +196,7 @@ class ACPClient:
 
         # Use 'ensure' which finds existing or creates new
         result = subprocess.run(
-            [acpx, "--cwd", self._abs_cwd(),
+            [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
              self.config.agent, "sessions", "ensure",
              "--name", self.config.session_name],
             capture_output=True, text=True, timeout=30,
@@ -184,7 +204,7 @@ class ACPClient:
         if result.returncode != 0:
             # Fall back to 'new'
             result = subprocess.run(
-                [acpx, "--cwd", self._abs_cwd(),
+                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "sessions", "new",
                  "--name", self.config.session_name],
                 capture_output=True, text=True, timeout=30,
@@ -224,7 +244,7 @@ class ACPClient:
     def _send_prompt_cli(self, acpx: str, prompt: str) -> str:
         """Send prompt as a CLI argument (original path)."""
         result = subprocess.run(
-            [acpx, "--approve-all", "--cwd", self._abs_cwd(),
+            [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
              self.config.agent, "-s", self.config.session_name,
              prompt],
             capture_output=True, text=True,
@@ -254,7 +274,7 @@ class ACPClient:
             )
 
             result = subprocess.run(
-                [acpx, "--approve-all", "--cwd", self._abs_cwd(),
+                [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "-s", self.config.session_name,
                  short_prompt],
                 capture_output=True, text=True,

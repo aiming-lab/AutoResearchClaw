@@ -26,12 +26,14 @@ import base64
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 from researchclaw.agents.base import BaseAgent, AgentStepResult
+from researchclaw.utils.sanitize import sanitize_figure_id
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +139,9 @@ class NanoBananaAgent(BaseAgent):
         generated: list[dict[str, Any]] = []
 
         for i, fig in enumerate(image_figures):
-            figure_id = fig.get("figure_id", f"conceptual_{i + 1}")
+            figure_id = sanitize_figure_id(
+                fig.get("figure_id", f"conceptual_{i + 1}")
+            )
             description = fig.get("description", "")
             figure_type = fig.get("figure_type", "architecture_diagram")
             section = fig.get("section", "Method")
@@ -353,10 +357,14 @@ class NanoBananaAgent(BaseAgent):
         output_path: Path,
     ) -> bool:
         """Generate image using Gemini REST API (no SDK dependency)."""
+        # Validate model name to prevent URL injection
+        if not re.fullmatch(r"[a-zA-Z0-9._-]+", self._model):
+            logger.error("Invalid Gemini model name: %r", self._model)
+            return False
+
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/"
             f"models/{self._model}:generateContent"
-            f"?key={self._api_key}"
         )
 
         payload = {
@@ -373,7 +381,10 @@ class NanoBananaAgent(BaseAgent):
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": self._api_key,
+            },
             method="POST",
         )
 

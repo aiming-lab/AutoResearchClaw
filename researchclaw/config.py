@@ -121,7 +121,7 @@ class AcpConfig:
     cwd: str = "."
     acpx_command: str = ""
     session_name: str = "researchclaw"
-    timeout_sec: int = 600
+    timeout_sec: int = 1800
 
 
 @dataclass(frozen=True)

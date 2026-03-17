@@ -409,7 +409,7 @@ class TestCodeGenAgent:
 class TestRendererAgent:
     def test_render_simple_script(self, tmp_path):
         from researchclaw.agents.figure_agent.renderer import RendererAgent
-        agent = RendererAgent(_FakeLLM(), timeout_sec=10)
+        agent = RendererAgent(_FakeLLM(), timeout_sec=10, use_docker=False)
         output_dir = tmp_path / "charts"
 
         # Use a script that creates a valid PNG without matplotlib

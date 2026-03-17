@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from researchclaw.agents.base import BaseAgent, AgentStepResult
+from researchclaw.utils.sanitize import sanitize_figure_id
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,11 @@ class RendererAgent(BaseAgent):
                 self._docker_image,
             )
         else:
-            self.logger.info("RendererAgent: Docker sandbox disabled, using local subprocess")
+            self.logger.warning(
+                "RendererAgent: Docker sandbox DISABLED — LLM-generated "
+                "scripts will run as LOCAL subprocesses WITHOUT sandboxing. "
+                "Set use_docker=True or install Docker for secure execution."
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -159,6 +164,10 @@ class RendererAgent(BaseAgent):
         scripts_dir: Path,
     ) -> dict[str, Any]:
         """Render a single figure script."""
+        figure_id = sanitize_figure_id(figure_id)
+        output_filename = sanitize_figure_id(
+            output_filename.replace(".png", ""), fallback="figure"
+        ) + ".png"
         result: dict[str, Any] = {
             "figure_id": figure_id,
             "success": False,
@@ -289,8 +298,9 @@ class RendererAgent(BaseAgent):
             "-v", f"{output_dir.resolve()}:/workspace/output:rw",
             "-w", "/workspace",
             "--user", f"{os.getuid()}:{os.getgid()}",
+            "--entrypoint", "python3",
             self._docker_image,
-            "python3", "/workspace/script.py",
+            "/workspace/script.py",
         ]
 
         try:

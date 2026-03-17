@@ -779,6 +779,7 @@ class TestLatexFigurePlacement:
         assert "\\label{fig:" in result
 
 
+
 # =========================================================================
 # Pipeline wrapper — _chat_with_prompt strip_thinking default
 # =========================================================================
@@ -839,3 +840,4 @@ class TestChatWithPromptStripThinking:
         parsed = yaml.safe_load(result)
         assert parsed["metric"] == "accuracy"
         assert parsed["value"] == 0.95
+
