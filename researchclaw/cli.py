@@ -109,9 +109,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"  Run ID:  {run_id}")
     print(f"  Topic:   {config.research.topic}")
     print(f"  Output:  {run_dir}")
-    print(f"  Mode:    {config.experiment.mode}")
+    print(f"  Mode:    {config.project.mode}")
     print(f"  From:    Stage {int(from_stage)}: {from_stage.name}")
     print()
+
+    # Derive gate behavior from project.mode (fixes #45)
+    # - "docs-first" / "semi-auto": gates block and wait for approval
+    # - "full-auto": gates auto-approve (or use --auto-approve flag)
+    stop_on_gate = config.project.mode in ("semi-auto", "docs-first")
+    if config.project.mode == "full-auto":
+        auto_approve = True
 
     results = execute_pipeline(
         run_dir=run_dir,
@@ -120,6 +127,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         adapters=adapters,
         from_stage=from_stage,
         auto_approve_gates=auto_approve,
+        stop_on_gate=stop_on_gate,
         skip_noncritical=skip_noncritical,
         kb_root=kb_root_path,
     )
