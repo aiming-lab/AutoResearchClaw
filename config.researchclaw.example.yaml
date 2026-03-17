@@ -105,5 +105,27 @@ experiment:
     shm_size_mb: 2048
     keep_containers: false
 
+  # Scientific Visualization Agent (Code-to-Viz + Nano Banana)
+  # Uses a Decision Agent to analyze paper content and determine:
+  #   - Code figures (bar charts, line plots) → Matplotlib/TikZ
+  #   - Image figures (architecture, flowcharts) → Gemini Nano Banana
+  figure_agent:
+    enabled: true
+    min_figures: 3
+    max_figures: 10
+    max_iterations: 3
+    render_timeout_sec: 30
+    # Security: Docker sandbox for visualization code execution
+    # use_docker: null  # null = auto-detect, true = force, false = disable
+    docker_image: "researchclaw/experiment:latest"
+    # Output format: "python" (Matplotlib/Seaborn) or "latex" (TikZ/PGFPlots)
+    output_format: "python"
+    # Nano Banana (Gemini native image generation)
+    nano_banana_enabled: true
+    # gemini_api_key: ""  # or set GEMINI_API_KEY env var
+    gemini_model: "gemini-2.5-flash-image"
+    strict_mode: false
+    dpi: 300
+
 prompts:
   custom_file: ""

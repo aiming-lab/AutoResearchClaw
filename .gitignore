@@ -77,3 +77,5 @@ cli_pause
 
 .venv_arc/
 /config.arc.yaml
+
+config_*.yaml

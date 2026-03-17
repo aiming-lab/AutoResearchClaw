@@ -293,6 +293,12 @@ class LLMClient:
         message = choice.get("message", {})
         content = message.get("content") or ""
 
+        # Strip <think>…</think> reasoning tags from thinking models
+        # (DeepSeek-R1, QwQ, etc.) to prevent leakage into papers/scripts.
+        from researchclaw.utils.thinking_tags import strip_thinking_tags
+
+        content = strip_thinking_tags(content)
+
         return LLMResponse(
             content=content,
             model=data.get("model", model),

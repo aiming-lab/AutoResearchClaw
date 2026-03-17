@@ -1,13 +1,22 @@
 """Renderer Agent — executes plotting scripts and verifies output.
 
-Runs generated Python scripts in a subprocess, captures stdout/stderr,
-verifies output files exist with correct format, and returns rendered
-image paths.
+Runs generated Python scripts in a subprocess (or Docker sandbox when
+available), captures stdout/stderr, verifies output files exist with
+correct format, and returns rendered image paths.
+
+Security: When Docker is available, visualization code is executed inside
+an isolated container (``--network none``) to prevent RCE from LLM-generated
+code.  Falls back to a local subprocess when Docker is not available.
+
+Architecture ref: Visual ChatGPT (Wu et al., 2023) — LLMs as controllers
+calling deterministic render tools instead of generating pixels directly.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,9 +29,37 @@ logger = logging.getLogger(__name__)
 # Minimum acceptable file size (bytes) — filters out corrupt/empty PNGs
 _MIN_FILE_SIZE = 1024  # 1 KB
 
+# Docker image for sandboxed visualization rendering.
+# The experiment image already has matplotlib, numpy, seaborn pre-installed.
+_VIZ_DOCKER_IMAGE = "researchclaw/experiment:latest"
+
+
+def _docker_available() -> bool:
+    """Return True if Docker daemon is reachable."""
+    try:
+        cp = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        return cp.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
 
 class RendererAgent(BaseAgent):
-    """Executes plotting scripts and verifies output files."""
+    """Executes plotting scripts and verifies output files.
+
+    Supports two execution modes:
+      1. **Docker sandbox** (preferred): Runs scripts inside an isolated
+         container with ``--network none`` to prevent RCE.
+      2. **Local subprocess** (fallback): Direct execution when Docker
+         is unavailable.
+
+    The mode is auto-detected at instantiation time but can be forced via
+    the ``use_docker`` parameter.
+    """
 
     name = "figure_renderer"
 
@@ -32,10 +69,27 @@ class RendererAgent(BaseAgent):
         *,
         timeout_sec: int = 30,
         python_path: str | None = None,
+        use_docker: bool | None = None,
+        docker_image: str | None = None,
     ) -> None:
         super().__init__(llm)
         self._timeout = timeout_sec
         self._python = python_path or sys.executable
+        self._docker_image = docker_image or _VIZ_DOCKER_IMAGE
+
+        # Auto-detect Docker availability if not explicitly set
+        if use_docker is None:
+            self._use_docker = _docker_available()
+        else:
+            self._use_docker = use_docker
+
+        if self._use_docker:
+            self.logger.info(
+                "RendererAgent: Docker sandbox ENABLED (image=%s)",
+                self._docker_image,
+            )
+        else:
+            self.logger.info("RendererAgent: Docker sandbox disabled, using local subprocess")
 
     # ------------------------------------------------------------------
     # Public API
@@ -122,30 +176,23 @@ class RendererAgent(BaseAgent):
         script_path.write_text(script_code, encoding="utf-8")
         result["script_path"] = str(script_path)
 
-        # Execute script — resolve to absolute paths so cwd doesn't
-        # cause the relative script path to be re-resolved incorrectly.
-        try:
-            proc = subprocess.run(
-                [self._python, str(script_path.resolve())],
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                cwd=str(output_dir.resolve().parent),
+        # Choose execution backend
+        if self._use_docker:
+            proc_result = self._execute_in_docker(
+                script_path=script_path,
+                output_dir=output_dir,
+                figure_id=figure_id,
             )
-        except subprocess.TimeoutExpired:
-            result["error"] = f"Script timed out after {self._timeout}s"
-            self.logger.warning("Render timeout for %s", figure_id)
-            return result
-        except FileNotFoundError:
-            result["error"] = f"Python executable not found: {self._python}"
-            return result
+        else:
+            proc_result = self._execute_local(
+                script_path=script_path,
+                output_dir=output_dir,
+            )
 
-        if proc.returncode != 0:
-            # Truncate stderr to reasonable length
-            stderr = proc.stderr[:2000] if proc.stderr else "Unknown error"
-            result["error"] = f"Script failed (exit {proc.returncode}): {stderr}"
+        if proc_result["error"]:
+            result["error"] = proc_result["error"]
             self.logger.warning(
-                "Render failed for %s: %s", figure_id, stderr[:200]
+                "Render failed for %s: %s", figure_id, result["error"][:200]
             )
             return result
 
@@ -175,3 +222,102 @@ class RendererAgent(BaseAgent):
         result["file_size"] = file_size
         self.logger.info("Rendered %s: %s (%d bytes)", figure_id, output_path, file_size)
         return result
+
+    # ------------------------------------------------------------------
+    # Execution backends
+    # ------------------------------------------------------------------
+
+    def _execute_local(
+        self,
+        *,
+        script_path: Path,
+        output_dir: Path,
+    ) -> dict[str, str]:
+        """Execute script in a local subprocess (no sandbox)."""
+        try:
+            proc = subprocess.run(
+                [self._python, str(script_path.resolve())],
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                cwd=str(output_dir.resolve().parent),
+            )
+        except subprocess.TimeoutExpired:
+            return {"error": f"Script timed out after {self._timeout}s"}
+        except FileNotFoundError:
+            return {"error": f"Python executable not found: {self._python}"}
+
+        if proc.returncode != 0:
+            stderr = proc.stderr[:2000] if proc.stderr else "Unknown error"
+            return {"error": f"Script failed (exit {proc.returncode}): {stderr}"}
+
+        return {"error": ""}
+
+    def _execute_in_docker(
+        self,
+        *,
+        script_path: Path,
+        output_dir: Path,
+        figure_id: str,
+    ) -> dict[str, str]:
+        """Execute script inside an isolated Docker container.
+
+        Security measures:
+        - ``--network none``: No network access (prevents data exfiltration)
+        - ``--read-only``: Root filesystem is read-only
+        - ``--tmpfs /tmp``: Writable /tmp only in-memory
+        - ``--memory 512m``: Hard memory limit
+        - Volume mounts are restricted to the output directory
+        - Script is bind-mounted read-only
+        - Container is auto-removed after execution
+
+        This prevents RCE from LLM-generated visualization code.
+        """
+        container_name = f"rc-viz-{figure_id}-{os.getpid()}"
+
+        cmd = [
+            "docker", "run",
+            "--name", container_name,
+            "--rm",
+            "--network", "none",
+            "--read-only",
+            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
+            f"--memory=512m",
+            "-v", f"{script_path.resolve()}:/workspace/script.py:ro",
+            "-v", f"{output_dir.resolve()}:/workspace/output:rw",
+            "-w", "/workspace",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            self._docker_image,
+            "python3", "/workspace/script.py",
+        ]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            # Kill the container on timeout
+            try:
+                subprocess.run(
+                    ["docker", "kill", container_name],
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+            return {"error": f"Docker script timed out after {self._timeout}s"}
+        except FileNotFoundError:
+            return {"error": "Docker executable not found"}
+        except Exception as exc:
+            return {"error": f"Docker execution error: {exc}"}
+
+        if proc.returncode != 0:
+            stderr = proc.stderr[:2000] if proc.stderr else "Unknown error"
+            return {"error": f"Docker script failed (exit {proc.returncode}): {stderr}"}
+
+        return {"error": ""}

@@ -672,6 +672,10 @@ def _deduplicate_tables(body: str) -> str:
 
 # Patterns for block-level structures
 _DISPLAY_MATH_RE = re.compile(r"^\\\[(.+?)\\\]$", re.MULTILINE | re.DOTALL)
+# $$...$$ display math (single- or multi-line)
+_DISPLAY_MATH_DOLLAR_RE = re.compile(
+    r"^\$\$\s*\n?(.*?)\n?\s*\$\$$", re.MULTILINE | re.DOTALL
+)
 _FENCED_CODE_RE = re.compile(r"^```(\w*)\n(.*?)^```", re.MULTILINE | re.DOTALL)
 _TABLE_SEP_RE = re.compile(r"^\|[-:| ]+\|$")
 
@@ -693,7 +697,18 @@ def _convert_block(text: str) -> str:
         math_blocks.append(m.group(0))  # Keep \\[...\\] as-is
         return f"%%MATH_BLOCK_{idx}%%"
 
+    def _stash_dollar_math(m: re.Match[str]) -> str:
+        """Convert $$...$$ to \\begin{equation}...\\end{equation}."""
+        idx = len(math_blocks)
+        inner = m.group(1).strip()
+        math_blocks.append(
+            f"\\begin{{equation}}\n{inner}\n\\end{{equation}}"
+        )
+        return f"%%MATH_BLOCK_{idx}%%"
+
     text = _DISPLAY_MATH_RE.sub(_stash_math, text)
+    # Also handle $$...$$ display math
+    text = _DISPLAY_MATH_DOLLAR_RE.sub(_stash_dollar_math, text)
 
     # Protect fenced code blocks
     code_blocks: list[str] = []
@@ -1072,9 +1087,9 @@ def _render_figure(caption: str, path: str) -> str:
     if not label_key:
         label_key = str(_FIGURE_COUNTER)
     return (
-        "\\begin{figure}[ht]\n"
+        "\\begin{figure}[t]\n"
         "\\centering\n"
-        f"\\includegraphics[width=0.9\\columnwidth]{{{path}}}\n"
+        f"\\includegraphics[width=0.95\\columnwidth]{{{path}}}\n"
         f"\\caption{{{cap_tex}}}\n"
         f"\\label{{fig:{label_key}}}\n"
         "\\end{figure}"
@@ -1133,8 +1148,9 @@ def _convert_inline(text: str) -> str:
     text = re.sub(r"\\\(.+?\\\)", _protect, text)
     text = re.sub(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", _protect, text)
 
-    # Protect display math residuals: \[...\]
+    # Protect display math residuals: \[...\] and $$...$$
     text = re.sub(r"\\\[.+?\\\]", _protect, text, flags=re.DOTALL)
+    text = re.sub(r"\$\$.+?\$\$", _protect, text, flags=re.DOTALL)
 
     # Protect \cite{...} and \textbf etc.
     text = re.sub(r"\\[a-zA-Z]+\{[^}]*\}", _protect, text)

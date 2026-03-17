@@ -214,8 +214,16 @@ class FigureAgentConfig:
     max_figures: int = 8
     # Orchestrator
     max_iterations: int = 3  # max CodeGen→Renderer→Critic retry loops
-    # Renderer
+    # Renderer security
     render_timeout_sec: int = 30
+    use_docker: bool | None = None  # None = auto-detect, True/False to force
+    docker_image: str = "researchclaw/experiment:latest"
+    # Code generation output format
+    output_format: str = "python"  # "python" (matplotlib) or "latex" (TikZ/PGFPlots)
+    # Nano Banana (Gemini image generation)
+    gemini_api_key: str = ""  # or set GEMINI_API_KEY / GOOGLE_API_KEY env var
+    gemini_model: str = "gemini-2.5-flash-image"
+    nano_banana_enabled: bool = True  # enable/disable Gemini image generation
     # Critic
     strict_mode: bool = False
     # Output
@@ -518,12 +526,25 @@ def _parse_benchmark_agent_config(data: dict[str, Any]) -> BenchmarkAgentConfig:
 def _parse_figure_agent_config(data: dict[str, Any]) -> FigureAgentConfig:
     if not data:
         return FigureAgentConfig()
+
+    # Parse use_docker: None (auto), True, or False
+    _use_docker_raw = data.get("use_docker")
+    _use_docker: bool | None = None
+    if _use_docker_raw is not None:
+        _use_docker = bool(_use_docker_raw)
+
     return FigureAgentConfig(
         enabled=bool(data.get("enabled", True)),
         min_figures=int(data.get("min_figures", 3)),
         max_figures=int(data.get("max_figures", 8)),
         max_iterations=int(data.get("max_iterations", 3)),
         render_timeout_sec=int(data.get("render_timeout_sec", 30)),
+        use_docker=_use_docker,
+        docker_image=data.get("docker_image", "researchclaw/experiment:latest"),
+        output_format=data.get("output_format", "python"),
+        gemini_api_key=data.get("gemini_api_key", ""),
+        gemini_model=data.get("gemini_model", "gemini-2.5-flash-image"),
+        nano_banana_enabled=bool(data.get("nano_banana_enabled", True)),
         strict_mode=bool(data.get("strict_mode", False)),
         dpi=int(data.get("dpi", 300)),
     )

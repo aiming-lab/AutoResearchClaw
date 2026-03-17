@@ -1,7 +1,10 @@
-"""FigureAgent Orchestrator — coordinates the five sub-agents.
+"""FigureAgent Orchestrator — coordinates the figure generation sub-agents.
 
-Flow: Planner → CodeGen → Renderer → Critic (→ retry CodeGen if failed)
-     → Integrator
+Flow:
+  Decision Agent → analyzes paper → decides what figures are needed
+    ├── code figures  → Planner → CodeGen → Renderer → Critic → retry
+    └── image figures → Nano Banana (Gemini image generation)
+  → Integrator (combines all figures into manifest)
 
 Produces a ``FigurePlan`` consumed by paper draft and export stages.
 """
@@ -18,7 +21,9 @@ from typing import Any
 from researchclaw.agents.base import AgentOrchestrator
 from researchclaw.agents.figure_agent.codegen import CodeGenAgent
 from researchclaw.agents.figure_agent.critic import CriticAgent
+from researchclaw.agents.figure_agent.decision import FigureDecisionAgent
 from researchclaw.agents.figure_agent.integrator import IntegratorAgent
+from researchclaw.agents.figure_agent.nano_banana import NanoBananaAgent
 from researchclaw.agents.figure_agent.planner import PlannerAgent
 from researchclaw.agents.figure_agent.renderer import RendererAgent
 
@@ -40,8 +45,16 @@ class FigureAgentConfig:
     max_figures: int = 8
     # Orchestrator
     max_iterations: int = 3   # max CodeGen→Renderer→Critic retry loops
-    # Renderer
+    # Renderer security
     render_timeout_sec: int = 30
+    use_docker: bool | None = None  # None = auto-detect
+    docker_image: str = "researchclaw/experiment:latest"
+    # Code generation
+    output_format: str = "python"  # "python" or "latex"
+    # Nano Banana (Gemini image generation)
+    gemini_api_key: str = ""  # or set GEMINI_API_KEY env var
+    gemini_model: str = "gemini-2.5-flash-image"
+    nano_banana_enabled: bool = True  # enable/disable image generation
     # Critic
     strict_mode: bool = False  # if True, any issue = fail
     # Output
@@ -111,7 +124,7 @@ class FigurePlan:
 
 
 class FigureOrchestrator(AgentOrchestrator):
-    """Coordinates Planner → CodeGen → Renderer → Critic → Integrator."""
+    """Coordinates Decision → (Code-to-Viz | Nano Banana) → Integrator."""
 
     def __init__(
         self,
@@ -126,21 +139,40 @@ class FigureOrchestrator(AgentOrchestrator):
         self._config = cfg
         self._stage_dir = stage_dir
 
-        # Initialize sub-agents
+        # Decision agent
+        self._decision = FigureDecisionAgent(
+            llm,
+            min_figures=cfg.min_figures,
+            max_figures=cfg.max_figures,
+        )
+
+        # Code-to-Viz sub-agents (for data-driven charts)
         self._planner = PlannerAgent(
             llm,
             min_figures=cfg.min_figures,
             max_figures=cfg.max_figures,
         )
-        self._codegen = CodeGenAgent(llm)
+        self._codegen = CodeGenAgent(llm, output_format=cfg.output_format)
         self._renderer = RendererAgent(
             llm,
             timeout_sec=cfg.render_timeout_sec,
+            use_docker=cfg.use_docker,
+            docker_image=cfg.docker_image,
         )
         self._critic = CriticAgent(
             llm,
             strict_mode=cfg.strict_mode,
         )
+
+        # Nano Banana agent (for conceptual/architectural images)
+        self._nano_banana: NanoBananaAgent | None = None
+        if cfg.nano_banana_enabled:
+            self._nano_banana = NanoBananaAgent(
+                llm,
+                gemini_api_key=cfg.gemini_api_key or None,
+                model=cfg.gemini_model,
+            )
+
         self._integrator = IntegratorAgent(llm)
 
     def _save_artifact(self, name: str, data: Any) -> None:
@@ -167,6 +199,7 @@ class FigureOrchestrator(AgentOrchestrator):
             metric_key (str): Primary metric name
             topic (str): Research topic
             hypothesis (str): Research hypothesis
+            paper_draft (str): Current paper draft (for decision agent)
             output_dir (str|Path): Directory for chart output
         """
         t0 = time.monotonic()
@@ -178,11 +211,110 @@ class FigureOrchestrator(AgentOrchestrator):
 
         plan = FigurePlan(output_dir=str(output_dir))
 
-        # ── Phase 1: Plan ────────────────────────────────────────────
-        self.logger.info("Phase 1: Planning figures")
+        # ── Phase 0: Decision — what figures are needed? ──────────────
+        self.logger.info("Phase 0: Deciding what figures are needed")
+        decision_result = self._decision.execute({
+            "topic": topic,
+            "hypothesis": context.get("hypothesis", ""),
+            "paper_draft": context.get("paper_draft", ""),
+            "has_experiments": bool(context.get("experiment_results")),
+            "experiment_results": context.get("experiment_results", {}),
+            "condition_summaries": context.get("condition_summaries", {}),
+        })
+        self._accumulate(decision_result)
+        self._save_artifact("figure_decisions.json", decision_result.data)
+
+        code_figures = decision_result.data.get("code_figures", [])
+        image_figures = decision_result.data.get("image_figures", [])
+
+        self.logger.info(
+            "Decision: %d code figures, %d image figures",
+            len(code_figures), len(image_figures),
+        )
+
+        # Track all rendered figures (from both backends)
+        all_rendered: list[dict[str, Any]] = []
+
+        # ── Phase A: Code-to-Viz for data figures ─────────────────────
+        if code_figures:
+            rendered_code = self._run_code_pipeline(
+                code_figures=code_figures,
+                context=context,
+                output_dir=output_dir,
+            )
+            all_rendered.extend(rendered_code)
+
+        # ── Phase B: Nano Banana for image figures ────────────────────
+        if image_figures and self._nano_banana is not None:
+            rendered_images = self._run_nano_banana(
+                image_figures=image_figures,
+                context=context,
+                output_dir=output_dir,
+            )
+            all_rendered.extend(rendered_images)
+        elif image_figures:
+            self.logger.warning(
+                "Nano Banana disabled — skipping %d image figures",
+                len(image_figures),
+            )
+
+        # ── Phase C: Integrate all figures ────────────────────────────
+        self.logger.info(
+            "Phase C: Integrating %d figures into paper", len(all_rendered)
+        )
+        integrate_result = self._integrator.execute({
+            "rendered": all_rendered,
+            "topic": topic,
+            "output_dir": str(output_dir),
+        })
+        self._accumulate(integrate_result)
+
+        # ── Finalize ─────────────────────────────────────────────────
+        plan.manifest = integrate_result.data.get("manifest", [])
+        plan.markdown_refs = integrate_result.data.get("markdown_refs", "")
+        plan.figure_descriptions = integrate_result.data.get("figure_descriptions", "")
+        plan.manifest_path = integrate_result.data.get("manifest_path", "")
+        plan.figure_count = integrate_result.data.get("figure_count", 0)
+        plan.passed_count = sum(
+            1 for r in all_rendered if r.get("success")
+        )
+        plan.total_llm_calls = self.total_llm_calls
+        plan.total_tokens = self.total_tokens
+        plan.elapsed_sec = time.monotonic() - t0
+
+        # Save final plan
+        self._save_artifact("figure_plan_final.json", plan.to_dict())
+
+        self.logger.info(
+            "FigureAgent complete: %d figures (%d code + %d image), "
+            "%d passed, %d LLM calls, %.1fs",
+            plan.figure_count,
+            len(code_figures),
+            len(image_figures),
+            plan.passed_count,
+            plan.total_llm_calls,
+            plan.elapsed_sec,
+        )
+
+        return plan
+
+    # ------------------------------------------------------------------
+    # Code-to-Viz pipeline (data-driven charts)
+    # ------------------------------------------------------------------
+
+    def _run_code_pipeline(
+        self,
+        code_figures: list[dict[str, Any]],
+        context: dict[str, Any],
+        output_dir: Path,
+    ) -> list[dict[str, Any]]:
+        """Run Planner → CodeGen → Renderer → Critic for data figures."""
+
+        # Phase 1: Plan (uses experiment data)
+        self.logger.info("Phase A1: Planning data figures")
         plan_result = self._planner.execute({
             "experiment_results": context.get("experiment_results", {}),
-            "topic": topic,
+            "topic": context.get("topic", ""),
             "hypothesis": context.get("hypothesis", ""),
             "conditions": context.get("conditions", []),
             "metric_key": context.get("metric_key", "primary_metric"),
@@ -193,23 +325,19 @@ class FigureOrchestrator(AgentOrchestrator):
 
         if not plan_result.success:
             self.logger.warning("Planning failed: %s", plan_result.error)
-            plan.elapsed_sec = time.monotonic() - t0
-            plan.total_llm_calls = self.total_llm_calls
-            plan.total_tokens = self.total_tokens
-            return plan
+            return []
 
         figures = plan_result.data.get("figures", [])
-        self._save_artifact("figure_plan.json", figures)
-        self.logger.info("Planned %d figures", len(figures))
+        self._save_artifact("figure_plan_code.json", figures)
+        self.logger.info("Planned %d data figures", len(figures))
 
-        # ── Phase 2+3+4: CodeGen → Render → Critic (with retry) ─────
+        # Phase 2+3+4: CodeGen → Render → Critic (with retry)
         critic_feedback: list[dict[str, Any]] = []
         final_rendered: list[dict[str, Any]] = []
-        final_scripts: list[dict[str, Any]] = []
 
         for iteration in range(self.max_iterations):
             self.logger.info(
-                "Phase 2: CodeGen (iteration %d/%d)",
+                "Phase A2: CodeGen (iteration %d/%d)",
                 iteration + 1, self.max_iterations,
             )
 
@@ -230,7 +358,6 @@ class FigureOrchestrator(AgentOrchestrator):
                 continue
 
             scripts = codegen_result.data.get("scripts", [])
-            final_scripts = scripts
             self._save_artifact(f"scripts_{iteration}.json", [
                 {k: v for k, v in s.items() if k != "script"}
                 for s in scripts
@@ -238,7 +365,7 @@ class FigureOrchestrator(AgentOrchestrator):
 
             # Render
             self.logger.info(
-                "Phase 3: Rendering (iteration %d/%d)",
+                "Phase A3: Rendering (iteration %d/%d)",
                 iteration + 1, self.max_iterations,
             )
             render_result = self._renderer.execute({
@@ -256,7 +383,7 @@ class FigureOrchestrator(AgentOrchestrator):
 
             # Critic
             self.logger.info(
-                "Phase 4: Critic review (iteration %d/%d)",
+                "Phase A4: Critic review (iteration %d/%d)",
                 iteration + 1, self.max_iterations,
             )
             critic_result = self._critic.execute({
@@ -274,16 +401,15 @@ class FigureOrchestrator(AgentOrchestrator):
 
             if all_passed:
                 self.logger.info(
-                    "All figures passed review on iteration %d", iteration + 1
+                    "All data figures passed review on iteration %d",
+                    iteration + 1,
                 )
                 break
 
-            # Collect feedback for failed figures (for next iteration)
+            # Collect feedback for failed figures
             critic_feedback = [
                 r for r in reviews if not r.get("passed")
             ]
-
-            # Only retry figures that failed
             failed_ids = {r["figure_id"] for r in critic_feedback}
             figures = [f for f in figures if f.get("figure_id") in failed_ids]
 
@@ -292,38 +418,48 @@ class FigureOrchestrator(AgentOrchestrator):
                 len(failed_ids), len(rendered),
             )
 
-        # ── Phase 5: Integrate ───────────────────────────────────────
-        self.logger.info("Phase 5: Integrating figures into paper")
-        integrate_result = self._integrator.execute({
-            "rendered": final_rendered,
-            "topic": topic,
-            "output_dir": str(output_dir),
-        })
-        self._accumulate(integrate_result)
+        return final_rendered
 
-        # ── Finalize ─────────────────────────────────────────────────
-        plan.manifest = integrate_result.data.get("manifest", [])
-        plan.markdown_refs = integrate_result.data.get("markdown_refs", "")
-        plan.figure_descriptions = integrate_result.data.get("figure_descriptions", "")
-        plan.manifest_path = integrate_result.data.get("manifest_path", "")
-        plan.figure_count = integrate_result.data.get("figure_count", 0)
-        plan.passed_count = sum(
-            1 for r in final_rendered if r.get("success")
-        )
-        plan.total_llm_calls = self.total_llm_calls
-        plan.total_tokens = self.total_tokens
-        plan.elapsed_sec = time.monotonic() - t0
+    # ------------------------------------------------------------------
+    # Nano Banana pipeline (conceptual/architectural images)
+    # ------------------------------------------------------------------
 
-        # Save final plan
-        self._save_artifact("figure_plan_final.json", plan.to_dict())
+    def _run_nano_banana(
+        self,
+        image_figures: list[dict[str, Any]],
+        context: dict[str, Any],
+        output_dir: Path,
+    ) -> list[dict[str, Any]]:
+        """Run Nano Banana for conceptual/architectural figures."""
+        if self._nano_banana is None:
+            return []
 
         self.logger.info(
-            "FigureAgent complete: %d figures, %d passed review, "
-            "%d LLM calls, %.1fs",
-            plan.figure_count,
-            plan.passed_count,
-            plan.total_llm_calls,
-            plan.elapsed_sec,
+            "Phase B: Generating %d image figures via Nano Banana",
+            len(image_figures),
         )
 
-        return plan
+        # Assign figure IDs
+        for i, fig in enumerate(image_figures):
+            if "figure_id" not in fig:
+                fig["figure_id"] = (
+                    f"{fig.get('figure_type', 'conceptual')}_{i + 1}"
+                )
+
+        nb_result = self._nano_banana.execute({
+            "image_figures": image_figures,
+            "topic": context.get("topic", ""),
+            "output_dir": str(output_dir),
+        })
+        self._accumulate(nb_result)
+        self._save_artifact("nano_banana_results.json", nb_result.data)
+
+        generated = nb_result.data.get("generated", [])
+        success_count = nb_result.data.get("count", 0)
+
+        self.logger.info(
+            "Nano Banana: %d/%d images generated successfully",
+            success_count, len(image_figures),
+        )
+
+        return generated

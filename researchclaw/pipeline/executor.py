@@ -4524,6 +4524,12 @@ Generated: {_utcnow_iso()}
                 max_figures=config.experiment.figure_agent.max_figures,
                 max_iterations=config.experiment.figure_agent.max_iterations,
                 render_timeout_sec=config.experiment.figure_agent.render_timeout_sec,
+                use_docker=config.experiment.figure_agent.use_docker,
+                docker_image=config.experiment.figure_agent.docker_image,
+                output_format=config.experiment.figure_agent.output_format,
+                gemini_api_key=config.experiment.figure_agent.gemini_api_key,
+                gemini_model=config.experiment.figure_agent.gemini_model,
+                nano_banana_enabled=config.experiment.figure_agent.nano_banana_enabled,
                 strict_mode=config.experiment.figure_agent.strict_mode,
                 dpi=config.experiment.figure_agent.dpi,
             )
@@ -4538,6 +4544,13 @@ Generated: {_utcnow_iso()}
             if not _fa_exp_results and _best_metrics:
                 _fa_exp_results = {"best_run_metrics": _best_metrics}
 
+            # Read paper draft for Decision Agent analysis
+            _paper_draft = (
+                _read_prior_artifact(run_dir, "paper_draft.md")
+                or _read_prior_artifact(run_dir, "outline.md")
+                or ""
+            )
+
             _fa_plan = _fa.orchestrate({
                 "experiment_results": _fa_exp_results,
                 "condition_summaries": _condition_summaries,
@@ -4546,6 +4559,7 @@ Generated: {_utcnow_iso()}
                 "conditions": _fa_conditions,
                 "topic": _read_prior_artifact(run_dir, "topic.md") or config.research.topic,
                 "hypothesis": _read_prior_artifact(run_dir, "hypotheses.md") or "",
+                "paper_draft": _paper_draft,
                 "output_dir": str(stage_dir / "charts"),
             })
 
@@ -6895,22 +6909,64 @@ def _execute_export_publish(
         if _chart_src_dir.is_dir():
             chart_files.extend(sorted(_chart_src_dir.glob("*.png")))
     if chart_files and "![" not in final_paper:
-        figure_block = "\n\n"
-        for i, cf in enumerate(chart_files[:3], 1):
+        # Distribute figures to relevant sections based on filename keywords
+        _fig_placement: dict[str, list[str]] = {
+            "method": [],       # architecture, method, model, pipeline diagrams
+            "result": [],       # experiment, comparison, ablation charts
+            "intro": [],        # concept, overview, illustration
+        }
+        _fig_counter = 0
+        for cf in chart_files[:6]:
+            _fig_counter += 1
+            stem_lower = cf.stem.lower()
             label = cf.stem.replace("_", " ").title()
-            figure_block += f"![Figure {i}: {label}](charts/{cf.name})\n\n"
-        # Insert before ## Conclusion or ## Limitations or ## Discussion
-        _fig_inserted = False
-        for marker in ["## Conclusion", "## Limitations", "## Discussion"]:
-            if marker in final_paper:
-                final_paper = final_paper.replace(marker, figure_block + marker, 1)
-                _fig_inserted = True
-                break
-        if not _fig_inserted:
-            final_paper += figure_block
+            fig_md = f"![Figure {_fig_counter}: {label}](charts/{cf.name})"
+            if any(k in stem_lower for k in ("architecture", "model", "pipeline", "method", "flowchart")):
+                _fig_placement["method"].append(fig_md)
+            elif any(k in stem_lower for k in ("experiment", "comparison", "ablation", "result", "metric")):
+                _fig_placement["result"].append(fig_md)
+            elif any(k in stem_lower for k in ("concept", "overview", "illustration", "threat", "attack")):
+                _fig_placement["intro"].append(fig_md)
+            else:
+                _fig_placement["result"].append(fig_md)  # default to results
+
+        # Insert figures at relevant section boundaries
+        _section_markers = {
+            "method": ["## Method", "## Methodology", "## Approach", "## Framework",
+                        "## 3. Method", "## 3 Method"],
+            "result": ["## Results", "## Experiments", "## Evaluation",
+                        "## 5. Results", "## 4. Experiments", "## 5 Results"],
+            "intro": ["## Related Work", "## Background", "## 2. Related",
+                       "## 2 Related Work"],
+        }
+        _total_inserted = 0
+        for category, figs in _fig_placement.items():
+            if not figs:
+                continue
+            fig_block = "\n\n" + "\n\n".join(figs) + "\n\n"
+            inserted = False
+            for marker in _section_markers.get(category, []):
+                if marker in final_paper:
+                    # Insert BEFORE the marker section (so figure appears at end of previous section)
+                    final_paper = final_paper.replace(marker, fig_block + marker, 1)
+                    inserted = True
+                    _total_inserted += len(figs)
+                    break
+            if not inserted:
+                # Fallback: insert before Conclusion/Limitations/Discussion
+                for fallback in ["## Conclusion", "## Limitations", "## Discussion"]:
+                    if fallback in final_paper:
+                        final_paper = final_paper.replace(fallback, fig_block + fallback, 1)
+                        inserted = True
+                        _total_inserted += len(figs)
+                        break
+            if not inserted:
+                final_paper += fig_block
+                _total_inserted += len(figs)
+
         logger.info(
-            "IMP-19: Injected %d figure references into paper_final.md",
-            min(len(chart_files), 3),
+            "IMP-19: Injected %d figure references into paper_final.md (distributed across sections)",
+            _total_inserted,
         )
 
     # IMP-24: Detect excessive number repetition
