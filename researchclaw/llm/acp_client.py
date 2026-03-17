@@ -100,6 +100,7 @@ class ACPClient:
         temperature: float | None = None,
         json_mode: bool = False,
         system: str | None = None,
+        strip_thinking: bool = False,
     ) -> LLMResponse:
         """Send a prompt and return the agent's response.
 
@@ -110,6 +111,9 @@ class ACPClient:
         """
         prompt_text = self._messages_to_prompt(messages, system=system)
         content = self._send_prompt(prompt_text)
+        if strip_thinking:
+            from researchclaw.utils.thinking_tags import strip_thinking_tags
+            content = strip_thinking_tags(content)
         return LLMResponse(
             content=content,
             model=f"acp:{self.config.agent}",
@@ -242,11 +246,12 @@ class ACPClient:
         return self._send_prompt_via_file(acpx, prompt)
 
     def _send_prompt_cli(self, acpx: str, prompt: str) -> str:
-        """Send prompt as a CLI argument (original path)."""
+        """Send prompt via stdin to avoid ARG_MAX limits (fixes #43)."""
         result = subprocess.run(
             [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
              self.config.agent, "-s", self.config.session_name,
-             prompt],
+             "-f", "-"],
+            input=prompt,
             capture_output=True, text=True,
             timeout=self.config.timeout_sec,
         )
