@@ -240,7 +240,9 @@ class RendererAgent(BaseAgent):
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
-                cwd=str(output_dir.resolve().parent),
+                # BUG-20: Use output_dir as CWD so relative paths
+                # like fig.savefig("comparison.png") resolve correctly
+                cwd=str(output_dir.resolve()),
             )
         except subprocess.TimeoutExpired:
             return {"error": f"Script timed out after {self._timeout}s"}

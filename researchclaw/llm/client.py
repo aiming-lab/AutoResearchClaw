@@ -131,6 +131,7 @@ class LLMClient:
         temperature: float | None = None,
         json_mode: bool = False,
         system: str | None = None,
+        strip_thinking: bool = False,
     ) -> LLMResponse:
         """Send a chat completion request with retry and fallback.
 
@@ -141,6 +142,11 @@ class LLMClient:
             temperature: Override temperature.
             json_mode: Request JSON response format.
             system: Prepend a system message.
+            strip_thinking: If True, strip <think>…</think> reasoning
+                tags from the response content.  Use this when the
+                output will be written to paper/script artifacts but
+                NOT for general chat calls (to avoid corrupting
+                legitimate content).
 
         Returns:
             LLMResponse with content and metadata.
@@ -156,7 +162,20 @@ class LLMClient:
 
         for m in models:
             try:
-                return self._call_with_retry(m, messages, max_tok, temp, json_mode)
+                resp = self._call_with_retry(m, messages, max_tok, temp, json_mode)
+                if strip_thinking:
+                    from researchclaw.utils.thinking_tags import strip_thinking_tags
+                    resp = LLMResponse(
+                        content=strip_thinking_tags(resp.content),
+                        model=resp.model,
+                        prompt_tokens=resp.prompt_tokens,
+                        completion_tokens=resp.completion_tokens,
+                        total_tokens=resp.total_tokens,
+                        finish_reason=resp.finish_reason,
+                        truncated=resp.truncated,
+                        raw=resp.raw,
+                    )
+                return resp
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Model %s failed: %s. Trying next.", m, exc)
                 last_error = exc
@@ -346,12 +365,6 @@ class LLMClient:
         # Safely extract content (may be None for some responses)
         message = choice.get("message", {})
         content = message.get("content") or ""
-
-        # Strip <think>…</think> reasoning tags from thinking models
-        # (DeepSeek-R1, QwQ, etc.) to prevent leakage into papers/scripts.
-        from researchclaw.utils.thinking_tags import strip_thinking_tags
-
-        content = strip_thinking_tags(content)
 
         return LLMResponse(
             content=content,
