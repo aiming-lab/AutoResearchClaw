@@ -982,10 +982,10 @@ class CodeAgent:
             f"## Other Files in Project\n{dep_summaries}\n\n"
             f"## Full File ({target_file}, {total_lines} lines)\n"
             f"```python\n{code}\n```\n\n"
-            "Output the COMPLETE fixed `{target_file}` in "
-            "```filename:{target_file}``` format. Fix the root cause, "
+            f"Output the COMPLETE fixed `{target_file}` in "
+            f"```filename:{target_file}``` format. Fix the root cause, "
             "not just the symptom."
-        ).format(target_file=target_file)
+        )
 
         sys_prompt = (
             "You are a debugging expert. Fix the specific runtime error "
