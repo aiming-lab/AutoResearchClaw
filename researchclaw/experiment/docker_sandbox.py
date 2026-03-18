@@ -23,7 +23,12 @@ import time
 from pathlib import Path
 
 from researchclaw.config import DockerSandboxConfig
-from researchclaw.experiment.sandbox import SandboxResult, parse_metrics
+from researchclaw.experiment.sandbox import (
+    SandboxResult,
+    parse_metrics,
+    validate_entry_point,
+    validate_entry_point_resolved,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +145,14 @@ class DockerSandbox:
             shutil.rmtree(staging)
         staging.mkdir(parents=True, exist_ok=True)
 
+        # Pre-copy syntax validation — fail fast before any I/O
+        err = validate_entry_point(entry_point)
+        if err:
+            return SandboxResult(
+                returncode=-1, stdout="", stderr=err,
+                elapsed_sec=0.0, metrics={},
+            )
+
         # Inject harness first (immutable)
         self._inject_harness(staging)
 
@@ -153,6 +166,14 @@ class DockerSandbox:
                     )
                     continue
                 dest.write_bytes(src_file.read_bytes())
+
+        # Post-copy resolve check — catches symlink-based escapes
+        err = validate_entry_point_resolved(staging, entry_point)
+        if err:
+            return SandboxResult(
+                returncode=-1, stdout="", stderr=err,
+                elapsed_sec=0.0, metrics={},
+            )
 
         entry = staging / entry_point
         if not entry.exists():
