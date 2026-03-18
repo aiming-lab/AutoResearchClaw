@@ -52,18 +52,19 @@ _NEW_SOURCE_IMPORTS: dict[str, tuple[str, str]] = {
 
 logger = logging.getLogger(__name__)
 
-# Original three sources -- the backward-compatible default.
+# Original three sources (kept as a named constant for tests and explicit opt-out).
 _ORIGINAL_SOURCES: tuple[str, ...] = (
     "openalex", "semantic_scholar", "arxiv",
 )
-# All open sources including the 8 new additions.
-# Pass this explicitly (sources=_EXTENDED_SOURCES) to opt into the full set.
+# All open sources: original 3 + 8 Tier 1 additions (no key, no signup).
 _EXTENDED_SOURCES: tuple[str, ...] = _ORIGINAL_SOURCES + (
     "crossref", "europepmc", "hal", "datacite",
     "scielo", "inspirehep", "dblp", "jstage",
 )
-# search_papers* default: original three only, preserving existing behavior.
-_DEFAULT_SOURCES: tuple[str, ...] = _ORIGINAL_SOURCES
+# Default: all Tier 0 + Tier 1 sources. Each client handles its own errors
+# gracefully (returns [] on failure), so including all sources by default is
+# safe and maximizes literature coverage.
+_DEFAULT_SOURCES: tuple[str, ...] = _EXTENDED_SOURCES
 
 
 CacheGet = Callable[[str, str, int], list[dict[str, object]] | None]

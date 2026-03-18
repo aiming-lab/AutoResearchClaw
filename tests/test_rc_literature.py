@@ -466,16 +466,22 @@ class TestSearchPapers:
         # Should be sorted by citation_count desc
         assert papers[0].citation_count >= papers[1].citation_count
 
-    def test_default_sources_original_only(self) -> None:
-        """_DEFAULT_SOURCES must equal _ORIGINAL_SOURCES for backward compatibility."""
+    def test_default_sources_includes_all_tiers(self) -> None:
+        """_DEFAULT_SOURCES must include all Tier 0 + Tier 1 sources."""
         from researchclaw.literature.search import _DEFAULT_SOURCES
-        assert _DEFAULT_SOURCES == _ORIGINAL_SOURCES
-        assert _DEFAULT_SOURCES[0] == "openalex"
+        assert _DEFAULT_SOURCES == _EXTENDED_SOURCES
+        # Tier 0 (original)
+        assert "openalex" in _DEFAULT_SOURCES
         assert "semantic_scholar" in _DEFAULT_SOURCES
         assert "arxiv" in _DEFAULT_SOURCES
-        # New sources are opt-in via _EXTENDED_SOURCES, not in default.
-        assert "crossref" not in _DEFAULT_SOURCES
-        assert "crossref" in _EXTENDED_SOURCES
+        # Tier 1 (open, no key required)
+        assert "crossref" in _DEFAULT_SOURCES
+        assert "europepmc" in _DEFAULT_SOURCES
+        assert "inspirehep" in _DEFAULT_SOURCES
+        assert "dblp" in _DEFAULT_SOURCES
+        # _ORIGINAL_SOURCES is a subset
+        for src in _ORIGINAL_SOURCES:
+            assert src in _DEFAULT_SOURCES
 
     def test_s2_failure_does_not_block_others(
         self, monkeypatch: pytest.MonkeyPatch
