@@ -23,6 +23,9 @@ PROVIDER_PRESETS = {
     "anthropic": {
         "base_url": "https://api.anthropic.com",
     },
+    "novita": {
+        "base_url": "https://api.novita.ai/v3/openai",
+    },
     "openai-compatible": {
         "base_url": None,  # Use user-provided base_url
     },
@@ -37,11 +40,15 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
     - ``"openrouter"`` → :class:`LLMClient` with OpenRouter base URL
     - ``"openai"`` → :class:`LLMClient` with OpenAI base URL
     - ``"deepseek"`` → :class:`LLMClient` with DeepSeek base URL
+    - ``"novita"`` → :class:`LLMClient` with Novita AI base URL
     - ``"openai-compatible"`` (default) → :class:`LLMClient` with custom base_url
 
     OpenRouter is fully compatible with the OpenAI API format, making it
     a drop-in replacement with access to 200+ models from Anthropic, Google,
     Meta, Mistral, and more. See: https://openrouter.ai/models
+
+    Novita AI provides fast and affordable LLM inference with OpenAI-compatible
+    API. See: https://novita.ai/models
     """
     if config.llm.provider == "acp":
         from researchclaw.llm.acp_client import ACPClient as _ACP
