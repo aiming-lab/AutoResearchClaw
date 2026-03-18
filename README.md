@@ -102,6 +102,7 @@ cp config.researchclaw.example.yaml config.arc.yaml
 export OPENAI_API_KEY="sk-..."
 researchclaw run --config config.arc.yaml --topic "Your research idea" --auto-approve
 ```
+Add `-v` for info-level logs, `-vv` for debug-level logs.
 
 Output → `artifacts/rc-YYYYMMDD-HHMMSS-<hash>/deliverables/` — compile-ready LaTeX, BibTeX, experiment code, charts.
 

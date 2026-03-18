@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -377,6 +378,10 @@ def main(argv: list[str] | None = None) -> int:
         "--no-graceful-degradation", action="store_true",
         help="Disable graceful degradation: fail pipeline on quality gate failure"
     )
+    _ = run_p.add_argument(
+        "--verbose", "-v", action="count", default=0,
+        help="Increase log verbosity (-v for INFO, -vv for DEBUG)"
+    )
     val_p = sub.add_parser("validate", help="Validate config file")
     _ = val_p.add_argument(
         "--config", "-c", default=None,
@@ -404,6 +409,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     _ = rpt_p.add_argument("--output", "-o", help="Write report to file")
     args = parser.parse_args(argv)
+
+    # Configure logging based on verbosity
+    verbose = getattr(args, "verbose", 0)
+    if verbose >= 2:
+        log_level = logging.DEBUG
+    elif verbose >= 1:
+        log_level = logging.INFO
+    else:
+        log_level = logging.WARNING
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     command = cast(str | None, args.command)
 
