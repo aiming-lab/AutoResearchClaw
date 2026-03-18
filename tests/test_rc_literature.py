@@ -466,6 +466,13 @@ class TestSearchPapers:
         # Should be sorted by citation_count desc
         assert papers[0].citation_count >= papers[1].citation_count
 
+    def test_arxiv_library_importable(self) -> None:
+        """arxiv pip package must be installed -- silent degradation is a bug."""
+        from researchclaw.literature import arxiv_client
+        assert arxiv_client.arxiv is not None, (
+            "arxiv library not installed. Run: pip install arxiv>=2.1"
+        )
+
     def test_default_sources_includes_all_tiers(self) -> None:
         """_DEFAULT_SOURCES must include all Tier 0 + Tier 1 sources."""
         from researchclaw.literature.search import _DEFAULT_SOURCES
