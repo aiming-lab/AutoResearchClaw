@@ -8344,7 +8344,7 @@ def execute_stage(
 
     llm = None
     try:
-        if config.llm.provider == "acp":
+        if config.llm.provider in ("acp", "chatgpt"):
             llm = create_llm_client(config)
         else:
             candidate = LLMClient.from_rc_config(config)

@@ -95,17 +95,20 @@ pip install -e .
 
 # 2. Configure
 cp config.researchclaw.example.yaml config.arc.yaml
-# Edit config.arc.yaml — set your LLM API endpoint and key
+researchclaw init          # interactive setup — choose your provider
 
-# 3. Run
-export OPENAI_API_KEY="sk-..."
+# 3. Authenticate (pick one)
+export OPENAI_API_KEY="sk-..."   # Option A: API key
+researchclaw login               # Option B: ChatGPT Plus/Pro subscription (browser login)
+
+# 4. Run
 researchclaw run --config config.arc.yaml --topic "Your research idea" --auto-approve
 ```
 
 Output → `artifacts/rc-YYYYMMDD-HHMMSS-<hash>/deliverables/` — compile-ready LaTeX, BibTeX, experiment code, charts.
 
 <details>
-<summary>📝 Minimum required config</summary>
+<summary>📝 Minimum required config — API Key</summary>
 
 ```yaml
 project:
@@ -125,6 +128,31 @@ experiment:
   sandbox:
     python_path: ".venv/bin/python"
 ```
+
+</details>
+
+<details>
+<summary>📝 Minimum required config — ChatGPT Plus/Pro subscription</summary>
+
+```yaml
+project:
+  name: "my-research"
+
+research:
+  topic: "Your research topic here"
+
+llm:
+  provider: "chatgpt"               # uses your ChatGPT subscription via OAuth
+  primary_model: "gpt-5.2-codex"
+  fallback_models: ["gpt-5.1-codex", "gpt-5.1"]
+
+experiment:
+  mode: "sandbox"
+  sandbox:
+    python_path: ".venv/bin/python"
+```
+
+No API key needed — run `researchclaw login` to authenticate with your browser.
 
 </details>
 

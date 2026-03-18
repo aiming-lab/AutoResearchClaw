@@ -85,6 +85,7 @@ class LLMClient:
         self.config = config
         self._model_chain = [config.primary_model] + list(config.fallback_models)
         self._anthropic = None  # Will be set by from_rc_config if needed
+        self._chatgpt = None  # Will be set by from_rc_config for ChatGPT subscription
 
     @classmethod
     def from_rc_config(cls, rc_config: Any) -> LLMClient:
@@ -141,6 +142,14 @@ class LLMClient:
             client._anthropic = AnthropicAdapter(
                 original_base_url, original_api_key, config.timeout_sec
             )
+
+        # Detect ChatGPT subscription provider — uses OAuth tokens
+        # from ChatGPT Plus/Pro subscription, no API key needed.
+        if provider == "chatgpt":
+            from .chatgpt_adapter import ChatGPTAdapter
+
+            client._chatgpt = ChatGPTAdapter(timeout_sec=config.timeout_sec)
+
         return client
 
     def chat(
@@ -224,8 +233,13 @@ class LLMClient:
             )
             return True, f"OK - model {self.config.primary_model} responding"
         except urllib.error.HTTPError as e:
+            auth_msg = (
+                "ChatGPT session expired — run 'researchclaw login'"
+                if self._chatgpt
+                else "Invalid API key"
+            )
             status_map = {
-                401: "Invalid API key",
+                401: auth_msg,
                 403: f"Model {self.config.primary_model} not allowed for this key",
                 404: f"Endpoint not found: {self.config.base_url}",
                 429: "Rate limited - try again in a moment",
@@ -304,8 +318,11 @@ class LLMClient:
     ) -> LLMResponse:
         """Make a single API call."""
         
+        # Use ChatGPT subscription adapter if configured
+        if self._chatgpt:
+            data = self._chatgpt.chat_completion(model, messages, max_tokens, temperature, json_mode)
         # Use Anthropic adapter if configured
-        if self._anthropic:
+        elif self._anthropic:
             data = self._anthropic.chat_completion(model, messages, max_tokens, temperature, json_mode)
         else:
             # Original OpenAI logic

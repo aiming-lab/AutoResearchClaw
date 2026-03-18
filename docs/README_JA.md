@@ -246,7 +246,9 @@ openclaw_bridge:
 ### 前提条件
 
 - 🐍 Python 3.11+
-- 🔑 OpenAI互換のLLM APIエンドポイント（GPT-4o、GPT-5.x、またはその他の互換プロバイダー）
+- 🔑 以下のいずれかの認証方法：
+  - OpenAI互換のLLM APIキー（GPT-4o、GPT-5.x、またはその他の互換プロバイダー）
+  - **ChatGPT Plus/Proサブスクリプション**（ブラウザOAuthログイン、APIキー不要）
 
 ### インストール
 
@@ -261,10 +263,11 @@ pip install -e .
 
 ```bash
 cp config.researchclaw.example.yaml config.arc.yaml
+researchclaw init          # 対話式セットアップ — プロバイダーを選択
 ```
 
 <details>
-<summary>📝 最小限の必要設定</summary>
+<summary>📝 最小限の必要設定 — APIキー方式</summary>
 
 ```yaml
 project:
@@ -288,12 +291,45 @@ experiment:
 
 </details>
 
+<details>
+<summary>📝 最小限の必要設定 — ChatGPT Plus/Proサブスクリプション方式</summary>
+
+```yaml
+project:
+  name: "my-research"
+
+research:
+  topic: "Your research topic here"
+
+llm:
+  provider: "chatgpt"               # OAuthでChatGPTサブスクリプションを使用
+  primary_model: "gpt-5.2-codex"
+  fallback_models: ["gpt-5.1-codex", "gpt-5.1"]
+
+experiment:
+  mode: "sandbox"
+  sandbox:
+    python_path: ".venv/bin/python"
+```
+
+APIキー不要 — `researchclaw login` を実行してブラウザでログインしてください。
+
+</details>
+
+### 認証
+
+```bash
+# 方法A：APIキー（従来の方法）
+export OPENAI_API_KEY="sk-..."
+
+# 方法B：ChatGPT Plus/Proサブスクリプション（ブラウザログイン）
+researchclaw login                   # ブラウザが開きOAuth認証を完了
+researchclaw logout                  # ログアウト（ローカルトークンを削除）
+```
+
 ### 実行
 
 ```bash
-# APIキーを設定
-export OPENAI_API_KEY="sk-..."
-
 # 🚀 フルパイプラインを実行
 researchclaw run --config config.arc.yaml --auto-approve
 

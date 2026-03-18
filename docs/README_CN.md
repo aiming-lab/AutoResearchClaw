@@ -245,7 +245,9 @@ openclaw_bridge:
 ### 前置条件
 
 - 🐍 Python 3.11+
-- 🔑 一个 OpenAI 兼容的 LLM API（GPT-4o、GPT-5.x，或任何兼容接口）
+- 🔑 以下任一认证方式：
+  - OpenAI 兼容的 LLM API 密钥（GPT-4o、GPT-5.x，或任何兼容接口）
+  - **ChatGPT Plus/Pro 订阅**（通过浏览器 OAuth 登录，无需 API 密钥）
 
 ### 安装
 
@@ -260,10 +262,11 @@ pip install -e .
 
 ```bash
 cp config.researchclaw.example.yaml config.arc.yaml
+researchclaw init          # 交互式设置 — 选择你的 LLM 供应商
 ```
 
 <details>
-<summary>📝 最小必要配置</summary>
+<summary>📝 最小必要配置 — API Key 方式</summary>
 
 ```yaml
 project:
@@ -287,12 +290,45 @@ experiment:
 
 </details>
 
+<details>
+<summary>📝 最小必要配置 — ChatGPT Plus/Pro 订阅方式</summary>
+
+```yaml
+project:
+  name: "my-research"
+
+research:
+  topic: "你的研究主题"
+
+llm:
+  provider: "chatgpt"               # 使用 ChatGPT 订阅，通过 OAuth 认证
+  primary_model: "gpt-5.2-codex"
+  fallback_models: ["gpt-5.1-codex", "gpt-5.1"]
+
+experiment:
+  mode: "sandbox"
+  sandbox:
+    python_path: ".venv/bin/python"
+```
+
+无需 API 密钥 — 运行 `researchclaw login` 即可通过浏览器登录你的 ChatGPT 账号。
+
+</details>
+
+### 认证
+
+```bash
+# 方式 A：API Key（传统方式）
+export OPENAI_API_KEY="sk-..."
+
+# 方式 B：ChatGPT Plus/Pro 订阅（浏览器登录）
+researchclaw login                   # 自动打开浏览器完成 OAuth 登录
+researchclaw logout                  # 退出登录（清除本地 token）
+```
+
 ### 运行
 
 ```bash
-# 设置 API Key
-export OPENAI_API_KEY="sk-..."
-
 # 🚀 运行完整流水线
 researchclaw run --config config.arc.yaml --auto-approve
 

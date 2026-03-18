@@ -246,7 +246,9 @@ openclaw_bridge:
 ### 사전 요구 사항
 
 - 🐍 Python 3.11+
-- 🔑 OpenAI 호환 LLM API 엔드포인트 (GPT-4o, GPT-5.x 또는 기타 호환 제공자)
+- 🔑 다음 인증 방법 중 하나:
+  - OpenAI 호환 LLM API 키 (GPT-4o, GPT-5.x 또는 기타 호환 제공자)
+  - **ChatGPT Plus/Pro 구독** (브라우저 OAuth 로그인, API 키 불필요)
 
 ### 설치
 
@@ -261,10 +263,11 @@ pip install -e .
 
 ```bash
 cp config.researchclaw.example.yaml config.arc.yaml
+researchclaw init          # 대화형 설정 — 공급자 선택
 ```
 
 <details>
-<summary>📝 최소 필수 설정</summary>
+<summary>📝 최소 필수 설정 — API 키 방식</summary>
 
 ```yaml
 project:
@@ -288,12 +291,45 @@ experiment:
 
 </details>
 
+<details>
+<summary>📝 최소 필수 설정 — ChatGPT Plus/Pro 구독 방식</summary>
+
+```yaml
+project:
+  name: "my-research"
+
+research:
+  topic: "Your research topic here"
+
+llm:
+  provider: "chatgpt"               # OAuth를 통해 ChatGPT 구독 사용
+  primary_model: "gpt-5.2-codex"
+  fallback_models: ["gpt-5.1-codex", "gpt-5.1"]
+
+experiment:
+  mode: "sandbox"
+  sandbox:
+    python_path: ".venv/bin/python"
+```
+
+API 키 불필요 — `researchclaw login`을 실행하여 브라우저로 로그인하세요.
+
+</details>
+
+### 인증
+
+```bash
+# 방법 A: API 키 (기존 방식)
+export OPENAI_API_KEY="sk-..."
+
+# 방법 B: ChatGPT Plus/Pro 구독 (브라우저 로그인)
+researchclaw login                   # 브라우저가 열리고 OAuth 인증 완료
+researchclaw logout                  # 로그아웃 (로컬 토큰 삭제)
+```
+
 ### 실행
 
 ```bash
-# API 키 설정
-export OPENAI_API_KEY="sk-..."
-
 # 🚀 전체 파이프라인 실행
 researchclaw run --config config.arc.yaml --auto-approve
 

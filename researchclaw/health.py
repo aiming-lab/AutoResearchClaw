@@ -591,6 +591,22 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
 
     if provider == "acp":
         checks.append(check_acp_agent(acp_agent_command))
+    elif provider == "chatgpt":
+        from researchclaw.llm.chatgpt_oauth import load_auth
+        tokens = load_auth()
+        if tokens and not tokens.expired:
+            checks.append(CheckResult(
+                name="chatgpt_auth",
+                status="pass",
+                detail="ChatGPT OAuth session is valid",
+            ))
+        else:
+            checks.append(CheckResult(
+                name="chatgpt_auth",
+                status="fail",
+                detail="No valid ChatGPT session found",
+                fix="Run 'researchclaw login' to authenticate with your ChatGPT subscription",
+            ))
     else:
         checks.append(check_llm_connectivity(base_url))
         checks.append(check_api_key_valid(base_url, api_key))

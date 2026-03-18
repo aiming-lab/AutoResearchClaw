@@ -181,9 +181,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 _PROVIDER_CHOICES = {
     "1": ("openai", "OPENAI_API_KEY"),
-    "2": ("openrouter", "OPENROUTER_API_KEY"),
-    "3": ("deepseek", "DEEPSEEK_API_KEY"),
-    "4": ("acp", ""),
+    "2": ("chatgpt", ""),
+    "3": ("openrouter", "OPENROUTER_API_KEY"),
+    "4": ("deepseek", "DEEPSEEK_API_KEY"),
+    "5": ("acp", ""),
 }
 
 _PROVIDER_URLS = {
@@ -194,6 +195,7 @@ _PROVIDER_URLS = {
 
 _PROVIDER_MODELS = {
     "openai": ("gpt-4o", ["gpt-4.1", "gpt-4o-mini"]),
+    "chatgpt": ("gpt-5.2-codex", ["gpt-5.3-codex", "gpt-5.1"]),
     "openrouter": (
         "anthropic/claude-3.5-sonnet",
         ["google/gemini-pro-1.5", "meta-llama/llama-3.1-70b-instruct"],
@@ -231,9 +233,10 @@ def cmd_init(args: argparse.Namespace) -> int:
     if sys.stdin.isatty():
         print("Select LLM provider:")
         print("  1) openai       (requires OPENAI_API_KEY)")
-        print("  2) openrouter   (requires OPENROUTER_API_KEY)")
-        print("  3) deepseek     (requires DEEPSEEK_API_KEY)")
-        print("  4) acp          (local AI agent — no API key needed)")
+        print("  2) chatgpt      (ChatGPT Plus/Pro subscription — browser login)")
+        print("  3) openrouter   (requires OPENROUTER_API_KEY)")
+        print("  4) deepseek     (requires DEEPSEEK_API_KEY)")
+        print("  5) acp          (local AI agent — no API key needed)")
         try:
             raw = input("Choice [1]: ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -250,8 +253,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         'provider: "openai-compatible"', f'provider: "{provider}"'
     )
 
-    if provider == "acp":
-        # ACP doesn't need base_url or api_key_env
+    if provider in ("acp", "chatgpt"):
+        # ACP / ChatGPT don't need base_url or api_key_env
         content = content.replace(
             'base_url: "https://api.openai.com/v1"', 'base_url: ""'
         )
@@ -279,7 +282,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     dest.write_text(content, encoding="utf-8")
     print(f"Created {dest} (provider: {provider})")
 
-    if provider == "acp":
+    if provider == "chatgpt":
+        print("\nNext steps:")
+        print("  1. Run: researchclaw login")
+        print("     (Opens browser for ChatGPT Plus/Pro subscription login)")
+        print("  2. Edit config.arc.yaml to customize your settings")
+        print("  3. Run: researchclaw doctor")
+    elif provider == "acp":
         print("\nNext steps:")
         print("  1. Ensure your ACP agent is installed and on PATH")
         print("  2. Edit config.arc.yaml to set llm.acp.agent if needed")
@@ -291,6 +300,49 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("  2. Edit config.arc.yaml to customize your settings")
         print("  3. Run: researchclaw doctor")
 
+    return 0
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    """Authenticate with ChatGPT Plus/Pro subscription via browser OAuth."""
+    from researchclaw.llm.chatgpt_oauth import load_auth, run_oauth_flow
+
+    existing = load_auth()
+    if existing and not existing.expired:
+        print("Already logged in with a valid ChatGPT session.")
+        if existing.account_id:
+            print(f"  Account ID: {existing.account_id[:12]}...")
+        force = False
+        if sys.stdin.isatty():
+            try:
+                raw = input("Re-authenticate? [y/N]: ").strip().lower()
+                force = raw in ("y", "yes")
+            except (EOFError, KeyboardInterrupt):
+                pass
+        if not force:
+            return 0
+
+    try:
+        tokens = run_oauth_flow()
+        print(f"\nLogin successful!")
+        if tokens.account_id:
+            print(f"  Account ID: {tokens.account_id[:12]}...")
+        print(f"  Tokens saved to: ~/.researchclaw/auth.json")
+        print(f"\nYou can now use provider: chatgpt in your config.")
+        return 0
+    except RuntimeError as exc:
+        print(f"Login failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def cmd_logout(args: argparse.Namespace) -> int:
+    """Remove stored ChatGPT OAuth tokens."""
+    from researchclaw.llm.chatgpt_oauth import delete_auth
+
+    if delete_auth():
+        print("Logged out. ChatGPT session tokens removed.")
+    else:
+        print("No stored session found.")
     return 0
 
 
@@ -363,6 +415,9 @@ def main(argv: list[str] | None = None) -> int:
         "--force", action="store_true", help="Overwrite existing config.arc.yaml"
     )
 
+    sub.add_parser("login", help="Login with ChatGPT Plus/Pro subscription (browser OAuth)")
+    sub.add_parser("logout", help="Remove stored ChatGPT session tokens")
+
     rpt_p = sub.add_parser("report", help="Generate human-readable run report")
     _ = rpt_p.add_argument(
         "--run-dir", required=True, help="Path to run artifacts directory"
@@ -380,6 +435,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_doctor(args)
     elif command == "init":
         return cmd_init(args)
+    elif command == "login":
+        return cmd_login(args)
+    elif command == "logout":
+        return cmd_logout(args)
     elif command == "report":
         return cmd_report(args)
     else:

@@ -246,7 +246,9 @@ openclaw_bridge:
 ### Предварительные требования
 
 - 🐍 Python 3.11+
-- 🔑 Конечная точка API LLM, совместимая с OpenAI (GPT-4o, GPT-5.x или любой совместимый провайдер)
+- 🔑 Один из следующих методов аутентификации:
+  - API-ключ LLM, совместимый с OpenAI (GPT-4o, GPT-5.x или любой совместимый провайдер)
+  - **Подписка ChatGPT Plus/Pro** (OAuth-вход через браузер, API-ключ не требуется)
 
 ### Установка
 
@@ -261,10 +263,11 @@ pip install -e .
 
 ```bash
 cp config.researchclaw.example.yaml config.arc.yaml
+researchclaw init          # Интерактивная настройка — выберите провайдера
 ```
 
 <details>
-<summary>📝 Минимальная необходимая конфигурация</summary>
+<summary>📝 Минимальная необходимая конфигурация — API-ключ</summary>
 
 ```yaml
 project:
@@ -288,12 +291,45 @@ experiment:
 
 </details>
 
+<details>
+<summary>📝 Минимальная необходимая конфигурация — Подписка ChatGPT Plus/Pro</summary>
+
+```yaml
+project:
+  name: "my-research"
+
+research:
+  topic: "Your research topic here"
+
+llm:
+  provider: "chatgpt"               # Используйте подписку ChatGPT через OAuth
+  primary_model: "gpt-5.2-codex"
+  fallback_models: ["gpt-5.1-codex", "gpt-5.1"]
+
+experiment:
+  mode: "sandbox"
+  sandbox:
+    python_path: ".venv/bin/python"
+```
+
+API-ключ не требуется — выполните `researchclaw login` для входа через браузер.
+
+</details>
+
+### Аутентификация
+
+```bash
+# Способ A: API-ключ (классический способ)
+export OPENAI_API_KEY="sk-..."
+
+# Способ B: Подписка ChatGPT Plus/Pro (вход через браузер)
+researchclaw login                   # Браузер откроется для OAuth-аутентификации
+researchclaw logout                  # Выйти из системы (удалить локальные токены)
+```
+
 ### Запуск
 
 ```bash
-# Установите ваш API-ключ
-export OPENAI_API_KEY="sk-..."
-
 # 🚀 Запуск полного конвейера
 researchclaw run --config config.arc.yaml --auto-approve
 

@@ -246,7 +246,9 @@ Fase D: Design de Experimentos      Fase H: Finalização
 ### Pré-requisitos
 
 - 🐍 Python 3.11+
-- 🔑 Um endpoint de API LLM compatível com OpenAI (GPT-4o, GPT-5.x ou qualquer provedor compatível)
+- 🔑 Um dos seguintes métodos de autenticação:
+  - Uma chave de API LLM compatível com OpenAI (GPT-4o, GPT-5.x ou qualquer provedor compatível)
+  - **Assinatura ChatGPT Plus/Pro** (login OAuth pelo navegador, sem necessidade de chave API)
 
 ### Instalação
 
@@ -261,10 +263,11 @@ pip install -e .
 
 ```bash
 cp config.researchclaw.example.yaml config.arc.yaml
+researchclaw init          # Configuração interativa — escolha seu provedor
 ```
 
 <details>
-<summary>📝 Configuração mínima necessária</summary>
+<summary>📝 Configuração mínima necessária — Chave API</summary>
 
 ```yaml
 project:
@@ -288,12 +291,45 @@ experiment:
 
 </details>
 
+<details>
+<summary>📝 Configuração mínima necessária — Assinatura ChatGPT Plus/Pro</summary>
+
+```yaml
+project:
+  name: "my-research"
+
+research:
+  topic: "Your research topic here"
+
+llm:
+  provider: "chatgpt"               # Usa sua assinatura ChatGPT via OAuth
+  primary_model: "gpt-5.2-codex"
+  fallback_models: ["gpt-5.1-codex", "gpt-5.1"]
+
+experiment:
+  mode: "sandbox"
+  sandbox:
+    python_path: ".venv/bin/python"
+```
+
+Nenhuma chave API necessária — execute `researchclaw login` para autenticar pelo navegador.
+
+</details>
+
+### Autenticação
+
+```bash
+# Método A: Chave API (forma clássica)
+export OPENAI_API_KEY="sk-..."
+
+# Método B: Assinatura ChatGPT Plus/Pro (login pelo navegador)
+researchclaw login                   # O navegador abre para autenticação OAuth
+researchclaw logout                  # Sair (remover tokens locais)
+```
+
 ### Execução
 
 ```bash
-# Defina sua chave de API
-export OPENAI_API_KEY="sk-..."
-
 # 🚀 Execute o pipeline completo
 researchclaw run --config config.arc.yaml --auto-approve
 

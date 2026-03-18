@@ -246,7 +246,9 @@ Phase D: تصميم التجارب            Phase H: الإنهاء
 ### المتطلبات الأساسية
 
 - 🐍 Python 3.11+
-- 🔑 نقطة نهاية API متوافقة مع OpenAI لنموذج لغة (GPT-4o، GPT-5.x، أو أي مزود متوافق)
+- 🔑 إحدى طرق المصادقة التالية:
+  - مفتاح API متوافق مع OpenAI لنموذج لغة (GPT-4o، GPT-5.x، أو أي مزود متوافق)
+  - **اشتراك ChatGPT Plus/Pro** (تسجيل دخول OAuth عبر المتصفح، لا حاجة لمفتاح API)
 
 ### التثبيت
 
@@ -261,10 +263,11 @@ pip install -e .
 
 ```bash
 cp config.researchclaw.example.yaml config.arc.yaml
+researchclaw init          # إعداد تفاعلي — اختر مزود الخدمة
 ```
 
 <details>
-<summary>📝 الحد الأدنى من التهيئة المطلوبة</summary>
+<summary>📝 الحد الأدنى من التهيئة المطلوبة — مفتاح API</summary>
 
 ```yaml
 project:
@@ -288,12 +291,45 @@ experiment:
 
 </details>
 
+<details>
+<summary>📝 الحد الأدنى من التهيئة المطلوبة — اشتراك ChatGPT Plus/Pro</summary>
+
+```yaml
+project:
+  name: "my-research"
+
+research:
+  topic: "Your research topic here"
+
+llm:
+  provider: "chatgpt"               # استخدام اشتراك ChatGPT عبر OAuth
+  primary_model: "gpt-5.2-codex"
+  fallback_models: ["gpt-5.1-codex", "gpt-5.1"]
+
+experiment:
+  mode: "sandbox"
+  sandbox:
+    python_path: ".venv/bin/python"
+```
+
+لا حاجة لمفتاح API — قم بتشغيل `researchclaw login` للمصادقة عبر المتصفح.
+
+</details>
+
+### المصادقة
+
+```bash
+# الطريقة أ: مفتاح API (الطريقة التقليدية)
+export OPENAI_API_KEY="sk-..."
+
+# الطريقة ب: اشتراك ChatGPT Plus/Pro (تسجيل الدخول عبر المتصفح)
+researchclaw login                   # يفتح المتصفح لإتمام مصادقة OAuth
+researchclaw logout                  # تسجيل الخروج (حذف الرموز المحلية)
+```
+
 ### التشغيل
 
 ```bash
-# تعيين مفتاح API
-export OPENAI_API_KEY="sk-..."
-
 # 🚀 تشغيل خط الأنابيب الكامل
 researchclaw run --config config.arc.yaml --auto-approve
 

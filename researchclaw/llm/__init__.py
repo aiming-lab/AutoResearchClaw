@@ -1,4 +1,4 @@
-"""LLM integration — OpenAI-compatible and ACP agent clients."""
+"""LLM integration — OpenAI-compatible, ACP agent, and ChatGPT subscription clients."""
 
 from __future__ import annotations
 
@@ -23,6 +23,9 @@ PROVIDER_PRESETS = {
     "anthropic": {
         "base_url": "https://api.anthropic.com",
     },
+    "chatgpt": {
+        "base_url": "https://chatgpt.com/backend-api",
+    },
     "openai-compatible": {
         "base_url": None,  # Use user-provided base_url
     },
@@ -33,6 +36,8 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
     """Factory: return the right LLM client based on ``config.llm.provider``.
 
     - ``"acp"`` → :class:`ACPClient` (spawns an ACP-compatible agent)
+    - ``"chatgpt"`` → :class:`LLMClient` with ChatGPT backend adapter
+      (uses ChatGPT Plus/Pro subscription via OAuth, no API key needed)
     - ``"anthropic"`` → :class:`LLMClient` with Anthropic Messages API adapter
     - ``"openrouter"`` → :class:`LLMClient` with OpenRouter base URL
     - ``"openai"`` → :class:`LLMClient` with OpenAI base URL
@@ -49,5 +54,5 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
 
     from researchclaw.llm.client import LLMClient as _LLM
 
-    # Use from_rc_config to properly initialize adapters (e.g., Anthropic)
+    # Use from_rc_config to properly initialize adapters (e.g., Anthropic, ChatGPT)
     return _LLM.from_rc_config(config)
