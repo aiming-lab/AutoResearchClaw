@@ -592,8 +592,12 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
     if provider == "acp":
         checks.append(check_acp_agent(acp_agent_command))
     elif provider == "chatgpt":
-        from researchclaw.llm.chatgpt_oauth import load_auth
-        tokens = load_auth()
+        from researchclaw.llm.chatgpt_oauth import ensure_valid_token
+        tokens = None
+        try:
+            tokens = ensure_valid_token()
+        except Exception:  # noqa: BLE001
+            logger.debug("ChatGPT auth token validation/refresh failed", exc_info=True)
         if tokens and not tokens.expired:
             checks.append(CheckResult(
                 name="chatgpt_auth",

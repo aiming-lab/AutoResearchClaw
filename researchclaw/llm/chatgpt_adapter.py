@@ -138,6 +138,10 @@ class ChatGPTAdapter:
     ) -> dict[str, Any]:
         """Call ChatGPT backend Responses API and return OpenAI-compatible response.
 
+        ``max_tokens`` is accepted for API compatibility with other providers
+        but is **not** forwarded to the ChatGPT backend, as the Responses API
+        does not support an explicit output token limit.
+
         Raises ``urllib.error.HTTPError`` on API errors for upstream retry logic.
         """
         tokens = self._get_tokens()

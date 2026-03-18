@@ -14,11 +14,9 @@ import base64
 import hashlib
 import json
 import logging
-import os
 import secrets
 import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -117,8 +115,7 @@ def _decode_jwt_payload(token: str) -> dict[str, Any]:
         if len(parts) != 3:
             return {}
         payload = parts[1]
-        # Add padding
-        padded = payload + "=" * (4 - len(payload) % 4)
+        padded = payload + "=" * ((-len(payload)) % 4)
         decoded = base64.urlsafe_b64decode(padded)
         return json.loads(decoded)
     except Exception:  # noqa: BLE001
