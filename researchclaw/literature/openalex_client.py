@@ -21,6 +21,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -42,6 +43,7 @@ _RATE_LIMIT_SEC = 0.2  # OpenAlex is generous; 200ms is more than enough
 
 # Last request timestamp for rate limiting
 _last_request_time: float = 0.0
+_rate_lock = threading.Lock()
 
 
 def search_openalex(
@@ -71,11 +73,13 @@ def search_openalex(
     """
     global _last_request_time  # noqa: PLW0603
 
-    # Rate limiting
-    now = time.monotonic()
-    elapsed = now - _last_request_time
-    if elapsed < _RATE_LIMIT_SEC:
-        time.sleep(_RATE_LIMIT_SEC - elapsed)
+    # Rate limiting (locked to serialize concurrent callers)
+    with _rate_lock:
+        now = time.monotonic()
+        elapsed = now - _last_request_time
+        if elapsed < _RATE_LIMIT_SEC:
+            time.sleep(_RATE_LIMIT_SEC - elapsed)
+        _last_request_time = time.monotonic()
 
     limit = min(limit, _MAX_PER_REQUEST)
 
@@ -97,8 +101,6 @@ def search_openalex(
         params["filter"] = ",".join(filters)
 
     url = f"{_BASE_URL}?{urllib.parse.urlencode(params)}"
-
-    _last_request_time = time.monotonic()
     data = _request_with_retry(url, email)
     if data is None:
         return []
