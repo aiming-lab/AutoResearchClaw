@@ -627,12 +627,21 @@ def _parse_benchmark_agent_config(data: dict[str, Any]) -> BenchmarkAgentConfig:
 def _parse_figure_agent_config(data: dict[str, Any]) -> FigureAgentConfig:
     if not data:
         return FigureAgentConfig()
+    use_docker_raw = data.get("use_docker", None)
     return FigureAgentConfig(
         enabled=bool(data.get("enabled", True)),
         min_figures=int(data.get("min_figures", 3)),
         max_figures=int(data.get("max_figures", 8)),
         max_iterations=int(data.get("max_iterations", 3)),
         render_timeout_sec=int(data.get("render_timeout_sec", 30)),
+        use_docker=(
+            None if use_docker_raw is None else bool(use_docker_raw)
+        ),
+        docker_image=data.get("docker_image", "researchclaw/experiment:latest"),
+        output_format=data.get("output_format", "python"),
+        gemini_api_key=data.get("gemini_api_key", ""),
+        gemini_model=data.get("gemini_model", "gemini-2.5-flash-image"),
+        nano_banana_enabled=bool(data.get("nano_banana_enabled", True)),
         strict_mode=bool(data.get("strict_mode", False)),
         dpi=int(data.get("dpi", 300)),
     )

@@ -624,9 +624,15 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
 def print_doctor_report(report: DoctorReport) -> None:
     """Pretty-print doctor report to stdout."""
     icon_by_status = {"pass": "✅", "fail": "❌", "warn": "⚠️"}
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        for icon in icon_by_status.values():
+            icon.encode(encoding)
+    except UnicodeEncodeError:
+        icon_by_status = {"pass": "[OK]", "fail": "[FAIL]", "warn": "[WARN]"}
     print(f"ResearchClaw Doctor Report ({report.timestamp})")
     for check in report.checks:
-        icon = icon_by_status.get(check.status, "•")
+        icon = icon_by_status.get(check.status, "-")
         print(f"{icon} {check.name}: {check.detail}")
         if check.fix:
             print(f"   Fix: {check.fix}")
