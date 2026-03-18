@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -57,93 +58,99 @@ _cb_cooldown_sec: float = _CB_INITIAL_COOLDOWN
 _cb_open_since: float = 0.0
 _cb_trip_count: int = 0
 _rate_elevated: bool = False  # temporarily use slower rate after 429
+_cb_lock = threading.Lock()
 
 
 def _reset_circuit_breaker() -> None:
     """Reset circuit breaker state (for tests)."""
     global _cb_state, _cb_consecutive_429s, _cb_cooldown_sec  # noqa: PLW0603
     global _cb_open_since, _cb_trip_count, _rate_elevated  # noqa: PLW0603
-    _cb_state = _CB_CLOSED
-    _cb_consecutive_429s = 0
-    _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
-    _cb_open_since = 0.0
-    _cb_trip_count = 0
-    _rate_elevated = False
+    with _cb_lock:
+        _cb_state = _CB_CLOSED
+        _cb_consecutive_429s = 0
+        _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
+        _cb_open_since = 0.0
+        _cb_trip_count = 0
+        _rate_elevated = False
 
 
 def _cb_should_allow() -> bool:
     """Check if circuit breaker allows a request."""
     global _cb_state  # noqa: PLW0603
-    if _cb_state == _CB_CLOSED:
-        return True
-    if _cb_state == _CB_OPEN:
-        elapsed = time.monotonic() - _cb_open_since
-        if elapsed >= _cb_cooldown_sec:
-            _cb_state = _CB_HALF_OPEN
-            logger.info(
-                "arXiv circuit breaker → HALF_OPEN after %.0fs cooldown. "
-                "Trying one probe request...",
-                elapsed,
-            )
+    with _cb_lock:
+        if _cb_state == _CB_CLOSED:
             return True
-        logger.debug(
-            "arXiv circuit breaker OPEN — %.0fs remaining",
-            _cb_cooldown_sec - elapsed,
-        )
-        return False
-    # HALF_OPEN: allow the probe
-    return True
+        if _cb_state == _CB_OPEN:
+            elapsed = time.monotonic() - _cb_open_since
+            if elapsed >= _cb_cooldown_sec:
+                _cb_state = _CB_HALF_OPEN
+                logger.info(
+                    "arXiv circuit breaker → HALF_OPEN after %.0fs cooldown. "
+                    "Trying one probe request...",
+                    elapsed,
+                )
+                return True
+            logger.debug(
+                "arXiv circuit breaker OPEN — %.0fs remaining",
+                _cb_cooldown_sec - elapsed,
+            )
+            return False
+        # HALF_OPEN: allow the probe
+        return True
 
 
 def _cb_on_success() -> None:
     """Record a successful request."""
     global _cb_state, _cb_consecutive_429s, _cb_cooldown_sec  # noqa: PLW0603
     global _rate_elevated  # noqa: PLW0603
-    _cb_consecutive_429s = 0
-    if _cb_state != _CB_CLOSED:
-        logger.info("arXiv circuit breaker → CLOSED (request succeeded)")
-        _cb_state = _CB_CLOSED
-        _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
-    _rate_elevated = False  # restore normal rate on success
+    with _cb_lock:
+        _cb_consecutive_429s = 0
+        if _cb_state != _CB_CLOSED:
+            logger.info("arXiv circuit breaker → CLOSED (request succeeded)")
+            _cb_state = _CB_CLOSED
+            _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
+        _rate_elevated = False  # restore normal rate on success
 
 
 def _cb_on_429() -> bool:
     """Record a 429 response. Returns True if breaker is now OPEN."""
     global _cb_state, _cb_consecutive_429s, _cb_cooldown_sec  # noqa: PLW0603
     global _cb_open_since, _cb_trip_count, _rate_elevated  # noqa: PLW0603
-    _cb_consecutive_429s += 1
-    _rate_elevated = True  # slow down future requests
+    with _cb_lock:
+        _cb_consecutive_429s += 1
+        _rate_elevated = True  # slow down future requests
 
-    if _cb_state == _CB_HALF_OPEN:
-        _cb_cooldown_sec = min(_cb_cooldown_sec * 2, _CB_MAX_COOLDOWN)
-        _cb_state = _CB_OPEN
-        _cb_open_since = time.monotonic()
-        _cb_trip_count += 1
-        logger.warning(
-            "arXiv circuit breaker → OPEN (probe failed). "
-            "Next cooldown: %.0fs (trip #%d)",
-            _cb_cooldown_sec,
-            _cb_trip_count,
-        )
-        return True
+        if _cb_state == _CB_HALF_OPEN:
+            _cb_cooldown_sec = min(_cb_cooldown_sec * 2, _CB_MAX_COOLDOWN)
+            _cb_state = _CB_OPEN
+            _cb_open_since = time.monotonic()
+            _cb_trip_count += 1
+            logger.warning(
+                "arXiv circuit breaker → OPEN (probe failed). "
+                "Next cooldown: %.0fs (trip #%d)",
+                _cb_cooldown_sec,
+                _cb_trip_count,
+            )
+            return True
 
-    if _cb_consecutive_429s >= _CB_THRESHOLD:
-        _cb_state = _CB_OPEN
-        _cb_open_since = time.monotonic()
-        _cb_trip_count += 1
-        logger.warning(
-            "arXiv circuit breaker TRIPPED after %d consecutive 429s. "
-            "Cooldown: %.0fs (trip #%d). Other sources still active.",
-            _cb_consecutive_429s,
-            _cb_cooldown_sec,
-            _cb_trip_count,
-        )
-        return True
-    return False
+        if _cb_consecutive_429s >= _CB_THRESHOLD:
+            _cb_state = _CB_OPEN
+            _cb_open_since = time.monotonic()
+            _cb_trip_count += 1
+            logger.warning(
+                "arXiv circuit breaker TRIPPED after %d consecutive 429s. "
+                "Cooldown: %.0fs (trip #%d). Other sources still active.",
+                _cb_consecutive_429s,
+                _cb_cooldown_sec,
+                _cb_trip_count,
+            )
+            return True
+        return False
 
 
 # Last request timestamp for rate limiting
 _last_request_time: float = 0.0
+_rate_lock = threading.Lock()
 
 # Atom XML namespaces
 _NS = {
@@ -173,12 +180,16 @@ def search_arxiv(
     """
     global _last_request_time  # noqa: PLW0603
 
-    # Rate limiting: enforce minimum spacing between requests
-    now = time.monotonic()
-    rate = _RATE_LIMIT_ELEVATED if _rate_elevated else _RATE_LIMIT_SEC
-    elapsed_since_last = now - _last_request_time
-    if elapsed_since_last < rate:
-        time.sleep(rate - elapsed_since_last)
+    # Rate limiting: locked to serialize concurrent callers
+    with _rate_lock:
+        now = time.monotonic()
+        with _cb_lock:
+            rate_elevated = _rate_elevated
+        rate = _RATE_LIMIT_ELEVATED if rate_elevated else _RATE_LIMIT_SEC
+        elapsed_since_last = now - _last_request_time
+        if elapsed_since_last < rate:
+            time.sleep(rate - elapsed_since_last)
+        _last_request_time = time.monotonic()
 
     limit = min(limit, _MAX_RESULTS)
     params = {
@@ -189,8 +200,6 @@ def search_arxiv(
         "sortOrder": "descending",
     }
     url = f"{_BASE_URL}?{urllib.parse.urlencode(params)}"
-
-    _last_request_time = time.monotonic()
     xml_text = _fetch_with_retry(url)
     if xml_text is None:
         return []
