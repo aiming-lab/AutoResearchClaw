@@ -106,6 +106,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     run_dir = Path(output or f"artifacts/{run_id}")
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Persist run_id so the sentinel watchdog can reuse it on restart.
+    # When --output points to an existing run_dir (sentinel restart), read back
+    # the original run_id so the cross-run registry entry is updated in place
+    # rather than creating a new orphaned record on every crash recovery.
+    _run_id_file = run_dir / "run.id"
+    if output and _run_id_file.is_file():
+        try:
+            _saved = _run_id_file.read_text(encoding="utf-8").strip()
+            if _saved:
+                run_id = _saved
+        except OSError:
+            pass
+    else:
+        try:
+            _run_id_file.write_text(run_id, encoding="utf-8")
+        except OSError:
+            pass
+
     if config.knowledge_base.root:
         kb_root_path = Path(config.knowledge_base.root)
         kb_root_path.mkdir(parents=True, exist_ok=True)

@@ -5,7 +5,7 @@
 # Inspired by Sibyl's sentinel watchdog design.
 #
 # Usage:
-#   ./sentinel.sh <run_dir> [--python <python_path>]
+#   ./sentinel.sh <run_dir> [--python <python_path>] [--config <config_path>]
 #
 # The pipeline runner writes heartbeat.json after each stage. If the
 # heartbeat goes stale (>5 min) and the PID is dead, sentinel restarts.
@@ -19,13 +19,18 @@
 set -euo pipefail
 
 # --- Arguments ---
-RUN_DIR="${1:?Usage: sentinel.sh <run_dir> [--python <path>]}"
+RUN_DIR="${1:?Usage: sentinel.sh <run_dir> [--python <path>] [--config <path>]}"
 PYTHON_PATH="python"
+CONFIG_PATH=""
 shift
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --python)
             PYTHON_PATH="$2"
+            shift 2
+            ;;
+        --config)
+            CONFIG_PATH="$2"
             shift 2
             ;;
         *)
@@ -49,7 +54,8 @@ retry_count=0
 consecutive_failures=0
 
 log() {
-    local msg="[sentinel $(date '+%Y-%m-%dT%H:%M:%S')] $1"
+    local msg
+    msg="[sentinel $(date '+%Y-%m-%dT%H:%M:%S')] $1"
     echo "$msg"
     echo "$msg" >> "$RECOVERY_LOG"
 }
@@ -65,7 +71,7 @@ is_stale() {
 
     # Extract timestamp from heartbeat.json
     local hb_ts
-    hb_ts=$(python3 -c "
+    hb_ts=$("$PYTHON_PATH" -c "
 import json, sys
 try:
     data = json.load(open('${HEARTBEAT_FILE}'))
@@ -113,7 +119,13 @@ has_active_children() {
 restart_pipeline() {
     log "Attempting pipeline restart (attempt $((retry_count + 1))/${MAX_RETRIES})"
 
-    $PYTHON_PATH -m researchclaw resume --run-dir "$RUN_DIR" &
+    # Build command as an array to safely handle optional --config argument.
+    # Use 'run --resume --output' (not the nonexistent 'resume --run-dir' subcommand).
+    # cli.py reads run_dir/run.id to reuse the original run_id, so no --run-id flag needed.
+    local cmd_args=("$PYTHON_PATH" -m researchclaw run --resume --output "$RUN_DIR")
+    [[ -n "$CONFIG_PATH" ]] && cmd_args+=(--config "$CONFIG_PATH")
+
+    "${cmd_args[@]}" &
     local new_pid=$!
     echo "$new_pid" > "${RUN_DIR}/pipeline.pid"
 
