@@ -197,26 +197,57 @@ class ACPClient:
         self._session_ready = False
         # Force create a new session (not ensure, which may find the dead one)
         acpx = self._resolve_acpx()
-        if acpx:
+        if not acpx:
+            logger.warning("acpx not found while attempting to force-reconnect session '%s'", self.config.session_name)
+            return
+
+        # Best-effort close of any existing session; ignore failures but log them.
+        try:
             subprocess.run(
                 [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "sessions", "close",
                  self.config.session_name],
-                capture_output=True, timeout=15,
+                capture_output=True,
+                timeout=15,
             )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning(
+                "Error while closing ACP session '%s' during reconnect: %s",
+                self.config.session_name,
+                exc,
+            )
+
+        # Attempt to create a fresh session; on failure, leave _session_ready = False.
+        try:
             result = subprocess.run(
                 [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "sessions", "new",
                  "--name", self.config.session_name],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
-            if result.returncode == 0:
-                self._session_ready = True
-                logger.info("ACP session '%s' reconnected", self.config.session_name)
-            else:
-                logger.warning(
-                    "ACP session reconnect failed: %s", result.stderr.strip()[:200]
-                )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning(
+                "Error while creating new ACP session '%s' during reconnect: %s",
+                self.config.session_name,
+                exc,
+            )
+            self._session_ready = False
+            return
+
+        if result.returncode == 0:
+            self._session_ready = True
+            logger.info("ACP session '%s' reconnected", self.config.session_name)
+        else:
+            stderr_snippet = (result.stderr or "").strip()[:200]
+            logger.warning(
+                "ACP session reconnect failed for '%s' (exit %s): %s",
+                self.config.session_name,
+                result.returncode,
+                stderr_snippet,
+            )
+            self._session_ready = False
 
     def _ensure_session(self) -> None:
         """Find or create the named acpx session."""
