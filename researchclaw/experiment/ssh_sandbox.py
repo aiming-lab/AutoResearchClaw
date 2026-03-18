@@ -17,7 +17,12 @@ import uuid
 from pathlib import Path
 
 from researchclaw.config import SshRemoteConfig
-from researchclaw.experiment.sandbox import SandboxResult, parse_metrics
+from researchclaw.experiment.sandbox import (
+    SandboxResult,
+    parse_metrics,
+    validate_entry_point,
+    validate_entry_point_resolved,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +79,14 @@ class SshRemoteSandbox:
             shutil.rmtree(staging)
         staging.mkdir(parents=True, exist_ok=True)
 
+        # Pre-copy syntax validation — fail fast before any I/O
+        err = validate_entry_point(entry_point)
+        if err:
+            return SandboxResult(
+                returncode=-1, stdout="", stderr=err,
+                elapsed_sec=0.0, metrics={},
+            )
+
         self._inject_harness(staging)
 
         for src_item in project_dir.iterdir():
@@ -87,6 +100,14 @@ class SshRemoteSandbox:
                 shutil.copytree(src_item, dest, dirs_exist_ok=True)
             elif src_item.is_file():
                 dest.write_bytes(src_item.read_bytes())
+
+        # Post-copy resolve check — catches symlink-based escapes
+        err = validate_entry_point_resolved(staging, entry_point)
+        if err:
+            return SandboxResult(
+                returncode=-1, stdout="", stderr=err,
+                elapsed_sec=0.0, metrics={},
+            )
 
         entry = staging / entry_point
         if not entry.exists():
