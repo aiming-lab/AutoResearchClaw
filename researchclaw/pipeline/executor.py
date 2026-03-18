@@ -2295,10 +2295,10 @@ def _execute_literature_screen(
         _pm = prompts or PromptManager()
         _overlay = _get_evolution_overlay(run_dir, "literature_screen")
         batch_size = config.research.screen_batch_size
-        use_batching = not math.isnan(batch_size) and int(batch_size) > 0
+        use_batching = batch_size is not None and batch_size > 0
 
         if use_batching:
-            bs = int(batch_size)
+            bs = batch_size
             batches = [
                 filtered_rows[i : i + bs]
                 for i in range(0, len(filtered_rows), bs)
@@ -2436,10 +2436,16 @@ def _execute_literature_screen(
                         quality_threshold=config.research.quality_threshold,
                         candidates_text=agg_text,
                     )
-                    # Final pass: be strict and selective, with a hard cap
-                    max_keep = max(
-                        _MIN_SHORTLIST,
-                        config.research.max_shortlist,
+                    # Final pass: be strict and selective, with an optional hard cap
+                    max_keep = (
+                        max(_MIN_SHORTLIST, config.research.max_shortlist)
+                        if config.research.max_shortlist is not None
+                        else None
+                    )
+                    cap_instruction = (
+                        f"Return AT MOST {max_keep} papers, ranked by relevance. Cut ruthlessly."
+                        if max_keep is not None
+                        else "Return all clearly relevant papers, ranked by relevance."
                     )
                     user_prompt = (
                         sp.user
@@ -2448,8 +2454,7 @@ def _execute_literature_screen(
                         f"Be strict and selective — carefully evaluate each "
                         f"paper and only keep those that are clearly relevant "
                         f"and high quality for the research topic. "
-                        f"Return AT MOST {max_keep} papers, ranked by "
-                        f"relevance. Cut ruthlessly."
+                        + cap_instruction
                     )
                     resp = _chat_with_prompt(
                         llm,
@@ -2509,14 +2514,17 @@ def _execute_literature_screen(
                 shortlist = [
                     row for row in payload["shortlist"] if isinstance(row, dict)
                 ]
-            max_keep = max(_MIN_SHORTLIST, config.research.max_shortlist)
-            if len(shortlist) > max_keep:
-                shortlist = shortlist[:max_keep]
+            if config.research.max_shortlist is not None:
+                max_keep = max(_MIN_SHORTLIST, config.research.max_shortlist)
+                if len(shortlist) > max_keep:
+                    shortlist = shortlist[:max_keep]
+            else:
+                max_keep = None
             logger.info(
-                "Stage 5 LLM screening: %d filtered → 1 batch (no batching) → %d kept (cap %d)",
+                "Stage 5 LLM screening: %d filtered → 1 batch (no batching) → %d kept (cap %s)",
                 len(filtered_rows),
                 len(shortlist),
-                max_keep,
+                max_keep if max_keep is not None else "none",
             )
     # T2.2: Ensure minimum shortlist size of 15 for adequate related work
     if not shortlist:

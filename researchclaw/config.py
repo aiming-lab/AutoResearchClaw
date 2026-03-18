@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,16 @@ def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+def _opt_int(value: Any) -> int | None:
+    """Convert a config value to an optional int. Returns None for None/NaN."""
+    if value is None:
+        return None
+    f = float(value)
+    if math.isnan(f):
+        return None
+    return int(f)
+
+
 @dataclass(frozen=True)
 class ValidationResult:
     ok: bool
@@ -78,8 +89,8 @@ class ResearchConfig:
     daily_paper_count: int = 0
     quality_threshold: float = 0.0
     graceful_degradation: bool = True
-    max_shortlist: int = 30
-    screen_batch_size: float = float("nan")
+    max_shortlist: int | None = None
+    screen_batch_size: int | None = None
     screen_max_workers: int = 4
 
 
@@ -441,8 +452,8 @@ class RCConfig:
                 daily_paper_count=int(research.get("daily_paper_count", 0)),
                 quality_threshold=float(research.get("quality_threshold", 0.0)),
                 graceful_degradation=bool(research.get("graceful_degradation", True)),
-                max_shortlist=int(research.get("max_shortlist", 30)),
-                screen_batch_size=float(research.get("screen_batch_size", float("nan"))),
+                max_shortlist=_opt_int(research.get("max_shortlist")),
+                screen_batch_size=_opt_int(research.get("screen_batch_size")),
                 screen_max_workers=int(research.get("screen_max_workers", 4)),
             ),
             runtime=RuntimeConfig(
