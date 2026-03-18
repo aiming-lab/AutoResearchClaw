@@ -147,6 +147,72 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _build_fallback_queries(topic: str) -> list[str]:
+    """Extract meaningful search queries from a long topic string.
+
+    Instead of using the raw topic as a query (which is often 200+ chars
+    and returns garbage), extract noun phrases and domain keywords.
+    Returns 5-10 targeted queries.
+    """
+    import re as _re
+
+    # Split on common delimiters and extract meaningful chunks
+    chunks = _re.split(r"[,:;()\[\]]+", topic)
+    chunks = [c.strip() for c in chunks if len(c.strip()) > 8]
+    # Clean chunks: remove leading conjunctions and articles
+    cleaned_chunks = []
+    for c in chunks:
+        c = _re.sub(r"^(and|or|the|a|an|in|of|for|with|across|multiple|three|various)\s+", "", c, flags=_re.IGNORECASE)
+        c = c.strip()
+        if len(c) > 8:
+            cleaned_chunks.append(c)
+    chunks = cleaned_chunks
+
+    # Extract key terms (words that look like domain terms, not stopwords)
+    _stop = {
+        "the", "and", "for", "with", "from", "that", "this", "into",
+        "over", "across", "multiple", "three", "result", "comprehensive",
+        "using", "based", "between", "various", "different", "several",
+        "parameter", "parameters", "analysis", "approach", "method",
+        "framework", "frameworks",
+    }
+    words = topic.lower().split()
+    key_terms = [w for w in words if len(w) > 3 and w not in _stop]
+
+    queries: list[str] = []
+
+    # Strategy 1: Use meaningful chunks (up to 60 chars each)
+    for chunk in chunks[:4]:
+        if len(chunk) > 60:
+            chunk_words = chunk.split()[:6]
+            chunk = " ".join(chunk_words)
+        if chunk and chunk not in queries:
+            queries.append(chunk)
+
+    # Strategy 2: Bigrams of key terms (skip punctuation artifacts)
+    clean_terms = [t for t in key_terms if _re.match(r"^[a-z]", t) and ":" not in t]
+    for i in range(min(len(clean_terms) - 1, 4)):
+        bigram = f"{clean_terms[i]} {clean_terms[i + 1]}"
+        if bigram not in queries:
+            queries.append(bigram)
+
+    # Deduplicate preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for q in queries:
+        q_lower = q.strip().lower()
+        if q_lower and q_lower not in seen:
+            seen.add(q_lower)
+            unique.append(q.strip())
+
+    # Ensure we have at least 5 queries
+    if len(unique) < 5:
+        unique.append(f"{topic[:60]} survey")
+        unique.append(f"{topic[:60]} review")
+
+    return unique[:10]
+
+
 def _write_stage_meta(
     stage_dir: Path, stage: Stage, run_id: str, result: StageResult
 ) -> None:
@@ -270,20 +336,135 @@ def _load_hardware_profile(run_dir: Path) -> dict[str, Any] | None:
 
 
 def _extract_yaml_block(text: str) -> str:
+    """Extract YAML from text that may contain ACP noise.
+
+    Strips [thinking] blocks, insight blocks, and other ACP artifacts
+    before looking for YAML in markdown fences or raw text.
+    """
+    import re as _re
+
+    # Strip ACP noise: [thinking]..., insight blocks, [plan]...
+    cleaned = _re.sub(
+        r"\[thinking\].*?(?=\n```|\n[A-Z]|\Z)",
+        "", text, flags=_re.DOTALL
+    )
+    cleaned = _re.sub(r"\[plan\].*?\n\n", "", cleaned, flags=_re.DOTALL)
+
+    # Try markdown fences first (most reliable)
+    if "```yaml" in cleaned:
+        return cleaned.split("```yaml", 1)[1].split("```", 1)[0].strip()
+    if "```yml" in cleaned:
+        return cleaned.split("```yml", 1)[1].split("```", 1)[0].strip()
+    if "```" in cleaned:
+        block = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+        if block:
+            return block
+
+    # Try the original text too (in case cleaning removed too much)
     if "```yaml" in text:
         return text.split("```yaml", 1)[1].split("```", 1)[0].strip()
     if "```yml" in text:
         return text.split("```yml", 1)[1].split("```", 1)[0].strip()
     if "```" in text:
-        return text.split("```", 1)[1].split("```", 1)[0].strip()
+        block = text.split("```", 1)[1].split("```", 1)[0].strip()
+        if block:
+            return block
+
+    # Last resort: try to find YAML-like content (lines starting with key:)
+    yaml_lines: list[str] = []
+    in_yaml = False
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if not in_yaml and _re.match(r"^[a-z_]+:", stripped):
+            in_yaml = True
+        if in_yaml:
+            if stripped and not stripped.startswith("#"):
+                yaml_lines.append(line)
+            elif not stripped and yaml_lines:
+                yaml_lines.append(line)
+
+    if yaml_lines:
+        return "\n".join(yaml_lines).strip()
+
     return text.strip()
 
 
 def _safe_json_loads(text: str, default: Any) -> Any:
+    """Parse JSON from text, handling noisy ACP output.
+
+    ACP responses often contain thinking blocks, tool calls, markdown,
+    and other content surrounding the actual JSON. This tries multiple
+    strategies to extract valid JSON:
+
+    1. Direct parse (clean response)
+    2. Find JSON in markdown code fences
+    3. Find outermost balanced braces (largest dict wins)
+    4. Find balanced brackets for arrays
+    """
+    if not text or not text.strip():
+        return default
+
+    # Strategy 1: Direct parse
     try:
         return json.loads(text)
-    except Exception:  # noqa: BLE001
-        return default
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strategy 2: Find JSON in markdown code fences ```json ... ```
+    import re as _re
+    fence_pattern = _re.compile(r"```(?:json)?\s*\n(.*?)```", _re.DOTALL)
+    for match in fence_pattern.finditer(text):
+        candidate = match.group(1).strip()
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    # Strategy 3: Find outermost balanced braces
+    brace_depth = 0
+    start = -1
+    candidates: list[str] = []
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if brace_depth == 0:
+                start = i
+            brace_depth += 1
+        elif ch == "}":
+            brace_depth -= 1
+            if brace_depth == 0 and start >= 0:
+                candidates.append(text[start : i + 1])
+                start = -1
+
+    # Try candidates from largest to smallest (largest is most likely the full response)
+    candidates.sort(key=len, reverse=True)
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    # Strategy 4: Same for array [ ]
+    bracket_depth = 0
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == "[":
+            if bracket_depth == 0:
+                start = i
+            bracket_depth += 1
+        elif ch == "]":
+            bracket_depth -= 1
+            if bracket_depth == 0 and start >= 0:
+                try:
+                    parsed = json.loads(text[start : i + 1])
+                    if isinstance(parsed, list):
+                        return parsed
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                start = -1
+
+    return default
 
 
 _METACLAW_SKILLS_DIR = str(Path.home() / ".metaclaw" / "skills")
@@ -1545,19 +1726,22 @@ def _execute_search_strategy(
             if isinstance(src, list):
                 sources = [item for item in src if isinstance(item, dict)]
     if plan is None:
+        # Build smart fallback queries by extracting key terms from topic
+        # instead of using the raw (often very long) topic string.
+        _fallback_queries = _build_fallback_queries(topic)
         plan = {
             "topic": topic,
             "generated": _utcnow_iso(),
             "search_strategies": [
                 {
                     "name": "keyword_core",
-                    "queries": [topic, f"{topic} benchmark", f"{topic} survey"],
+                    "queries": _fallback_queries[:5],
                     "sources": ["arxiv", "semantic_scholar", "openreview"],
                     "max_results_per_query": 60,
                 },
                 {
                     "name": "backward_forward_citation",
-                    "queries": [f"{topic} seminal", f"{topic} state of the art"],
+                    "queries": _fallback_queries[5:10] or _fallback_queries[:3],
                     "sources": ["semantic_scholar", "google_scholar"],
                     "depth": 1,
                 },
@@ -2491,6 +2675,16 @@ def _execute_experiment_design(
                 r"(?:baseline|compare|existing|standard|traditional)\s+(?:method|approach|model)?[:\s]+[\"']?([A-Za-z][\w-]+)",
                 _hyp_text, _re_hyp.IGNORECASE,
             )
+            # Extract dataset names from hypothesis text too
+            _dataset_candidates = _re_hyp.findall(
+                r"(?:dataset|data|corpus|benchmark|catalog|survey)[:\s]+[\"']?([A-Za-z][\w-]+)",
+                _hyp_text, _re_hyp.IGNORECASE,
+            )
+            # Extract metric names
+            _metric_candidates = _re_hyp.findall(
+                r"(?:metric|measure|score|accuracy|precision|recall|SNR|RMS|AUC|F1)[:\s]+[\"']?([A-Za-z][\w-]*)",
+                _hyp_text, _re_hyp.IGNORECASE,
+            )
             if _method_candidates or _baseline_candidates:
                 logger.info(
                     "Stage 09: Extracted names from hypotheses: methods=%s, baselines=%s",
@@ -2500,12 +2694,12 @@ def _execute_experiment_design(
                     "topic": config.research.topic,
                     "generated": _utcnow_iso(),
                     "objectives": ["Evaluate hypotheses with controlled experiments"],
-                    "datasets": ["primary_dataset"],
-                    "baselines": _baseline_candidates[:3] or ["baseline_1", "baseline_2"],
-                    "proposed_methods": _method_candidates[:3] or ["proposed_method"],
-                    "ablations": ["without_key_component", "simplified_version"],
-                    "metrics": [config.experiment.metric_key, "secondary_metric"],
-                    "risks": ["validity threats", "confounding variables"],
+                    "datasets": _dataset_candidates[:3] or [f"{config.research.topic.split()[0]}_dataset"],
+                    "baselines": _baseline_candidates[:3] or [f"{config.research.topic.split()[0]}_baseline"],
+                    "proposed_methods": _method_candidates[:3] or [f"{config.research.topic.split()[0]}_proposed"],
+                    "ablations": ["without_key_component", "reduced_scope"],
+                    "metrics": _metric_candidates[:3] or [config.experiment.metric_key],
+                    "risks": ["systematic biases", "coverage limitations"],
                     "compute_budget": {"max_gpu": 1, "max_hours": 4},
                 }
 

@@ -100,6 +100,7 @@ class ACPClient:
         temperature: float | None = None,
         json_mode: bool = False,
         system: str | None = None,
+        strip_thinking: bool = False,
     ) -> LLMResponse:
         """Send a prompt and return the agent's response.
 
@@ -110,6 +111,9 @@ class ACPClient:
         """
         prompt_text = self._messages_to_prompt(messages, system=system)
         content = self._send_prompt(prompt_text)
+        if strip_thinking:
+            from researchclaw.utils.thinking_tags import strip_thinking_tags
+            content = strip_thinking_tags(content)
         return LLMResponse(
             content=content,
             model=f"acp:{self.config.agent}",
@@ -186,6 +190,34 @@ class ACPClient:
     def _abs_cwd(self) -> str:
         return os.path.abspath(self.config.cwd)
 
+    def _force_reconnect(self) -> None:
+        """Close the stale session and create a fresh one."""
+        logger.info("Force-reconnecting ACP session '%s'", self.config.session_name)
+        self.close()  # Best-effort close of the dead session
+        self._session_ready = False
+        # Force create a new session (not ensure, which may find the dead one)
+        acpx = self._resolve_acpx()
+        if acpx:
+            subprocess.run(
+                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
+                 self.config.agent, "sessions", "close",
+                 self.config.session_name],
+                capture_output=True, timeout=15,
+            )
+            result = subprocess.run(
+                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
+                 self.config.agent, "sessions", "new",
+                 "--name", self.config.session_name],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0:
+                self._session_ready = True
+                logger.info("ACP session '%s' reconnected", self.config.session_name)
+            else:
+                logger.warning(
+                    "ACP session reconnect failed: %s", result.stderr.strip()[:200]
+                )
+
     def _ensure_session(self) -> None:
         """Find or create the named acpx session."""
         if self._session_ready:
@@ -199,7 +231,7 @@ class ACPClient:
             [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
              self.config.agent, "sessions", "ensure",
              "--name", self.config.session_name],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
             # Fall back to 'new'
@@ -207,7 +239,7 @@ class ACPClient:
                 [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "sessions", "new",
                  "--name", self.config.session_name],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=60,
             )
             if result.returncode != 0:
                 raise RuntimeError(
@@ -218,6 +250,8 @@ class ACPClient:
 
     # Linux MAX_ARG_STRLEN is 128KB; stay well under to leave room for env
     _MAX_CLI_PROMPT_BYTES = 100_000
+    _MAX_RECONNECT_ATTEMPTS = 2
+    _RECONNECT_ERRORS = ("agent needs reconnect", "session not found", "Query closed")
 
     def _send_prompt(self, prompt: str) -> str:
         """Send a prompt via acpx and return the response text.
@@ -225,21 +259,40 @@ class ACPClient:
         For large prompts that would exceed the OS argument-length limit
         (``E2BIG``), the prompt is written to a temp file and the agent
         is asked to read it.
+
+        Automatically reconnects if the session has died (e.g. after a
+        long-running stage causes the agent process to time out).
         """
-        self._ensure_session()
-        acpx = self._resolve_acpx()
-        if not acpx:
-            raise RuntimeError("acpx not found")
+        for attempt in range(1 + self._MAX_RECONNECT_ATTEMPTS):
+            self._ensure_session()
+            acpx = self._resolve_acpx()
+            if not acpx:
+                raise RuntimeError("acpx not found")
 
-        prompt_bytes = len(prompt.encode("utf-8"))
-        if prompt_bytes <= self._MAX_CLI_PROMPT_BYTES:
-            return self._send_prompt_cli(acpx, prompt)
+            try:
+                prompt_bytes = len(prompt.encode("utf-8"))
+                if prompt_bytes <= self._MAX_CLI_PROMPT_BYTES:
+                    return self._send_prompt_cli(acpx, prompt)
 
-        logger.info(
-            "Prompt too large for CLI arg (%d bytes). Using temp file.",
-            prompt_bytes,
-        )
-        return self._send_prompt_via_file(acpx, prompt)
+                logger.info(
+                    "Prompt too large for CLI arg (%d bytes). Using temp file.",
+                    prompt_bytes,
+                )
+                return self._send_prompt_via_file(acpx, prompt)
+            except RuntimeError as exc:
+                err_msg = str(exc)
+                is_reconnect_error = any(
+                    marker in err_msg for marker in self._RECONNECT_ERRORS
+                )
+                if not is_reconnect_error or attempt >= self._MAX_RECONNECT_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "ACP session died (attempt %d/%d): %s. Reconnecting...",
+                    attempt + 1,
+                    self._MAX_RECONNECT_ATTEMPTS,
+                    err_msg[:200],
+                )
+                self._force_reconnect()
 
     def _send_prompt_cli(self, acpx: str, prompt: str) -> str:
         """Send prompt as a CLI argument (original path)."""
