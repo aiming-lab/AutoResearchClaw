@@ -373,3 +373,43 @@ def test_default_network_policy_is_setup_only():
 def test_default_auto_install_deps_enabled():
     cfg = DockerSandboxConfig()
     assert cfg.auto_install_deps is True
+
+
+# ── Entry point path traversal validation ─────────────────────────────
+
+
+@patch("researchclaw.experiment.docker_sandbox.subprocess.run")
+def test_run_project_rejects_path_traversal(mock_run: MagicMock, tmp_path: Path):
+    """run_project() must reject entry_point with '..' components."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "main.py").write_text("print('hi')")
+
+    cfg = DockerSandboxConfig()
+    work = tmp_path / "work"
+    sandbox = DockerSandbox(cfg, work)
+    # Create escape target so .exists() alone wouldn't catch it
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "escape.py").write_text("print('escaped!')")
+
+    result = sandbox.run_project(project, entry_point="../escape.py")
+
+    assert result.returncode == -1
+    assert ".." in result.stderr
+    mock_run.assert_not_called()
+
+
+@patch("researchclaw.experiment.docker_sandbox.subprocess.run")
+def test_run_project_rejects_absolute_path(mock_run: MagicMock, tmp_path: Path):
+    """run_project() must reject absolute entry_point paths."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "main.py").write_text("print('hi')")
+
+    cfg = DockerSandboxConfig()
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    result = sandbox.run_project(project, entry_point="/etc/passwd")
+
+    assert result.returncode == -1
+    assert "relative" in result.stderr.lower() or "absolute" in result.stderr.lower()
+    mock_run.assert_not_called()
