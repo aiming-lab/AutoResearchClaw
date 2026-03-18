@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
-import os
-
 import httpx
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    "ANTHROPIC_API_KEY" not in os.environ,
+    reason="ANTHROPIC_API_KEY not set",
+)
 
 BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-API_KEY = os.environ["ANTHROPIC_API_KEY"]  # Required — set before running
+API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 
 

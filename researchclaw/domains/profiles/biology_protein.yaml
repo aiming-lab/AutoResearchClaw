@@ -1,0 +1,26 @@
+domain_id: biology_protein
+display_name: Protein Science
+parent_domain: biology
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline model
+  proposed: proposed model
+  variant: ablation
+  input: protein data
+  metric: RMSD / accuracy
+typical_file_structure:
+  config.py: "Model parameters"
+  data.py: "Protein data loading"
+  model.py: "Prediction model"
+  main.py: "Entry point"
+entry_point: main.py
+core_libraries: [numpy, torch, scikit-learn, biopython]
+docker_image: researchclaw/sandbox-biology:latest
+gpu_required: false
+pip_packages: [numpy, torch, scikit-learn, biopython, pandas]
+metric_types: [scalar]
+standard_baselines: [ESM-2, ProtBERT, Random Forest]
+evaluation_protocol: "Evaluate on standard protein benchmarks."
+statistical_tests: [paired_t_test]
+github_search_terms: [protein prediction pytorch, protein folding python]
+paper_keywords: [protein structure prediction]

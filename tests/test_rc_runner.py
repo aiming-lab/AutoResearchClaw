@@ -761,6 +761,54 @@ def test_write_checkpoint_overwrites_previous(run_dir: Path) -> None:
     assert data["last_completed_name"] == Stage.PROBLEM_DECOMPOSE.name
 
 
+def _degraded(stage: Stage) -> StageResult:
+    return StageResult(
+        stage=stage,
+        status=StageStatus.DONE,
+        artifacts=("quality_report.json",),
+        decision="degraded",
+    )
+
+
+def test_degraded_quality_gate_continues_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When quality gate returns decision='degraded', pipeline continues to completion."""
+    seen: list[Stage] = []
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        seen.append(stage)
+        if stage == Stage.QUALITY_GATE:
+            return _degraded(stage)
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-degraded",
+        config=rc_config,
+        adapters=adapters,
+    )
+    # All 23 stages should execute (not stopped at quality gate)
+    assert len(results) == 23
+    assert seen == list(STAGE_SEQUENCE)
+    # Quality gate result should have decision="degraded"
+    qg_result = [r for r in results if r.stage == Stage.QUALITY_GATE][0]
+    assert qg_result.decision == "degraded"
+    assert qg_result.status == StageStatus.DONE
+    # Pipeline summary should have degraded=True
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degraded"] is True
+    # Output should show DEGRADED message
+    captured = capsys.readouterr()
+    assert "DEGRADED" in captured.out
+
+
 def test_package_deliverables_called_after_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     run_dir: Path,

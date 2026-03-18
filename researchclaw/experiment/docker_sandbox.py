@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -27,12 +28,14 @@ from researchclaw.experiment.sandbox import SandboxResult, parse_metrics
 logger = logging.getLogger(__name__)
 
 _CONTAINER_COUNTER = 0
+_counter_lock = threading.Lock()
 
 
 def _next_container_name() -> str:
     global _CONTAINER_COUNTER  # noqa: PLW0603
-    _CONTAINER_COUNTER += 1
-    return f"rc-exp-{_CONTAINER_COUNTER}-{os.getpid()}"
+    with _counter_lock:
+        _CONTAINER_COUNTER += 1
+        return f"rc-exp-{_CONTAINER_COUNTER}-{os.getpid()}"
 
 
 # Packages already in the Docker image — skip during auto-detect.
@@ -398,7 +401,7 @@ class DockerSandbox:
         if cfg.gpu_enabled:
             if cfg.gpu_device_ids:
                 device_spec = ",".join(str(d) for d in cfg.gpu_device_ids)
-                cmd.extend(["--gpus", f'"device={device_spec}"'])
+                cmd.extend(["--gpus", f"device={device_spec}"])
             else:
                 cmd.extend(["--gpus", "all"])
 

@@ -37,6 +37,9 @@ class BenchmarkAgentConfig:
     # Surveyor
     enable_hf_search: bool = True
     max_hf_results: int = 10
+    enable_web_search: bool = False
+    max_web_results: int = 5
+    web_search_min_local: int = 3
     # Selector
     tier_limit: int = 2
     min_benchmarks: int = 1

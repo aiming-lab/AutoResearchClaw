@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from researchclaw.config import DockerSandboxConfig, ExperimentConfig
-from researchclaw.experiment.docker_sandbox import DockerSandbox
+from researchclaw.experiment.docker_sandbox import DockerSandbox, _next_container_name
 from researchclaw.experiment.factory import create_sandbox
 from researchclaw.experiment.sandbox import SandboxResult
 
@@ -151,10 +152,12 @@ def test_factory_returns_docker_sandbox(mock_avail, mock_image, tmp_path: Path):
 
 
 @patch("researchclaw.experiment.docker_sandbox.DockerSandbox.check_docker_available", return_value=False)
-def test_factory_raises_when_docker_unavailable(mock_avail, tmp_path: Path):
+def test_factory_falls_back_when_docker_unavailable(mock_avail, tmp_path: Path):
     config = ExperimentConfig(mode="docker")
-    with pytest.raises(RuntimeError, match="Docker daemon"):
-        create_sandbox(config, tmp_path / "work")
+    sandbox = create_sandbox(config, tmp_path / "work")
+    # BUG-002: Should fall back to subprocess sandbox instead of raising
+    from researchclaw.experiment.sandbox import ExperimentSandbox
+    assert isinstance(sandbox, ExperimentSandbox)
 
 
 @patch("researchclaw.experiment.docker_sandbox.DockerSandbox.ensure_image", return_value=False)
@@ -236,6 +239,26 @@ def test_detect_pip_packages_maps_imports(tmp_path: Path):
     detected = DockerSandbox._detect_pip_packages(tmp_path)
     assert "opencv-python" in detected
     assert "wandb" in detected
+
+
+def test_next_container_name_is_thread_safe():
+    names: list[str] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        for _ in range(20):
+            name = _next_container_name()
+            with lock:
+                names.append(name)
+
+    threads = [threading.Thread(target=worker) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(names) == 100
+    assert len(names) == len(set(names))
 
 
 # ── requirements.txt generation ──────────────────────────────────────

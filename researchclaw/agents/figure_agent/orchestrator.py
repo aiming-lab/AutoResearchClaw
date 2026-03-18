@@ -379,7 +379,16 @@ class FigureOrchestrator(AgentOrchestrator):
                 continue
 
             rendered = render_result.data.get("rendered", [])
-            final_rendered = rendered
+            # Merge newly rendered figures with previously passed figures
+            # (on retries, only failed figures are re-rendered)
+            if iteration == 0:
+                final_rendered = rendered
+            else:
+                # Replace entries for re-rendered figures, keep previously passed ones
+                re_rendered_ids = {r.get("figure_id") for r in rendered}
+                final_rendered = [
+                    r for r in final_rendered if r.get("figure_id") not in re_rendered_ids
+                ] + rendered
 
             # Critic
             self.logger.info(

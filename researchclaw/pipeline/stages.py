@@ -1,4 +1,4 @@
-"""22-stage ResearchClaw pipeline state machine.
+"""23-stage ResearchClaw pipeline state machine.
 
 Defines the stage sequence, status transitions, gate logic, and rollback rules.
 Migrated from arc/state_machine.py (19 stages) with the following changes:
@@ -20,7 +20,7 @@ from typing import Iterable
 
 
 class Stage(IntEnum):
-    """22-stage research pipeline."""
+    """23-stage research pipeline."""
 
     # Phase A: Research Scoping
     TOPIC_INIT = 1
@@ -138,6 +138,7 @@ MAX_DECISION_PIVOTS: int = 2  # Prevent infinite loops
 
 NONCRITICAL_STAGES: frozenset[Stage] = frozenset(
     {
+        Stage.QUALITY_GATE,       # 20: low quality should warn, not block deliverables
         Stage.KNOWLEDGE_ARCHIVE,  # 21: archival doesn't affect paper output
         # T3.4: CITATION_VERIFY removed — hallucinated citations MUST block export
     }

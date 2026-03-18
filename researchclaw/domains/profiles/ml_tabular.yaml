@@ -1,0 +1,70 @@
+domain_id: ml_tabular
+display_name: Tabular ML
+parent_domain: ml
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline
+  proposed: proposed method
+  variant: ablation
+  input: dataset
+  metric: accuracy / RMSE / AUC
+
+typical_file_structure:
+  config.py: "Hyperparameters and model configuration"
+  data.py: "Tabular data loading, feature engineering, train/val/test splits"
+  model.py: "Model definitions and hyperparameter tuning"
+  evaluation.py: "Evaluation metrics and cross-validation"
+  main.py: "Entry point: setup -> preprocess -> train -> evaluate -> report"
+
+entry_point: main.py
+
+core_libraries:
+  - xgboost
+  - lightgbm
+  - numpy
+  - scikit-learn
+  - pandas
+
+docker_image: researchclaw/sandbox-ml:latest
+gpu_required: false
+
+pip_packages:
+  - xgboost
+  - lightgbm
+  - catboost
+  - numpy
+  - scikit-learn
+  - pandas
+  - matplotlib
+  - optuna
+
+metric_types:
+  - scalar
+  - table
+
+standard_baselines:
+  - XGBoost
+  - LightGBM
+  - CatBoost
+  - Random Forest
+  - Logistic Regression / Linear Regression
+  - MLP
+
+evaluation_protocol: "Use 5-fold cross-validation or fixed train/test splits. Report mean +/- std of primary metric across folds or seeds."
+statistical_tests:
+  - paired_t_test
+  - wilcoxon_signed_rank
+
+github_search_terms:
+  - xgboost classification benchmark
+  - lightgbm tabular data
+  - tabular benchmark gradient boosting
+  - catboost vs xgboost
+
+paper_keywords:
+  - gradient boosting
+  - tabular data
+  - feature engineering
+  - ensemble methods
+  - tree-based models

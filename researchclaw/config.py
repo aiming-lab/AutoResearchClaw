@@ -77,6 +77,7 @@ class ResearchConfig:
     domains: tuple[str, ...] = ()
     daily_paper_count: int = 0
     quality_threshold: float = 0.0
+    graceful_degradation: bool = True
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,9 @@ class SshRemoteConfig:
     docker_network_policy: str = "none"
     docker_memory_limit_mb: int = 8192
     docker_shm_size_mb: int = 2048
+    timeout_sec: int = 600  # default 10 min for experiment execution
+    scp_timeout_sec: int = 300  # default 5 min for file uploads
+    setup_timeout_sec: int = 300  # default 5 min for setup commands
 
 
 @dataclass(frozen=True)
@@ -228,6 +232,22 @@ class CodeAgentConfig:
 
 
 @dataclass(frozen=True)
+class OpenCodeConfig:
+    """OpenCode 'Beast Mode' — external AI coding agent for complex experiments.
+
+    Requires: npm i -g opencode-ai@latest
+    """
+
+    enabled: bool = False
+    auto: bool = False  # Auto-trigger without user confirmation
+    complexity_threshold: float = 0.6  # 0.0-1.0
+    model: str = ""  # Empty = use llm.primary_model
+    timeout_sec: int = 600  # Max seconds for opencode run
+    max_retries: int = 1
+    workspace_cleanup: bool = True
+
+
+@dataclass(frozen=True)
 class BenchmarkAgentConfig:
     """Configuration for the BenchmarkAgent multi-agent system."""
 
@@ -235,6 +255,10 @@ class BenchmarkAgentConfig:
     # Surveyor
     enable_hf_search: bool = True
     max_hf_results: int = 10
+    # Surveyor — web search
+    enable_web_search: bool = True
+    max_web_results: int = 5
+    web_search_min_local: int = 3  # skip web search when local benchmarks >= this
     # Selector
     tier_limit: int = 2
     min_benchmarks: int = 1
@@ -275,6 +299,7 @@ class ExperimentConfig:
     mode: str = "simulated"
     time_budget_sec: int = 300
     max_iterations: int = 10
+    max_refine_duration_sec: int = 0  # 0 = auto (3× time_budget_sec)
     metric_key: str = "primary_metric"
     metric_direction: str = "minimize"
     keep_threshold: float = 0.0
@@ -283,6 +308,7 @@ class ExperimentConfig:
     ssh_remote: SshRemoteConfig = field(default_factory=SshRemoteConfig)
     colab_drive: ColabDriveConfig = field(default_factory=ColabDriveConfig)
     code_agent: CodeAgentConfig = field(default_factory=CodeAgentConfig)
+    opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     benchmark_agent: BenchmarkAgentConfig = field(default_factory=BenchmarkAgentConfig)
     figure_agent: FigureAgentConfig = field(default_factory=FigureAgentConfig)
 
@@ -326,6 +352,21 @@ class MetaClawBridgeConfig:
 
 
 @dataclass(frozen=True)
+class WebSearchConfig:
+    """Configuration for web search and crawling capabilities."""
+
+    enabled: bool = True
+    tavily_api_key: str = ""
+    tavily_api_key_env: str = "TAVILY_API_KEY"
+    enable_scholar: bool = True
+    enable_crawling: bool = True
+    enable_pdf_extraction: bool = True
+    max_web_results: int = 10
+    max_scholar_results: int = 10
+    max_crawl_urls: int = 5
+
+
+@dataclass(frozen=True)
 class ExportConfig:
     """Configuration for paper export and LaTeX generation."""
 
@@ -351,6 +392,7 @@ class RCConfig:
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     prompts: PromptsConfig = field(default_factory=PromptsConfig)
+    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     metaclaw_bridge: MetaClawBridgeConfig = field(
         default_factory=MetaClawBridgeConfig
     )
@@ -383,6 +425,7 @@ class RCConfig:
         experiment = data.get("experiment") or {}
         export = data.get("export") or {}
         prompts = data.get("prompts") or {}
+        web_search = data.get("web_search") or {}
         metaclaw = data.get("metaclaw_bridge") or {}
 
         return cls(
@@ -394,6 +437,7 @@ class RCConfig:
                 domains=tuple(research.get("domains") or ()),
                 daily_paper_count=int(research.get("daily_paper_count", 0)),
                 quality_threshold=float(research.get("quality_threshold", 0.0)),
+                graceful_degradation=bool(research.get("graceful_degradation", True)),
             ),
             runtime=RuntimeConfig(
                 timezone=runtime["timezone"],
@@ -440,6 +484,17 @@ class RCConfig:
             prompts=PromptsConfig(
                 custom_file=prompts.get("custom_file", ""),
             ),
+            web_search=WebSearchConfig(
+                enabled=bool(web_search.get("enabled", True)),
+                tavily_api_key=str(web_search.get("tavily_api_key", "")),
+                tavily_api_key_env=str(web_search.get("tavily_api_key_env", "TAVILY_API_KEY")),
+                enable_scholar=bool(web_search.get("enable_scholar", True)),
+                enable_crawling=bool(web_search.get("enable_crawling", True)),
+                enable_pdf_extraction=bool(web_search.get("enable_pdf_extraction", True)),
+                max_web_results=int(web_search.get("max_web_results", 10)),
+                max_scholar_results=int(web_search.get("max_scholar_results", 10)),
+                max_crawl_urls=int(web_search.get("max_crawl_urls", 5)),
+            ),
             metaclaw_bridge=_parse_metaclaw_bridge_config(metaclaw),
         )
 
@@ -454,6 +509,11 @@ class RCConfig:
         config_path = Path(path).expanduser().resolve()
         with config_path.open(encoding="utf-8") as handle:
             data = yaml.safe_load(handle) or {}
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Config root must be a mapping, got {type(data).__name__}. "
+                f"Check that {config_path} is valid YAML."
+            )
         resolved_root = (
             Path(project_root).expanduser().resolve()
             if project_root
@@ -553,6 +613,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         mode=data.get("mode", "simulated"),
         time_budget_sec=int(data.get("time_budget_sec", 300)),
         max_iterations=int(data.get("max_iterations", 10)),
+        max_refine_duration_sec=int(data.get("max_refine_duration_sec", 0)),
         metric_key=data.get("metric_key", "primary_metric"),
         metric_direction=data.get("metric_direction", "minimize"),
         keep_threshold=float(data.get("keep_threshold", 0.0)),
@@ -594,6 +655,9 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
             docker_network_policy=ssh_data.get("docker_network_policy", "none"),
             docker_memory_limit_mb=int(ssh_data.get("docker_memory_limit_mb", 8192)),
             docker_shm_size_mb=int(ssh_data.get("docker_shm_size_mb", 2048)),
+            timeout_sec=int(ssh_data.get("timeout_sec", 600)),
+            scp_timeout_sec=int(ssh_data.get("scp_timeout_sec", 300)),
+            setup_timeout_sec=int(ssh_data.get("setup_timeout_sec", 300)),
         ),
         colab_drive=ColabDriveConfig(
             drive_root=colab_data.get("drive_root", ""),
@@ -602,6 +666,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
             setup_script=colab_data.get("setup_script", ""),
         ),
         code_agent=_parse_code_agent_config(data.get("code_agent") or {}),
+        opencode=_parse_opencode_config(data.get("opencode") or {}),
         benchmark_agent=_parse_benchmark_agent_config(
             data.get("benchmark_agent") or {}
         ),
@@ -616,6 +681,9 @@ def _parse_benchmark_agent_config(data: dict[str, Any]) -> BenchmarkAgentConfig:
         enabled=bool(data.get("enabled", True)),
         enable_hf_search=bool(data.get("enable_hf_search", True)),
         max_hf_results=int(data.get("max_hf_results", 10)),
+        enable_web_search=bool(data.get("enable_web_search", True)),
+        max_web_results=int(data.get("max_web_results", 5)),
+        web_search_min_local=int(data.get("web_search_min_local", 3)),
         tier_limit=int(data.get("tier_limit", 2)),
         min_benchmarks=int(data.get("min_benchmarks", 1)),
         min_baselines=int(data.get("min_baselines", 2)),
@@ -627,12 +695,21 @@ def _parse_benchmark_agent_config(data: dict[str, Any]) -> BenchmarkAgentConfig:
 def _parse_figure_agent_config(data: dict[str, Any]) -> FigureAgentConfig:
     if not data:
         return FigureAgentConfig()
+    use_docker_raw = data.get("use_docker", None)
     return FigureAgentConfig(
         enabled=bool(data.get("enabled", True)),
         min_figures=int(data.get("min_figures", 3)),
         max_figures=int(data.get("max_figures", 8)),
         max_iterations=int(data.get("max_iterations", 3)),
         render_timeout_sec=int(data.get("render_timeout_sec", 30)),
+        use_docker=(
+            None if use_docker_raw is None else bool(use_docker_raw)
+        ),
+        docker_image=data.get("docker_image", "researchclaw/experiment:latest"),
+        output_format=data.get("output_format", "python"),
+        gemini_api_key=data.get("gemini_api_key", ""),
+        gemini_model=data.get("gemini_model", "gemini-2.5-flash-image"),
+        nano_banana_enabled=bool(data.get("nano_banana_enabled", True)),
         strict_mode=bool(data.get("strict_mode", False)),
         dpi=int(data.get("dpi", 300)),
     )
@@ -658,6 +735,20 @@ def _parse_code_agent_config(data: dict[str, Any]) -> CodeAgentConfig:
             data.get("tree_search_eval_timeout_sec", 120)
         ),
         review_max_rounds=int(data.get("review_max_rounds", 2)),
+    )
+
+
+def _parse_opencode_config(data: dict[str, Any]) -> OpenCodeConfig:
+    if not data:
+        return OpenCodeConfig()
+    return OpenCodeConfig(
+        enabled=bool(data.get("enabled", False)),
+        auto=bool(data.get("auto", False)),
+        complexity_threshold=float(data.get("complexity_threshold", 0.6)),
+        model=str(data.get("model", "")),
+        timeout_sec=int(data.get("timeout_sec", 600)),
+        max_retries=int(data.get("max_retries", 1)),
+        workspace_cleanup=bool(data.get("workspace_cleanup", True)),
     )
 
 

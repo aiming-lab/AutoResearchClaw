@@ -53,6 +53,7 @@ def _build_pipeline_summary(
         "stages_failed": sum(
             1 for item in results if item.status == StageStatus.FAILED
         ),
+        "degraded": any(r.decision == "degraded" for r in results),
         "from_stage": int(from_stage),
         "final_stage": int(results[-1].stage) if results else int(from_stage),
         "final_status": results[-1].status.value if results else "no_stages",
@@ -173,9 +174,8 @@ def _collect_content_metrics(run_dir: Path | None) -> dict[str, object]:
             vdata = json.loads(verify_path.read_text(encoding="utf-8"))
             if isinstance(vdata, dict):
                 summary = vdata.get("summary", vdata)
-                if isinstance(summary, dict):
-                    total = summary.get("total", 0)
-                    verified = summary.get("verified", 0)
+                total = summary.get("total", 0) if isinstance(summary, dict) else None
+                verified = summary.get("verified", 0) if isinstance(summary, dict) else None
                 if isinstance(total, int | float) and isinstance(verified, int | float):
                     total_num = int(total)
                     verified_num = int(verified)
@@ -230,7 +230,13 @@ def execute_pipeline(
         elapsed = _time.monotonic() - t0
         if result.status == StageStatus.DONE:
             arts = ", ".join(result.artifacts) if result.artifacts else "none"
-            print(f"{prefix} {stage.name} — done ({elapsed:.1f}s) → {arts}")
+            if result.decision == "degraded":
+                print(
+                    f"{prefix} {stage.name} — DEGRADED ({elapsed:.1f}s) "
+                    f"— continuing with sanitization → {arts}"
+                )
+            else:
+                print(f"{prefix} {stage.name} — done ({elapsed:.1f}s) → {arts}")
         elif result.status == StageStatus.FAILED:
             err = result.error or "unknown error"
             print(f"{prefix} {stage.name} — FAILED ({elapsed:.1f}s) — {err}")
@@ -506,6 +512,12 @@ def _package_deliverables(
     if verify_src.exists() and verify_src.stat().st_size > 0:
         shutil.copy2(verify_src, dest / "verification_report.json")
         packaged.append("verification_report.json")
+
+    # --- 5b. Sanitization report (degraded mode) ---
+    san_src = run_dir / "stage-22" / "sanitization_report.json"
+    if san_src.exists() and san_src.stat().st_size > 0:
+        shutil.copy2(san_src, dest / "sanitization_report.json")
+        packaged.append("sanitization_report.json")
 
     # --- 6. Charts (optional) ---
     charts_src = run_dir / "stage-22" / "charts"

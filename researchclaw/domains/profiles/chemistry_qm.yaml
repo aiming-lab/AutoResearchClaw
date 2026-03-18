@@ -1,0 +1,86 @@
+domain_id: chemistry_qm
+display_name: Quantum Chemistry
+parent_domain: chemistry
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: "reference method (e.g., CCSD(T))"
+  proposed: proposed method
+  variant: basis set / parameter variant
+  input: molecular system
+  metric: energy error (kcal/mol)
+
+typical_file_structure:
+  config.py: "Molecule definitions and calculation parameters"
+  molecules.py: "Molecular geometry and basis set setup"
+  calculations.py: "Quantum chemistry calculation routines"
+  analysis.py: "Error analysis and comparison with reference"
+  main.py: "Entry point: define molecules → calculate → compare → report"
+
+entry_point: main.py
+
+core_libraries:
+  - pyscf
+  - numpy
+  - scipy
+
+docker_image: researchclaw/sandbox-chemistry:latest
+gpu_required: false
+
+pip_packages:
+  - pyscf
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas
+
+metric_types:
+  - scalar
+  - table
+
+standard_baselines:
+  - HF (Hartree-Fock)
+  - DFT/B3LYP
+  - MP2
+  - CCSD
+  - CCSD(T)
+
+evaluation_protocol: "Calculate molecular properties with different methods, compare against high-level reference (CCSD(T) or experimental)."
+statistical_tests:
+  - mae
+  - rmse
+  - max_error
+
+output_formats:
+  - latex_table
+
+figure_types:
+  - bar_chart
+  - correlation_plot
+  - potential_energy_surface
+
+github_search_terms:
+  - pyscf example
+  - quantum chemistry python
+  - DFT calculation tutorial
+  - hartree fock python
+
+paper_keywords:
+  - quantum chemistry
+  - density functional theory
+  - electronic structure
+
+dataset_guidance: |
+  Quantum chemistry uses molecular systems defined in code:
+  - Define molecular geometries using atomic coordinates
+  - Use standard basis sets (STO-3G for testing, cc-pVDZ/cc-pVTZ for production)
+  - Standard test molecules: H2, H2O, CH4, benzene
+  - Do NOT download external datasets
+
+code_generation_hints: |
+  Quantum chemistry code with PySCF:
+  1. Define molecules: mol = gto.M(atom='H 0 0 0; H 0 0 0.74', basis='sto-3g')
+  2. Run calculations: mf = scf.RHF(mol); mf.kernel()
+  3. Compare multiple methods on the same molecule set
+  4. Report energies in Hartree and errors in kcal/mol (1 Ha = 627.509 kcal/mol)
+  5. Output results.json with method comparison data

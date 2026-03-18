@@ -23,10 +23,11 @@ def create_sandbox(config: ExperimentConfig, workdir: Path) -> SandboxProtocol:
         docker_cfg = config.docker
 
         if not DockerSandbox.check_docker_available():
-            raise RuntimeError(
-                "Docker daemon is not reachable. "
-                "Start Docker or switch to mode: sandbox."
+            logger.warning(
+                "Docker daemon is not reachable — "
+                "falling back to subprocess sandbox."
             )
+            return ExperimentSandbox(config.sandbox, workdir)
 
         if not DockerSandbox.ensure_image(docker_cfg.image):
             raise RuntimeError(

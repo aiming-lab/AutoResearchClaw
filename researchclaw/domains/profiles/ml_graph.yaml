@@ -1,0 +1,69 @@
+domain_id: ml_graph
+display_name: Graph Neural Networks (ML)
+parent_domain: ml
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline
+  proposed: proposed method
+  variant: ablation
+  input: dataset
+  metric: accuracy / F1
+
+typical_file_structure:
+  config.py: "Hyperparameters and model configuration"
+  data.py: "Graph dataset loading and preprocessing"
+  model.py: "GNN architecture definition (message passing, pooling)"
+  train.py: "Training loop with metric tracking"
+  main.py: "Entry point: setup -> train -> evaluate -> report"
+
+entry_point: main.py
+
+core_libraries:
+  - torch
+  - torch_geometric
+  - numpy
+  - scikit-learn
+
+docker_image: researchclaw/sandbox-ml:latest
+gpu_required: true
+
+pip_packages:
+  - torch
+  - torch-geometric
+  - torch-scatter
+  - torch-sparse
+  - numpy
+  - scikit-learn
+  - matplotlib
+  - tqdm
+  - networkx
+  - ogb
+
+metric_types:
+  - scalar
+  - learning_curve
+
+standard_baselines:
+  - GCN
+  - GAT
+  - GraphSAGE
+  - GIN
+  - MLP (no graph structure)
+
+evaluation_protocol: "Train on training set, evaluate on test set. Report mean +/- std over 3+ seeds. Use standard dataset splits when available."
+statistical_tests:
+  - paired_t_test
+
+github_search_terms:
+  - graph neural network pytorch
+  - node classification PyG
+  - graph classification benchmark
+  - GNN message passing
+
+paper_keywords:
+  - graph neural network
+  - node classification
+  - graph classification
+  - message passing
+  - link prediction

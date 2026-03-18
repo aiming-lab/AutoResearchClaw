@@ -182,6 +182,23 @@ class RendererAgent(BaseAgent):
 
         # Save script for reproducibility
         script_path = scripts_dir / f"{figure_id}.py"
+
+        # BUG-60: When running in Docker, rewrite absolute host paths to
+        # Docker-mapped paths.  Generated scripts use savefig() with absolute
+        # host paths (e.g. /home/user/.../charts/fig.png) but inside Docker
+        # the output dir is mounted at /workspace/output.
+        if self._use_docker:
+            import re as _re_path
+            _host_out = str(output_dir.resolve())
+            # Replace host output dir with Docker-mapped path
+            script_code = script_code.replace(_host_out, "/workspace/output")
+            # Also catch any other absolute paths pointing to output_dir parent
+            script_code = _re_path.sub(
+                r'savefig\(["\'](?:/[^"\']*/)(' + _re_path.escape(output_filename) + r')["\']',
+                r'savefig("/workspace/output/\1"',
+                script_code,
+            )
+
         script_path.write_text(script_code, encoding="utf-8")
         result["script_path"] = str(script_path)
 
@@ -294,9 +311,11 @@ class RendererAgent(BaseAgent):
             "--read-only",
             "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
             f"--memory=512m",
+            "-e", "MPLCONFIGDIR=/tmp/matplotlib",
+            "-e", "XDG_CONFIG_HOME=/tmp",
             "-v", f"{script_path.resolve()}:/workspace/script.py:ro",
             "-v", f"{output_dir.resolve()}:/workspace/output:rw",
-            "-w", "/workspace",
+            "-w", "/workspace/output",  # BUG-60: CWD = output dir so relative paths work
             "--user", f"{os.getuid()}:{os.getgid()}",
             "--entrypoint", "python3",
             self._docker_image,

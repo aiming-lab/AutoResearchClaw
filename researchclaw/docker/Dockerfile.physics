@@ -1,0 +1,38 @@
+# ResearchClaw Physics sandbox — CPU-focused, numerical computing.
+# Build: docker build -f Dockerfile.physics -t researchclaw/sandbox-physics:latest researchclaw/docker/
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc g++ gfortran cmake make \
+        libopenblas-dev liblapack-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Core scientific Python stack
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install \
+        numpy scipy matplotlib pandas seaborn \
+        tqdm PyYAML h5py
+
+# Physics-specific packages
+RUN pip install \
+        findiff \
+        sympy
+
+# JAX (CPU only for physics sandbox)
+RUN pip install \
+        jax jaxlib
+
+# Non-root user
+RUN groupadd -r researcher && useradd -r -g researcher -m -s /bin/bash researcher
+WORKDIR /workspace
+RUN chown researcher:researcher /workspace
+
+COPY entrypoint.sh /usr/local/bin/rc-entrypoint.sh
+RUN chmod +x /usr/local/bin/rc-entrypoint.sh
+
+USER researcher
+ENTRYPOINT ["/usr/local/bin/rc-entrypoint.sh"]
+CMD ["main.py"]

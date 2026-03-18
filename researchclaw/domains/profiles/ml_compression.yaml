@@ -1,0 +1,65 @@
+domain_id: ml_compression
+display_name: Model Compression (ML)
+parent_domain: ml
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: uncompressed model
+  proposed: compressed model
+  variant: ablation
+  input: dataset
+  metric: accuracy / compression ratio
+
+typical_file_structure:
+  config.py: "Hyperparameters and compression configuration"
+  data.py: "Dataset loading with train/val/test splits"
+  model.py: "Teacher and student model architecture definitions"
+  compress.py: "Compression methods (distillation, pruning, quantization)"
+  main.py: "Entry point: setup -> compress -> evaluate -> report"
+
+entry_point: main.py
+
+core_libraries:
+  - torch
+  - numpy
+  - scikit-learn
+
+docker_image: researchclaw/sandbox-ml:latest
+gpu_required: true
+
+pip_packages:
+  - torch
+  - torchvision
+  - numpy
+  - scikit-learn
+  - matplotlib
+  - tqdm
+
+metric_types:
+  - scalar
+  - learning_curve
+  - table
+
+standard_baselines:
+  - Uncompressed teacher model
+  - Vanilla knowledge distillation
+  - Magnitude pruning
+  - Post-training quantization (INT8)
+  - Random pruning
+
+evaluation_protocol: "Compare compressed model against full model. Report accuracy, model size, FLOPs, and inference latency. Mean +/- std over 3+ seeds."
+statistical_tests:
+  - paired_t_test
+
+github_search_terms:
+  - knowledge distillation pytorch
+  - model pruning neural network
+  - quantization aware training
+  - model compression benchmark
+
+paper_keywords:
+  - knowledge distillation
+  - network pruning
+  - model quantization
+  - model compression
+  - efficient inference

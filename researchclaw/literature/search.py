@@ -177,7 +177,7 @@ def search_papers(
                 time.sleep(1.0)
 
             elif src_lower == "arxiv":
-                papers = search_arxiv(query, limit=limit)
+                papers = search_arxiv(query, limit=limit, year_min=year_min)
                 all_papers.extend(papers)
                 cache_put(query, "arxiv", limit, _papers_to_dicts(papers))
                 source_stats["arxiv"] = len(papers)
@@ -287,6 +287,16 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
     seen_title: dict[str, int] = {}
     result: list[Paper] = []
 
+    def _update_indices(p: Paper, idx: int) -> None:
+        """Register all identifiers of *p* in the lookup dicts at *idx*."""
+        if p.doi:
+            seen_doi[p.doi.lower().strip()] = idx
+        if p.arxiv_id:
+            seen_arxiv[p.arxiv_id.strip()] = idx
+        norm = _normalise_title(p.title)
+        if norm:
+            seen_title[norm] = idx
+
     for paper in papers:
         is_dup = False
 
@@ -297,6 +307,7 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
                 idx = seen_doi[doi_key]
                 if paper.citation_count > result[idx].citation_count:
                     result[idx] = paper
+                    _update_indices(paper, idx)
                 is_dup = True
 
         # Check arXiv ID
@@ -306,6 +317,7 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
                 idx = seen_arxiv[ax_key]
                 if paper.citation_count > result[idx].citation_count:
                     result[idx] = paper
+                    _update_indices(paper, idx)
                 is_dup = True
 
         # Check fuzzy title
@@ -315,6 +327,7 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
                 idx = seen_title[norm]
                 if paper.citation_count > result[idx].citation_count:
                     result[idx] = paper
+                    _update_indices(paper, idx)
                 is_dup = True
 
         if is_dup:
@@ -322,13 +335,7 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
 
         # Not a duplicate — store indices and append
         new_idx = len(result)
-        if paper.doi:
-            seen_doi[paper.doi.lower().strip()] = new_idx
-        if paper.arxiv_id:
-            seen_arxiv[paper.arxiv_id.strip()] = new_idx
-        norm = _normalise_title(paper.title)
-        if norm:
-            seen_title[norm] = new_idx
+        _update_indices(paper, new_idx)
         result.append(paper)
 
     return result

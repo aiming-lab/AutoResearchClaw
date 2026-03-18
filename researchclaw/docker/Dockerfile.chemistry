@@ -1,0 +1,32 @@
+# ResearchClaw Chemistry sandbox — quantum chemistry, molecular property.
+# Build: docker build -f Dockerfile.chemistry -t researchclaw/sandbox-chemistry:latest researchclaw/docker/
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc g++ gfortran cmake \
+        libopenblas-dev liblapack-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install \
+        numpy scipy matplotlib pandas \
+        tqdm PyYAML
+
+# Chemistry packages
+RUN pip install pyscf && \
+    pip install rdkit-pypi || true
+
+# Non-root user
+RUN groupadd -r researcher && useradd -r -g researcher -m -s /bin/bash researcher
+WORKDIR /workspace
+RUN chown researcher:researcher /workspace
+
+COPY entrypoint.sh /usr/local/bin/rc-entrypoint.sh
+RUN chmod +x /usr/local/bin/rc-entrypoint.sh
+
+USER researcher
+ENTRYPOINT ["/usr/local/bin/rc-entrypoint.sh"]
+CMD ["main.py"]

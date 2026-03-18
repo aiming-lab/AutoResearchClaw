@@ -1,0 +1,103 @@
+domain_id: physics_simulation
+display_name: Computational Physics (Simulation)
+parent_domain: physics
+
+experiment_paradigm: simulation
+condition_terminology:
+  baseline: reference method
+  proposed: proposed method
+  variant: parameter variant
+  input: initial conditions
+  metric: error norm
+
+typical_file_structure:
+  config.py: "Simulation parameters (grid, timestep, boundary conditions)"
+  system.py: "Physical system definition (potentials, Hamiltonian)"
+  integrator.py: "Numerical integrator implementation"
+  analysis.py: "Observable computation from simulation data"
+  main.py: "Entry point: setup → simulate → analyze → report"
+
+entry_point: main.py
+
+core_libraries:
+  - numpy
+  - scipy
+  - matplotlib
+  - jax
+
+docker_image: researchclaw/sandbox-physics:latest
+gpu_required: false
+
+pip_packages:
+  - numpy
+  - scipy
+  - matplotlib
+  - jax
+  - jaxlib
+
+metric_types:
+  - scalar
+  - convergence
+
+standard_baselines:
+  - Velocity Verlet
+  - Leapfrog
+  - RK4
+  - Euler
+
+evaluation_protocol: "Run simulation with multiple methods, compare energy conservation and trajectory accuracy. Report energy drift, relative error."
+statistical_tests:
+  - convergence_order_fit
+  - relative_error
+
+output_formats:
+  - latex_table
+  - convergence_plot
+
+figure_types:
+  - trajectory_plot
+  - energy_conservation_plot
+  - convergence_plot
+  - phase_space_plot
+
+github_search_terms:
+  - molecular dynamics python
+  - N-body simulation numpy
+  - symplectic integrator python
+  - physics simulation jax
+
+paper_keywords:
+  - molecular dynamics
+  - N-body simulation
+  - symplectic integrator
+  - energy conservation
+
+compute_budget_guidance: |
+  Time budget considerations for physics simulations:
+  - Short simulations (< 100 steps): suitable for convergence tests
+  - Medium simulations (100-10000 steps): typical production runs
+  - Long simulations (> 10000 steps): only with efficient integrators
+  Adjust timestep (dt) and number of steps to fit within the time budget.
+
+dataset_guidance: |
+  Physics simulations generate their own data:
+  - Define initial conditions programmatically (positions, velocities)
+  - Use standard test problems (harmonic oscillator, Kepler, Lennard-Jones)
+  - Do NOT download external datasets
+  - Generate test systems with known analytical solutions for validation
+
+code_generation_hints: |
+  Physics simulation code requirements:
+  1. Implement actual physics — conserve energy, momentum as appropriate
+  2. Use appropriate units (reduced units for MD, SI for classical mechanics)
+  3. Compare methods at the SAME initial conditions and timestep
+  4. For convergence studies: run at multiple dt values (e.g., 0.1, 0.05, 0.025, 0.0125)
+  5. Report energy drift as relative error: |E(t) - E(0)| / |E(0)|
+  6. Output all results to results.json
+
+result_analysis_hints: |
+  Physics result analysis:
+  - For convergence: fit log(error) vs log(h) to determine convergence order
+  - For energy conservation: report max and mean energy drift
+  - For trajectory: compare against analytical solution if available
+  - Use log-log plots for convergence, linear plots for time evolution

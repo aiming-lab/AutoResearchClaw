@@ -1,0 +1,146 @@
+# Docker image profiles for domain-specific experiment execution.
+# Each domain can specify its own image with pre-installed packages.
+# The sandbox engine uses domain_id → docker profile mapping.
+
+profiles:
+  ml_base:
+    image: "researchclaw/sandbox-ml:latest"
+    packages:
+      - torch
+      - torchvision
+      - transformers
+      - datasets
+      - scikit-learn
+      - numpy
+      - scipy
+      - matplotlib
+      - tqdm
+      - gymnasium
+      - stable-baselines3
+    gpu: true
+    memory_limit_mb: 8192
+
+  physics:
+    image: "researchclaw/sandbox-physics:latest"
+    packages:
+      - numpy
+      - scipy
+      - matplotlib
+      - jax
+      - jaxlib
+      - findiff
+    gpu: false
+    memory_limit_mb: 4096
+
+  chemistry:
+    image: "researchclaw/sandbox-chemistry:latest"
+    packages:
+      - pyscf
+      - rdkit
+      - numpy
+      - scipy
+      - matplotlib
+      - pandas
+    gpu: false
+    memory_limit_mb: 4096
+
+  biology:
+    image: "researchclaw/sandbox-biology:latest"
+    packages:
+      - scanpy
+      - anndata
+      - leidenalg
+      - biopython
+      - scikit-learn
+      - numpy
+      - matplotlib
+      - pandas
+    gpu: false
+    memory_limit_mb: 16384
+
+  economics:
+    image: "researchclaw/sandbox-economics:latest"
+    packages:
+      - statsmodels
+      - linearmodels
+      - pandas
+      - numpy
+      - scipy
+      - matplotlib
+    gpu: false
+    memory_limit_mb: 4096
+
+  math:
+    image: "researchclaw/sandbox-math:latest"
+    packages:
+      - numpy
+      - scipy
+      - sympy
+      - matplotlib
+      - findiff
+    gpu: false
+    memory_limit_mb: 4096
+
+  security:
+    image: "researchclaw/sandbox-security:latest"
+    packages:
+      - scikit-learn
+      - xgboost
+      - pandas
+      - numpy
+      - matplotlib
+    gpu: false
+    memory_limit_mb: 4096
+    network: "none"
+
+  robotics:
+    image: "researchclaw/sandbox-robotics:latest"
+    packages:
+      - gymnasium
+      - mujoco
+      - stable-baselines3
+      - torch
+      - numpy
+      - matplotlib
+    gpu: true
+    memory_limit_mb: 8192
+
+  generic:
+    image: "researchclaw/sandbox-generic:latest"
+    packages:
+      - numpy
+      - scipy
+      - matplotlib
+      - pandas
+      - scikit-learn
+    gpu: false
+    memory_limit_mb: 4096
+
+# Domain ID → profile mapping
+domain_map:
+  ml_vision: ml_base
+  ml_nlp: ml_base
+  ml_rl: ml_base
+  ml_graph: ml_base
+  ml_tabular: ml_base
+  ml_generative: ml_base
+  ml_compression: ml_base
+  ml_generic: ml_base
+  physics_simulation: physics
+  physics_pde: physics
+  physics_quantum: chemistry
+  chemistry_qm: chemistry
+  chemistry_molprop: chemistry
+  chemistry_general: chemistry
+  biology_singlecell: biology
+  biology_genomics: biology
+  biology_protein: biology
+  biology_general: biology
+  economics_empirical: economics
+  economics_general: economics
+  mathematics_numerical: math
+  mathematics_optimization: math
+  mathematics_general: math
+  security_detection: security
+  robotics_control: robotics
+  generic: generic

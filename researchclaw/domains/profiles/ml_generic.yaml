@@ -1,0 +1,50 @@
+domain_id: ml_generic
+display_name: Machine Learning (General)
+parent_domain: ml
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline
+  proposed: proposed method
+  variant: ablation
+  input: dataset
+  metric: accuracy/loss
+
+typical_file_structure:
+  config.py: "Hyperparameters and model configuration"
+  data.py: "Dataset loading and preprocessing"
+  model.py: "Model architecture definition"
+  train.py: "Training loop with metric tracking"
+  main.py: "Entry point: setup → train → evaluate → report"
+
+entry_point: main.py
+
+core_libraries:
+  - torch
+  - numpy
+  - scikit-learn
+
+docker_image: researchclaw/sandbox-ml:latest
+gpu_required: true
+
+metric_types:
+  - scalar
+  - learning_curve
+
+standard_baselines:
+  - MLP
+  - Linear
+  - Random Forest
+  - XGBoost
+
+evaluation_protocol: "Standard train/eval split. Report mean ± std over 3+ seeds."
+statistical_tests:
+  - paired_t_test
+
+github_search_terms:
+  - machine learning pytorch
+  - deep learning benchmark
+
+paper_keywords:
+  - machine learning
+  - deep learning

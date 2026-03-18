@@ -181,7 +181,7 @@ class SshRemoteSandbox:
         for setup_cmd in cfg.setup_commands:
             setup_result = self._ssh_run(
                 f"cd {remote_dir_q} && {setup_cmd}",
-                timeout_sec=120,
+                timeout_sec=cfg.setup_timeout_sec,
             )
             if setup_result.returncode != 0:
                 logger.warning(
@@ -288,9 +288,11 @@ class SshRemoteSandbox:
         return " ".join(parts)
 
     def _ssh_run(
-        self, command: str, *, timeout_sec: int = 60
+        self, command: str, *, timeout_sec: int | None = None
     ) -> _SshResult:
         """Execute a command on the remote host via ssh."""
+        if timeout_sec is None:
+            timeout_sec = self.config.timeout_sec
         cmd = _build_ssh_base(self.config) + [command]
         try:
             cp = subprocess.run(
@@ -345,7 +347,8 @@ class SshRemoteSandbox:
 
         try:
             cp = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=60, check=False,
+                cmd, capture_output=True, text=True,
+                timeout=cfg.scp_timeout_sec, check=False,
             )
             if cp.returncode != 0:
                 logger.error("scp upload failed: %s", cp.stderr.strip())

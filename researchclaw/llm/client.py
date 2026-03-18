@@ -262,11 +262,23 @@ class LLMClient:
                 # Non-retryable errors
                 if status == 403 and "not allowed to use model" in body:
                     raise  # Model not available — let fallback handle
-                if status == 400:
-                    raise  # Bad request — fix the request, don't retry
 
-                # Retryable: 429 (rate limit), 500, 502, 503, 504
-                if status in (429, 500, 502, 503, 504):
+                # 400 is normally non-retryable, but some providers
+                # (Azure OpenAI) return 400 during overload / rate-limit.
+                # Retry if the body hints at a transient issue.
+                if status == 400:
+                    _transient_400 = any(
+                        kw in body.lower()
+                        for kw in ("rate limit", "ratelimit", "overloaded",
+                                   "temporarily", "capacity", "throttl",
+                                   "too many", "retry")
+                    )
+                    if not _transient_400:
+                        raise  # Genuine bad request — don't retry
+
+                # Retryable: 429 (rate limit), transient 400, 500, 502, 503, 504,
+                # 529 (Anthropic overloaded)
+                if status in (400, 429, 500, 502, 503, 504, 529):
                     delay = self.config.retry_base_delay * (2**attempt)
                     # Add jitter
                     import random
@@ -309,9 +321,13 @@ class LLMClient:
             data = self._anthropic.chat_completion(model, messages, max_tokens, temperature, json_mode)
         else:
             # Original OpenAI logic
+            # Copy messages to avoid mutating the caller's list (important for
+            # retries and model-fallback — each attempt must start from the
+            # original, un-modified messages).
+            msgs = [dict(m) for m in messages]
             body: dict[str, Any] = {
                 "model": model,
-                "messages": messages,
+                "messages": msgs,
                 "temperature": temperature,
             }
 
@@ -323,7 +339,25 @@ class LLMClient:
                 body["max_tokens"] = max_tokens
 
             if json_mode:
-                body["response_format"] = {"type": "json_object"}
+                # Many OpenAI-compatible proxies serving Claude models don't
+                # support the response_format parameter and return HTTP 400.
+                # Fall back to a system-prompt injection for non-OpenAI models.
+                if model.startswith("claude"):
+                    _json_hint = (
+                        "You MUST respond with valid JSON only. "
+                        "Do not include any text outside the JSON object."
+                    )
+                    # Prepend to existing system message or add as new one
+                    if msgs and msgs[0]["role"] == "system":
+                        msgs[0]["content"] = (
+                            _json_hint + "\n\n" + msgs[0]["content"]
+                        )
+                    else:
+                        msgs.insert(
+                            0, {"role": "system", "content": _json_hint}
+                        )
+                else:
+                    body["response_format"] = {"type": "json_object"}
 
             payload = json.dumps(body).encode("utf-8")
             url = f"{self.config.base_url.rstrip('/')}/chat/completions"

@@ -17,10 +17,32 @@ from __future__ import annotations
 
 import re
 import textwrap
+import threading
 from dataclasses import dataclass, field
 
 from researchclaw.templates.conference import ConferenceTemplate
 
+_render_counters = threading.local()
+
+
+def _reset_render_counters() -> None:
+    """Reset per-render figure and table counters for the current thread."""
+    _render_counters.table = 0
+    _render_counters.figure = 0
+
+
+def _next_table_num() -> int:
+    """Return the next table number for the current thread."""
+    next_num = getattr(_render_counters, "table", 0) + 1
+    _render_counters.table = next_num
+    return next_num
+
+
+def _next_figure_num() -> int:
+    """Return the next figure number for the current thread."""
+    next_num = getattr(_render_counters, "figure", 0) + 1
+    _render_counters.figure = next_num
+    return next_num
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -56,9 +78,7 @@ def markdown_to_latex(
     str
         A complete ``.tex`` file ready for compilation.
     """
-    global _TABLE_COUNTER, _FIGURE_COUNTER  # noqa: PLW0603
-    _TABLE_COUNTER = 0
-    _FIGURE_COUNTER = 0
+    _reset_render_counters()
 
     paper_md = _preprocess_markdown(paper_md)
     paper_md = _round_raw_metrics(paper_md)
@@ -960,9 +980,6 @@ def _collect_table(lines: list[str], start: int) -> tuple[list[str], int]:
     return table, i
 
 
-_TABLE_COUNTER = 0
-
-
 def _render_table(table_lines: list[str], caption: str = "") -> str:
     """Render a Markdown table as a LaTeX tabular inside a table environment.
 
@@ -971,8 +988,6 @@ def _render_table(table_lines: list[str], caption: str = "") -> str:
     IMP-32: Generates descriptive captions from header columns when the
     caption is empty or just 'Table N'.
     """
-    global _TABLE_COUNTER  # noqa: PLW0603
-
     if len(table_lines) < 2:
         return ""
 
@@ -985,7 +1000,7 @@ def _render_table(table_lines: list[str], caption: str = "") -> str:
     alignments = _parse_alignments(table_lines[1], ncols)
     col_spec = "".join(alignments)
 
-    _TABLE_COUNTER += 1
+    table_num = _next_table_num()
 
     # IMP-23: Detect wide tables that need resizebox
     max_cell_len = max(
@@ -1023,12 +1038,12 @@ def _render_table(table_lines: list[str], caption: str = "") -> str:
             lines_out.append(f"\\caption{{{_convert_inline(cap_text)}}}")
         else:
             # Caption was just "Table N" — generate from header
-            auto_cap = _auto_table_caption(header, _TABLE_COUNTER)
+            auto_cap = _auto_table_caption(header, table_num)
             lines_out.append(f"\\caption{{{auto_cap}}}")
     else:
-        auto_cap = _auto_table_caption(header, _TABLE_COUNTER)
+        auto_cap = _auto_table_caption(header, table_num)
         lines_out.append(f"\\caption{{{auto_cap}}}")
-    lines_out.append(f"\\label{{tab:{_TABLE_COUNTER}}}")
+    lines_out.append(f"\\label{{tab:{table_num}}}")
     lines_out.append("\\end{table}")
 
     return "\n".join(lines_out)
@@ -1183,19 +1198,15 @@ def _render_code_block(lang: str, code: str) -> str:
 # Figure rendering
 # ---------------------------------------------------------------------------
 
-_FIGURE_COUNTER = 0
-
-
 def _render_figure(caption: str, path: str) -> str:
     """Render a markdown image as a LaTeX figure environment."""
-    global _FIGURE_COUNTER  # noqa: PLW0603
-    _FIGURE_COUNTER += 1
+    fig_num = _next_figure_num()
     # Sanitize path for LaTeX: replace spaces, keep underscores
     path = path.replace(" ", "_")
-    cap_tex = _convert_inline(caption) if caption else f"Figure {_FIGURE_COUNTER}"
+    cap_tex = _convert_inline(caption) if caption else f"Figure {fig_num}"
     label_key = re.sub(r"[^a-z0-9]+", "_", caption.lower()).strip("_")[:30]
     if not label_key:
-        label_key = str(_FIGURE_COUNTER)
+        label_key = str(fig_num)
     return (
         "\\begin{figure}[t]\n"
         "\\centering\n"

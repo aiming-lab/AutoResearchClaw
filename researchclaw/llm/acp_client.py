@@ -100,6 +100,7 @@ class ACPClient:
         temperature: float | None = None,
         json_mode: bool = False,
         system: str | None = None,
+        strip_thinking: bool = False,
     ) -> LLMResponse:
         """Send a prompt and return the agent's response.
 
@@ -110,6 +111,9 @@ class ACPClient:
         """
         prompt_text = self._messages_to_prompt(messages, system=system)
         content = self._send_prompt(prompt_text)
+        if strip_thinking:
+            from researchclaw.utils.thinking_tags import strip_thinking_tags
+            content = strip_thinking_tags(content)
         return LLMResponse(
             content=content,
             model=f"acp:{self.config.agent}",
@@ -219,27 +223,65 @@ class ACPClient:
     # Linux MAX_ARG_STRLEN is 128KB; stay well under to leave room for env
     _MAX_CLI_PROMPT_BYTES = 100_000
 
+    # Error patterns that indicate a dead/stale session (retryable)
+    _RECONNECT_ERRORS = (
+        "agent needs reconnect",
+        "session not found",
+        "Query closed",
+    )
+    _MAX_RECONNECT_ATTEMPTS = 2
+
     def _send_prompt(self, prompt: str) -> str:
         """Send a prompt via acpx and return the response text.
 
         For large prompts that would exceed the OS argument-length limit
         (``E2BIG``), the prompt is written to a temp file and the agent
         is asked to read it.
+
+        If the session has died (common after long-running stages), retries
+        up to ``_MAX_RECONNECT_ATTEMPTS`` times with automatic reconnection.
         """
-        self._ensure_session()
         acpx = self._resolve_acpx()
         if not acpx:
             raise RuntimeError("acpx not found")
 
         prompt_bytes = len(prompt.encode("utf-8"))
-        if prompt_bytes <= self._MAX_CLI_PROMPT_BYTES:
-            return self._send_prompt_cli(acpx, prompt)
+        use_file = prompt_bytes > self._MAX_CLI_PROMPT_BYTES
+        if use_file:
+            logger.info(
+                "Prompt too large for CLI arg (%d bytes). Using temp file.",
+                prompt_bytes,
+            )
 
-        logger.info(
-            "Prompt too large for CLI arg (%d bytes). Using temp file.",
-            prompt_bytes,
-        )
-        return self._send_prompt_via_file(acpx, prompt)
+        last_exc: RuntimeError | None = None
+        for attempt in range(1 + self._MAX_RECONNECT_ATTEMPTS):
+            self._ensure_session()
+            try:
+                if use_file:
+                    return self._send_prompt_via_file(acpx, prompt)
+                return self._send_prompt_cli(acpx, prompt)
+            except RuntimeError as exc:
+                if not any(pat in str(exc) for pat in self._RECONNECT_ERRORS):
+                    raise
+                last_exc = exc
+                if attempt < self._MAX_RECONNECT_ATTEMPTS:
+                    logger.warning(
+                        "ACP session died (%s), reconnecting (attempt %d/%d)...",
+                        exc,
+                        attempt + 1,
+                        self._MAX_RECONNECT_ATTEMPTS,
+                    )
+                    self._force_reconnect()
+
+        raise last_exc  # type: ignore[misc]
+
+    def _force_reconnect(self) -> None:
+        """Close the stale session and reset so _ensure_session creates a new one."""
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._session_ready = False
 
     def _send_prompt_cli(self, acpx: str, prompt: str) -> str:
         """Send prompt as a CLI argument (original path)."""

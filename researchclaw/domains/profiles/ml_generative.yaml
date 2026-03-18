@@ -1,0 +1,68 @@
+domain_id: ml_generative
+display_name: Generative Models (ML)
+parent_domain: ml
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline
+  proposed: proposed method
+  variant: ablation
+  input: dataset
+  metric: FID / IS
+
+typical_file_structure:
+  config.py: "Hyperparameters and model configuration"
+  data.py: "Dataset loading and preprocessing"
+  model.py: "Generative model architecture (generator, discriminator, encoder, decoder)"
+  train.py: "Training loop with sample generation and metric tracking"
+  main.py: "Entry point: setup -> train -> generate -> evaluate -> report"
+
+entry_point: main.py
+
+core_libraries:
+  - torch
+  - torchvision
+  - numpy
+  - scipy
+
+docker_image: researchclaw/sandbox-ml:latest
+gpu_required: true
+
+pip_packages:
+  - torch
+  - torchvision
+  - numpy
+  - scipy
+  - scikit-learn
+  - matplotlib
+  - tqdm
+  - pillow
+
+metric_types:
+  - scalar
+  - learning_curve
+  - image_grid
+
+standard_baselines:
+  - DCGAN
+  - WGAN-GP
+  - VAE
+  - DDPM
+  - StyleGAN2
+
+evaluation_protocol: "Train generative model, compute FID and IS on generated samples vs real data. Report mean +/- std over 3+ seeds."
+statistical_tests:
+  - paired_t_test
+
+github_search_terms:
+  - generative adversarial network pytorch
+  - diffusion model training
+  - VAE image generation
+  - GAN benchmark FID
+
+paper_keywords:
+  - generative adversarial network
+  - diffusion model
+  - variational autoencoder
+  - image generation
+  - score matching

@@ -395,3 +395,76 @@ class TestAcpTimeoutFix:
 
         client = ACPClient.from_rc_config(fake_rc)
         assert client.config.timeout_sec == 600
+
+
+# ===========================================================================
+# ACP session reconnect tests (Issue #52)
+# ===========================================================================
+
+class TestAcpSessionReconnect:
+    def test_reconnect_on_session_died(self):
+        """_send_prompt retries when session dies with 'agent needs reconnect'."""
+        from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+        client = ACPClient(ACPConfig(agent="claude"))
+        client._acpx = "/usr/bin/true"
+        client._session_ready = True
+
+        call_count = 0
+
+        def fake_cli(acpx: str, prompt: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("ACP prompt failed (exit 1): agent needs reconnect")
+            return "success response"
+
+        client._send_prompt_cli = fake_cli  # type: ignore[assignment]
+        client._ensure_session = lambda: None  # type: ignore[assignment]
+        client._force_reconnect = lambda: None  # type: ignore[assignment]
+
+        result = client._send_prompt("test prompt")
+        assert result == "success response"
+        assert call_count == 2
+
+    def test_reconnect_exhausted_raises(self):
+        """_send_prompt raises after exhausting reconnect attempts."""
+        from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+        client = ACPClient(ACPConfig(agent="claude"))
+        client._acpx = "/usr/bin/true"
+        client._session_ready = True
+
+        def always_fail(acpx: str, prompt: str) -> str:
+            raise RuntimeError("ACP prompt failed (exit 1): session not found")
+
+        client._send_prompt_cli = always_fail  # type: ignore[assignment]
+        client._ensure_session = lambda: None  # type: ignore[assignment]
+        client._force_reconnect = lambda: None  # type: ignore[assignment]
+
+        import pytest
+        with pytest.raises(RuntimeError, match="session not found"):
+            client._send_prompt("test prompt")
+
+    def test_non_reconnectable_error_raises_immediately(self):
+        """_send_prompt does not retry on non-session errors."""
+        from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+        client = ACPClient(ACPConfig(agent="claude"))
+        client._acpx = "/usr/bin/true"
+        client._session_ready = True
+
+        call_count = 0
+
+        def fail_with_other_error(acpx: str, prompt: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("ACP prompt failed (exit 1): permission denied")
+
+        client._send_prompt_cli = fail_with_other_error  # type: ignore[assignment]
+        client._ensure_session = lambda: None  # type: ignore[assignment]
+
+        import pytest
+        with pytest.raises(RuntimeError, match="permission denied"):
+            client._send_prompt("test prompt")
+        assert call_count == 1  # no retry

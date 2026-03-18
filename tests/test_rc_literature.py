@@ -19,7 +19,7 @@ from researchclaw.literature.semantic_scholar import (
     search_semantic_scholar,
 )
 from researchclaw.literature.arxiv_client import (
-    _parse_atom_feed,
+    _convert_result,
     search_arxiv,
 )
 from researchclaw.literature.search import (
@@ -255,45 +255,109 @@ class TestSemanticScholar:
 
 
 class TestArxiv:
-    def test_parse_atom_feed(self) -> None:
-        papers = _parse_atom_feed(SAMPLE_ARXIV_ATOM)
-        assert len(papers) == 2
+    def test_convert_result(self) -> None:
+        """Test converting arxiv.Result to Paper via the new library."""
+        from unittest.mock import MagicMock
+        from datetime import datetime
 
-        p1 = papers[0]
-        assert p1.title == "A Novel Approach to Protein Folding"
-        assert p1.arxiv_id == "2401.00001"
-        assert p1.year == 2024
-        assert len(p1.authors) == 2
-        assert p1.authors[0].name == "Alice Researcher"
-        assert p1.source == "arxiv"
-        assert p1.doi == "10.5678/protein"
+        mock_result = MagicMock()
+        mock_result.entry_id = "http://arxiv.org/abs/2401.00001v1"
+        mock_result.title = "A Novel Approach to Protein Folding"
+        mock_result.summary = "We study protein folding."
+        mock_result.published = datetime(2024, 1, 15)
+        mock_result.doi = "10.5678/protein"
+        mock_result.primary_category = "q-bio.BM"
 
-        p2 = papers[1]
-        assert p2.title == "Deep Reinforcement Learning Survey"
-        assert p2.arxiv_id == "2402.00002"
-        assert p2.doi == ""  # no doi
+        mock_author1 = MagicMock()
+        mock_author1.name = "Alice Researcher"
+        mock_author2 = MagicMock()
+        mock_author2.name = "Bob Scientist"
+        mock_result.authors = [mock_author1, mock_author2]
+
+        paper = _convert_result(mock_result)
+        assert paper.title == "A Novel Approach to Protein Folding"
+        assert paper.arxiv_id == "2401.00001"
+        assert paper.year == 2024
+        assert len(paper.authors) == 2
+        assert paper.authors[0].name == "Alice Researcher"
+        assert paper.source == "arxiv"
+        assert paper.doi == "10.5678/protein"
+        assert paper.venue == "q-bio.BM"
 
     def test_search_arxiv_mock(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = SAMPLE_ARXIV_ATOM.encode("utf-8")
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
+        """Test search_arxiv with mocked arxiv library."""
+        from unittest.mock import MagicMock
+        from datetime import datetime
+        import types
 
+        mock_result = MagicMock()
+        mock_result.entry_id = "http://arxiv.org/abs/2401.00001v1"
+        mock_result.title = "Test Paper"
+        mock_result.summary = "Abstract."
+        mock_result.published = datetime(2024, 1, 1)
+        mock_result.doi = ""
+        mock_result.primary_category = "cs.LG"
+        mock_author = MagicMock()
+        mock_author.name = "Test Author"
+        mock_result.authors = [mock_author]
+
+        mock_client = MagicMock()
+        mock_client.results.return_value = iter([mock_result])
+
+        # Mock the module-level `arxiv` so the `if arxiv is None` guard
+        # doesn't short-circuit before the mocked _get_client is reached.
+        # Use MagicMock so all attributes (Search, SortOrder, etc.) auto-resolve.
+        _fake_arxiv = MagicMock()
         monkeypatch.setattr(
-            "researchclaw.literature.arxiv_client.urllib.request.urlopen",
-            lambda *a, **kw: mock_resp,
+            "researchclaw.literature.arxiv_client.arxiv", _fake_arxiv,
+        )
+        monkeypatch.setattr(
+            "researchclaw.literature.arxiv_client._get_client",
+            lambda: mock_client,
+        )
+        from researchclaw.literature.arxiv_client import _reset_circuit_breaker
+        _reset_circuit_breaker()
+
+        papers = search_arxiv("test", limit=10)
+        assert len(papers) == 1
+        assert papers[0].title == "Test Paper"
+        assert papers[0].arxiv_id == "2401.00001"
+
+    def test_search_arxiv_error_graceful(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """search_arxiv returns empty list on error, not raise."""
+        from unittest.mock import MagicMock
+        import types
+
+        # Build a fake arxiv module with real exception classes so
+        # `except arxiv.HTTPError` doesn't TypeError.
+        _fake_arxiv = types.ModuleType("arxiv")
+
+        class _FakeHTTPError(Exception):
+            pass
+
+        class _FakeUnexpectedEmptyPageError(Exception):
+            pass
+
+        _fake_arxiv.HTTPError = _FakeHTTPError
+        _fake_arxiv.UnexpectedEmptyPageError = _FakeUnexpectedEmptyPageError
+        _fake_arxiv.SortCriterion = MagicMock()
+        _fake_arxiv.SortOrder = MagicMock()
+        _fake_arxiv.Search = MagicMock()
+        monkeypatch.setattr(
+            "researchclaw.literature.arxiv_client.arxiv", _fake_arxiv,
         )
 
-        papers = search_arxiv("protein folding", limit=10)
-        assert len(papers) == 2
+        mock_client = MagicMock()
+        mock_client.results.side_effect = _FakeHTTPError("Simulated arXiv HTTP error")
 
-    def test_parse_atom_feed_empty(self) -> None:
-        xml = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"></feed>'
-        papers = _parse_atom_feed(xml)
-        assert papers == []
+        monkeypatch.setattr(
+            "researchclaw.literature.arxiv_client._get_client",
+            lambda: mock_client,
+        )
+        from researchclaw.literature.arxiv_client import _reset_circuit_breaker
+        _reset_circuit_breaker()
 
-    def test_parse_atom_feed_invalid_xml(self) -> None:
-        papers = _parse_atom_feed("not xml at all <><>")
+        papers = search_arxiv("test", limit=10)
         assert papers == []
 
 
@@ -507,119 +571,83 @@ class TestArxivCircuitBreaker:
         from researchclaw.literature.arxiv_client import _reset_circuit_breaker
         _reset_circuit_breaker()
 
-    def test_429_triggers_circuit_breaker(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Three consecutive 429s should trip the arXiv circuit breaker."""
+    def test_failure_triggers_circuit_breaker(self) -> None:
+        """Three consecutive failures should trip the circuit breaker."""
         from researchclaw.literature import arxiv_client
-        _call_count = 0
 
-        def _mock_urlopen(*a: Any, **kw: Any) -> None:
-            nonlocal _call_count
-            _call_count += 1
-            exc = urllib.error.HTTPError(
-                "http://test", 429, "Too Many Requests", {}, None  # type: ignore[arg-type]
-            )
-            raise exc
+        # Simulate 3 consecutive failures
+        for _ in range(3):
+            arxiv_client._cb_on_failure()
 
-        monkeypatch.setattr(
-            "researchclaw.literature.arxiv_client.urllib.request.urlopen",
-            _mock_urlopen,
-        )
-        monkeypatch.setattr("researchclaw.literature.arxiv_client.time.sleep", lambda _: None)
-
-        # First call: 3 retries, each triggers a 429 → breaker trips
-        result = arxiv_client._fetch_with_retry("http://test")
-        assert result is None
         assert arxiv_client._cb_state == arxiv_client._CB_OPEN
         assert arxiv_client._cb_trip_count == 1
 
-    def test_breaker_open_skips_requests(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When breaker is OPEN, requests should be skipped immediately."""
+    def test_breaker_open_skips_requests(self) -> None:
+        """When breaker is OPEN, requests should be skipped."""
         import time as time_mod
         from researchclaw.literature import arxiv_client
 
-        # Manually set breaker to OPEN
         arxiv_client._cb_state = arxiv_client._CB_OPEN
         arxiv_client._cb_open_since = time_mod.monotonic()
-        arxiv_client._cb_cooldown_sec = 999  # won't expire during test
+        arxiv_client._cb_cooldown_sec = 999
 
-        result = arxiv_client._fetch_with_retry("http://test")
-        assert result is None
+        assert not arxiv_client._cb_should_allow()
 
-    def test_success_resets_breaker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_success_resets_breaker(self) -> None:
         """A successful request should reset the circuit breaker."""
         from researchclaw.literature import arxiv_client
 
         arxiv_client._cb_state = arxiv_client._CB_HALF_OPEN
         arxiv_client._cb_consecutive_429s = 2
 
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = b"<feed></feed>"
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-
-        monkeypatch.setattr(
-            "researchclaw.literature.arxiv_client.urllib.request.urlopen",
-            lambda *a, **kw: mock_resp,
-        )
-
-        result = arxiv_client._fetch_with_retry("http://test")
-        assert result == "<feed></feed>"
+        arxiv_client._cb_on_success()
         assert arxiv_client._cb_state == arxiv_client._CB_CLOSED
         assert arxiv_client._cb_consecutive_429s == 0
 
-    def test_retry_after_header_respected(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """429 with Retry-After header should use that value."""
-        from researchclaw.literature import arxiv_client
-        import io
-        _sleep_values: list[float] = []
-
-        call_count = 0
-
-        def _mock_urlopen(*a: Any, **kw: Any) -> Any:
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 1:
-                headers = {"Retry-After": "10"}
-                exc = urllib.error.HTTPError(
-                    "http://test", 429, "Too Many Requests",
-                    headers,  # type: ignore[arg-type]
-                    io.BytesIO(b""),
-                )
-                raise exc
-            # Second call succeeds
-            mock_resp = MagicMock()
-            mock_resp.read.return_value = b"<feed></feed>"
-            mock_resp.__enter__ = lambda s: s
-            mock_resp.__exit__ = MagicMock(return_value=False)
-            return mock_resp
-
-        def _mock_sleep(secs: float) -> None:
-            _sleep_values.append(secs)
-
-        monkeypatch.setattr(
-            "researchclaw.literature.arxiv_client.urllib.request.urlopen",
-            _mock_urlopen,
-        )
-        monkeypatch.setattr(
-            "researchclaw.literature.arxiv_client.time.sleep", _mock_sleep,
-        )
-
-        result = arxiv_client._fetch_with_retry("http://test")
-        assert result == "<feed></feed>"
-        # First sleep should be based on Retry-After: 10 + jitter
-        assert len(_sleep_values) >= 1
-        assert _sleep_values[0] >= 10.0  # At least the Retry-After value
-
-    def test_rate_elevation_after_429(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """After a 429, rate should be elevated to _RATE_LIMIT_ELEVATED."""
+    def test_half_open_probe_failure_doubles_cooldown(self) -> None:
+        """Probe failure in HALF_OPEN should double the cooldown."""
         from researchclaw.literature import arxiv_client
 
-        arxiv_client._rate_elevated = False
-        arxiv_client._cb_on_429()
-        assert arxiv_client._rate_elevated is True
+        arxiv_client._cb_state = arxiv_client._CB_HALF_OPEN
+        initial_cooldown = arxiv_client._cb_cooldown_sec
 
-        arxiv_client._cb_on_success()
-        assert arxiv_client._rate_elevated is False
+        arxiv_client._cb_on_failure()
+        assert arxiv_client._cb_state == arxiv_client._CB_OPEN
+        assert arxiv_client._cb_cooldown_sec == min(initial_cooldown * 2, 600)
+
+    def test_search_with_http_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """search_arxiv should return empty list on HTTPError."""
+        import types
+
+        _fake_arxiv = types.ModuleType("arxiv")
+
+        class _FakeHTTPError(Exception):
+            pass
+
+        class _FakeUnexpectedEmptyPageError(Exception):
+            pass
+
+        _fake_arxiv.HTTPError = _FakeHTTPError
+        _fake_arxiv.UnexpectedEmptyPageError = _FakeUnexpectedEmptyPageError
+        _fake_arxiv.SortCriterion = MagicMock()
+        _fake_arxiv.SortOrder = MagicMock()
+        _fake_arxiv.Search = MagicMock()
+        monkeypatch.setattr(
+            "researchclaw.literature.arxiv_client.arxiv", _fake_arxiv,
+        )
+
+        mock_client = MagicMock()
+        mock_client.results.side_effect = _FakeHTTPError("Simulated 429")
+
+        monkeypatch.setattr(
+            "researchclaw.literature.arxiv_client._get_client",
+            lambda: mock_client,
+        )
+        from researchclaw.literature.arxiv_client import _reset_circuit_breaker
+        _reset_circuit_breaker()
+
+        papers = search_arxiv("test", limit=5)
+        assert papers == []
 
 
 # ──────────────────────────────────────────────────────────────────────

@@ -1,0 +1,68 @@
+domain_id: security_detection
+display_name: Security / Intrusion Detection
+parent_domain: security
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline detector
+  proposed: proposed detector
+  variant: feature variant
+  input: dataset
+  metric: TPR / FPR / F1
+
+typical_file_structure:
+  config.py: "Detection parameters and thresholds"
+  data.py: "Data loading and feature extraction"
+  model.py: "Detection model implementation"
+  evaluate.py: "Evaluation with per-class metrics"
+  main.py: "Entry point: load → extract features → train → evaluate → report"
+
+entry_point: main.py
+
+core_libraries:
+  - scikit-learn
+  - numpy
+  - pandas
+
+docker_image: researchclaw/sandbox-security:latest
+gpu_required: false
+
+pip_packages:
+  - scikit-learn
+  - numpy
+  - pandas
+  - matplotlib
+  - xgboost
+
+metric_types:
+  - scalar
+  - confusion_matrix
+
+standard_baselines:
+  - Random Forest
+  - XGBoost
+  - SVM
+  - Isolation Forest
+  - One-Class SVM
+
+evaluation_protocol: "Train/test split. Report TPR, FPR, F1, per-class metrics."
+statistical_tests:
+  - paired_t_test
+  - mcnemar_test
+
+github_search_terms:
+  - intrusion detection python
+  - network anomaly detection
+  - malware classification sklearn
+
+paper_keywords:
+  - intrusion detection
+  - anomaly detection
+  - network security
+
+dataset_guidance: |
+  Security detection datasets:
+  - Generate synthetic network traffic or tabular data
+  - Simulate normal vs attack patterns
+  - Use class-imbalanced data (realistic for security)
+  - Do NOT download external datasets

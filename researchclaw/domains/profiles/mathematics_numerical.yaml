@@ -1,0 +1,90 @@
+domain_id: mathematics_numerical
+display_name: Numerical Mathematics
+parent_domain: mathematics
+
+experiment_paradigm: convergence
+condition_terminology:
+  baseline: reference method
+  proposed: proposed method
+  variant: variant
+  input: test problem
+  metric: error / convergence order
+
+typical_file_structure:
+  config.py: "Problem parameters and method configurations"
+  problems.py: "Test problem definitions with exact solutions"
+  methods.py: "Numerical method implementations"
+  analysis.py: "Error analysis and convergence computation"
+  main.py: "Entry point: define problems → solve → analyze → report"
+
+entry_point: main.py
+
+core_libraries:
+  - numpy
+  - scipy
+  - sympy
+  - matplotlib
+
+docker_image: researchclaw/sandbox-math:latest
+gpu_required: false
+
+pip_packages:
+  - numpy
+  - scipy
+  - sympy
+  - matplotlib
+
+metric_types:
+  - scalar
+  - convergence
+
+standard_baselines:
+  - Euler method
+  - RK4
+  - Adams-Bashforth
+  - Crank-Nicolson
+  - Gauss-Legendre quadrature
+
+evaluation_protocol: "Run method at multiple step sizes, compute error against reference solution. Report convergence order."
+statistical_tests:
+  - convergence_order_fit
+
+output_formats:
+  - latex_table
+  - convergence_plot
+
+figure_types:
+  - convergence_plot
+  - error_plot
+  - solution_comparison_plot
+
+github_search_terms:
+  - numerical methods python
+  - ODE solver convergence
+  - numerical analysis numpy
+  - quadrature python
+
+paper_keywords:
+  - numerical methods
+  - convergence analysis
+  - error estimates
+
+compute_budget_guidance: |
+  Numerical methods are typically fast. Focus on accuracy:
+  - Use 5-8 refinement levels for clear convergence plots
+  - Step sizes: geometric sequence (e.g., h, h/2, h/4, h/8, ...)
+
+dataset_guidance: |
+  Numerical methods use standard test problems:
+  - ODE: Lotka-Volterra, Van der Pol, stiff problems
+  - Quadrature: polynomials, oscillatory integrands, singular integrands
+  - Linear algebra: Hilbert matrix, sparse tridiagonal systems
+  - Define all problems in code; do NOT download external data
+
+code_generation_hints: |
+  Numerical methods code:
+  1. Implement methods from scratch (not just calling scipy)
+  2. Use test problems with KNOWN exact solutions
+  3. Compute error at multiple refinement levels
+  4. Report convergence order: p = log(e_h / e_{h/2}) / log(2)
+  5. Output results.json with convergence data

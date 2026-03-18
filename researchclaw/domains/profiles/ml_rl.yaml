@@ -1,0 +1,61 @@
+domain_id: ml_rl
+display_name: Reinforcement Learning
+parent_domain: ml
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline algorithm
+  proposed: proposed algorithm
+  variant: ablation
+  input: environment
+  metric: episode return
+
+typical_file_structure:
+  config.py: "Hyperparameters and environment configuration"
+  env.py: "Environment wrappers and setup"
+  agent.py: "RL agent implementation"
+  train.py: "Training loop with episode tracking"
+  main.py: "Entry point: setup → train → evaluate → report"
+
+entry_point: main.py
+
+core_libraries:
+  - torch
+  - gymnasium
+  - stable-baselines3
+  - numpy
+
+docker_image: researchclaw/sandbox-ml:latest
+gpu_required: true
+
+pip_packages:
+  - torch
+  - gymnasium
+  - stable-baselines3
+  - numpy
+  - matplotlib
+
+metric_types:
+  - scalar
+  - learning_curve
+
+standard_baselines:
+  - PPO
+  - SAC
+  - TD3
+  - DQN
+  - A2C
+
+evaluation_protocol: "Train for specified steps, evaluate over 100 episodes. Report mean ± std over 3+ seeds."
+statistical_tests:
+  - paired_t_test
+
+github_search_terms:
+  - reinforcement learning pytorch
+  - RL benchmark gymnasium
+  - stable baselines3 example
+
+paper_keywords:
+  - reinforcement learning
+  - policy gradient
+  - deep reinforcement learning

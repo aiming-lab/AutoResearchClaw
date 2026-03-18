@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time as _time
 from dataclasses import dataclass
@@ -55,7 +56,10 @@ _DOMAIN_KEYWORDS: dict[str, tuple[list[str], str, str]] = {
     "physics": (
         ["quantum", "thermodynamic", "electrodynamic", "particle physics",
          "condensed matter", "statistical mechanics", "cosmology", "astrophysics",
-         "plasma", "optics", "photonics", "relativity", "gravitational"],
+         "plasma", "optics", "photonics", "relativity", "gravitational",
+         "PDE", "PINN", "physics-informed", "Burgers", "Navier-Stokes",
+         "Darcy flow", "Schrödinger", "scientific computing", "operator learning",
+         "neural operator", "Fourier neural", "DeepONet"],
         "physics",
         "Physical Review Letters, Nature Physics, JHEP",
     ),
@@ -78,7 +82,9 @@ _DOMAIN_KEYWORDS: dict[str, tuple[list[str], str, str]] = {
         ["theorem", "proof", "conjecture", "topology", "algebra",
          "number theory", "combinatorics", "differential equation",
          "stochastic process", "functional analysis", "manifold",
-         "Riemannian", "category theory", "graph theory"],
+         "Riemannian", "category theory", "graph theory",
+         "neural ODE", "dynamical system", "Lorenz", "chaotic",
+         "Lyapunov", "attractor", "ODE solver", "trajectory prediction"],
         "mathematics",
         "Annals of Mathematics, Inventiones Mathematicae, JAMS",
     ),
@@ -145,6 +151,76 @@ class StageResult:
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _build_fallback_queries(topic: str) -> list[str]:
+    """Extract meaningful search queries from a long topic string.
+
+    Instead of using the raw topic as a query (which is often 200+ chars
+    and returns garbage from search engines), extract noun phrases and
+    domain keywords. Returns 5-10 targeted queries.
+    """
+    # Split on common delimiters and extract meaningful chunks
+    chunks = re.split(r"[,:;()\[\]]+", topic)
+    chunks = [c.strip() for c in chunks if len(c.strip()) > 8]
+    cleaned_chunks = []
+    for c in chunks:
+        c = re.sub(
+            r"^(and|or|the|a|an|in|of|for|with|across|multiple|three|various)\s+",
+            "", c, flags=re.IGNORECASE,
+        )
+        c = c.strip()
+        if len(c) > 8:
+            cleaned_chunks.append(c)
+    chunks = cleaned_chunks
+
+    # Extract key terms (words that look like domain terms, not stopwords)
+    _stop = {
+        "the", "and", "for", "with", "from", "that", "this", "into",
+        "over", "across", "multiple", "three", "result", "comprehensive",
+        "using", "based", "between", "various", "different", "several",
+        "parameter", "parameters", "analysis", "approach", "method",
+        "framework", "frameworks",
+    }
+    words = topic.lower().split()
+    key_terms = [w for w in words if len(w) > 3 and w not in _stop]
+
+    queries: list[str] = []
+
+    # Strategy 1: Use meaningful chunks (up to 60 chars each)
+    for chunk in chunks[:4]:
+        if len(chunk) > 60:
+            chunk = " ".join(chunk.split()[:6])
+        if chunk and chunk not in queries:
+            queries.append(chunk)
+
+    # Strategy 2: Bigrams of key terms
+    clean_terms = [t for t in key_terms if re.match(r"^[a-z]", t) and ":" not in t]
+    for i in range(min(len(clean_terms) - 1, 4)):
+        bigram = f"{clean_terms[i]} {clean_terms[i + 1]}"
+        if bigram not in queries:
+            queries.append(bigram)
+
+    # Deduplicate preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for q in queries:
+        q_lower = q.strip().lower()
+        if q_lower and q_lower not in seen:
+            seen.add(q_lower)
+            unique.append(q.strip())
+
+    # Ensure we have at least a few useful queries
+    topic_short = topic[:60].strip()
+    for suffix in ("survey", "review", "benchmark", "state of the art", "recent advances"):
+        if len(unique) >= 5:
+            break
+        candidate = f"{topic_short} {suffix}".strip()
+        if candidate.lower() not in seen:
+            seen.add(candidate.lower())
+            unique.append(candidate)
+
+    return unique[:10]
 
 
 def _write_stage_meta(
@@ -270,20 +346,125 @@ def _load_hardware_profile(run_dir: Path) -> dict[str, Any] | None:
 
 
 def _extract_yaml_block(text: str) -> str:
+    """Extract YAML from text that may contain ACP noise.
+
+    Strips [thinking] blocks, insight blocks, and other ACP artifacts
+    before looking for YAML in markdown fences or raw text.
+    """
+    # Strip ACP noise: [thinking]..., insight blocks, [plan]...
+    cleaned = re.sub(
+        r"\[thinking\].*?(?=\n```|\n[A-Z]|\Z)",
+        "", text, flags=re.DOTALL,
+    )
+    cleaned = re.sub(r"\[plan\].*?\n\n", "", cleaned, flags=re.DOTALL)
+
+    # Try markdown fences first (most reliable) — on cleaned text
+    if "```yaml" in cleaned:
+        return cleaned.split("```yaml", 1)[1].split("```", 1)[0].strip()
+    if "```yml" in cleaned:
+        return cleaned.split("```yml", 1)[1].split("```", 1)[0].strip()
+    if "```" in cleaned:
+        block = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+        if block:
+            return block
+
+    # Try the original text too (in case cleaning removed too much)
     if "```yaml" in text:
         return text.split("```yaml", 1)[1].split("```", 1)[0].strip()
     if "```yml" in text:
         return text.split("```yml", 1)[1].split("```", 1)[0].strip()
     if "```" in text:
-        return text.split("```", 1)[1].split("```", 1)[0].strip()
+        block = text.split("```", 1)[1].split("```", 1)[0].strip()
+        if block:
+            return block
+
+    # Last resort: try to find YAML-like content (lines starting with key:)
+    yaml_lines: list[str] = []
+    in_yaml = False
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if not in_yaml and re.match(r"^[a-z_]+:", stripped):
+            in_yaml = True
+        if in_yaml:
+            if stripped and not stripped.startswith("#"):
+                yaml_lines.append(line)
+            elif not stripped and yaml_lines:
+                yaml_lines.append(line)
+    if yaml_lines:
+        return "\n".join(yaml_lines).strip()
+
     return text.strip()
 
 
 def _safe_json_loads(text: str, default: Any) -> Any:
+    """Parse JSON from text, handling noisy ACP output.
+
+    Tries multiple strategies: direct parse, markdown fence extraction,
+    balanced brace matching (largest dict wins), and array brackets.
+    """
+    if not text or not text.strip():
+        return default
+
+    # Strategy 1: Direct parse
     try:
         return json.loads(text)
-    except Exception:  # noqa: BLE001
-        return default
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        pass
+
+    # Strategy 2: Find JSON in markdown code fences
+    fence_pattern = re.compile(r"```(?:json)?\s*\n(.*?)```", re.DOTALL)
+    for match in fence_pattern.finditer(text):
+        candidate = match.group(1).strip()
+        try:
+            return json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    # Strategy 3: Find outermost balanced braces
+    brace_depth = 0
+    start = -1
+    candidates: list[str] = []
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if brace_depth == 0:
+                start = i
+            brace_depth += 1
+        elif ch == "}":
+            brace_depth -= 1
+            if brace_depth == 0 and start >= 0:
+                candidates.append(text[start : i + 1])
+                start = -1
+
+    # Try candidates from largest to smallest
+    candidates.sort(key=len, reverse=True)
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    # Strategy 4: Same for array [ ]
+    bracket_depth = 0
+    start = -1
+    for i, ch in enumerate(text):
+        if ch == "[":
+            if bracket_depth == 0:
+                start = i
+            bracket_depth += 1
+        elif ch == "]":
+            bracket_depth -= 1
+            if bracket_depth == 0 and start >= 0:
+                try:
+                    parsed = json.loads(text[start : i + 1])
+                    if isinstance(parsed, list):
+                        return parsed
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                start = -1
+
+    return default
 
 
 _METACLAW_SKILLS_DIR = str(Path.home() / ".metaclaw" / "skills")
@@ -770,6 +951,12 @@ def _build_context_preamble(
         if decision:
             parts.append(f"\n### Research Decision\n{decision[:1500]}")
     if include_experiment_data:
+        hw_profile = _load_hardware_profile(run_dir)
+        if hw_profile:
+            hw_lines = ["### Hardware Environment"]
+            for hk, hv in hw_profile.items():
+                hw_lines.append(f"- **{hk}**: {hv}")
+            parts.append("\n" + "\n".join(hw_lines))
         exp_summary = _read_prior_artifact(run_dir, "experiment_summary.json")
         if exp_summary:
             summary = _safe_json_loads(exp_summary, {})
@@ -1545,19 +1732,22 @@ def _execute_search_strategy(
             if isinstance(src, list):
                 sources = [item for item in src if isinstance(item, dict)]
     if plan is None:
+        # Build smart fallback queries by extracting key terms from topic
+        # instead of using the raw (often very long) topic string.
+        _fallback_queries = _build_fallback_queries(topic)
         plan = {
             "topic": topic,
             "generated": _utcnow_iso(),
             "search_strategies": [
                 {
                     "name": "keyword_core",
-                    "queries": [topic, f"{topic} benchmark", f"{topic} survey"],
+                    "queries": _fallback_queries[:5],
                     "sources": ["arxiv", "semantic_scholar", "openreview"],
                     "max_results_per_query": 60,
                 },
                 {
                     "name": "backward_forward_citation",
-                    "queries": [f"{topic} seminal", f"{topic} state of the art"],
+                    "queries": _fallback_queries[5:10] or _fallback_queries[:3],
                     "sources": ["semantic_scholar", "google_scholar"],
                     "depth": 1,
                 },
@@ -1883,6 +2073,67 @@ def _execute_literature_collect(
         if isinstance(payload, dict) and isinstance(payload.get("candidates"), list):
             candidates = [row for row in payload["candidates"] if isinstance(row, dict)]
 
+    # --- Web search augmentation (Tavily/DDG + Google Scholar + Crawl4AI) ---
+    web_context_parts: list[str] = []
+    if config.web_search.enabled:
+        try:
+            from researchclaw.web.agent import WebSearchAgent
+            import os
+
+            tavily_key = config.web_search.tavily_api_key or os.environ.get(
+                config.web_search.tavily_api_key_env, ""
+            )
+            web_agent = WebSearchAgent(
+                tavily_api_key=tavily_key,
+                enable_scholar=config.web_search.enable_scholar,
+                enable_crawling=config.web_search.enable_crawling,
+                enable_pdf=config.web_search.enable_pdf_extraction,
+                max_web_results=config.web_search.max_web_results,
+                max_scholar_results=config.web_search.max_scholar_results,
+                max_crawl_urls=config.web_search.max_crawl_urls,
+            )
+            web_result = web_agent.search_and_extract(
+                topic, search_queries=queries,
+            )
+
+            # Convert Google Scholar papers into candidates
+            for sp in web_result.scholar_papers:
+                _existing_titles = {
+                    str(c.get("title", "")).lower().strip() for c in candidates
+                }
+                if sp.title.lower().strip() not in _existing_titles:
+                    lit_paper = sp.to_literature_paper()
+                    d = lit_paper.to_dict()
+                    d["collected_at"] = _utcnow_iso()
+                    candidates.append(d)
+                    bibtex_entries.append(lit_paper.to_bibtex())
+
+            # Save web search context for downstream stages
+            web_context = web_result.to_context_string(max_length=20_000)
+            if web_context.strip():
+                (stage_dir / "web_context.md").write_text(
+                    web_context, encoding="utf-8"
+                )
+                web_context_parts.append(web_context)
+
+            # Save full web search metadata
+            (stage_dir / "web_search_result.json").write_text(
+                json.dumps(web_result.to_dict(), indent=2, default=str),
+                encoding="utf-8",
+            )
+
+            logger.info(
+                "[web-search] Added %d scholar papers, %d web results, %d crawled pages",
+                len(web_result.scholar_papers),
+                len(web_result.web_results),
+                len(web_result.crawled_pages),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[web-search] Web search augmentation failed — continuing with academic APIs only",
+                exc_info=True,
+            )
+
     # --- Ultimate fallback: placeholder data ---
     real_search_succeeded = bool(candidates)
     if not candidates:
@@ -1951,6 +2202,10 @@ def _execute_literature_collect(
 
     # Write references.bib (F2.4)
     artifacts = ["candidates.jsonl"]
+    if web_context_parts:
+        artifacts.append("web_context.md")
+    if (stage_dir / "web_search_result.json").exists():
+        artifacts.append("web_search_result.json")
     if bibtex_entries:
         bib_content = "\n\n".join(bibtex_entries) + "\n"
         (stage_dir / "references.bib").write_text(bib_content, encoding="utf-8")
@@ -2109,6 +2364,12 @@ def _execute_knowledge_extract(
     prompts: PromptManager | None = None,
 ) -> StageResult:
     shortlist = _read_prior_artifact(run_dir, "shortlist.jsonl") or ""
+
+    # Inject web context from Stage 4 if available
+    web_context = _read_prior_artifact(run_dir, "web_context.md") or ""
+    if web_context:
+        shortlist = shortlist + "\n\n--- Web Search Context ---\n" + web_context[:10_000]
+
     cards_dir = stage_dir / "cards"
     cards_dir.mkdir(parents=True, exist_ok=True)
     cards: list[dict[str, Any]] = []
@@ -2361,6 +2622,36 @@ def _execute_experiment_design(
         config, run_dir, include_goal=True, include_hypotheses=True
     )
     plan: dict[str, Any] | None = None
+
+    # ── Domain detection ──────────────────────────────────────────────────
+    # Detect the research domain early so we can adapt experiment design
+    # and code generation. For ML domains, existing behavior is unchanged.
+    _domain_profile = None
+    try:
+        from researchclaw.domains.detector import detect_domain as _detect_domain_adv
+        _domain_profile = _detect_domain_adv(
+            topic=config.research.topic,
+            hypotheses=hypotheses,
+        )
+        logger.info(
+            "Domain detected: %s (%s)",
+            _domain_profile.display_name,
+            _domain_profile.domain_id,
+        )
+        # Persist domain profile for Stage 10
+        import json as _json_dd
+        (stage_dir / "domain_profile.json").write_text(
+            _json_dd.dumps({
+                "domain_id": _domain_profile.domain_id,
+                "display_name": _domain_profile.display_name,
+                "experiment_paradigm": _domain_profile.experiment_paradigm,
+                "core_libraries": _domain_profile.core_libraries,
+                "gpu_required": _domain_profile.gpu_required,
+            }, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("Domain detection unavailable", exc_info=True)
     if llm is not None:
         _pm = prompts or PromptManager()
         # Pass dataset_guidance block for experiment design
@@ -2530,8 +2821,22 @@ def _execute_experiment_design(
         }
     # ── BA: BenchmarkAgent — intelligent dataset/baseline selection ──────
     _benchmark_plan = None
+    # BUG-40: Skip BenchmarkAgent for non-ML domains — it has no relevant
+    # benchmarks for physics/chemistry/mathematics/etc. and would inject
+    # wrong datasets (e.g., CIFAR-10 for PDE topics).
+    _ba_domain_id, _, _ = _detect_domain(
+        config.research.topic,
+        tuple(config.research.domains) if config.research.domains else (),
+    )
+    _ba_domain_ok = _ba_domain_id == "ml"
+    if not _ba_domain_ok:
+        logger.info(
+            "BenchmarkAgent skipped: domain '%s' is not ML (topic: %s)",
+            _ba_domain_id, config.research.topic[:80],
+        )
     if (
-        config.experiment.benchmark_agent.enabled
+        _ba_domain_ok
+        and config.experiment.benchmark_agent.enabled
         and config.experiment.mode in ("sandbox", "docker")
         and llm is not None
     ):
@@ -2546,6 +2851,9 @@ def _execute_experiment_design(
                 enabled=_ba_cfg_raw.enabled,
                 enable_hf_search=_ba_cfg_raw.enable_hf_search,
                 max_hf_results=_ba_cfg_raw.max_hf_results,
+                enable_web_search=_ba_cfg_raw.enable_web_search,
+                max_web_results=_ba_cfg_raw.max_web_results,
+                web_search_min_local=_ba_cfg_raw.web_search_min_local,
                 tier_limit=_ba_cfg_raw.tier_limit,
                 min_benchmarks=_ba_cfg_raw.min_benchmarks,
                 min_baselines=_ba_cfg_raw.min_baselines,
@@ -2853,11 +3161,153 @@ def _execute_code_generation(
                 f"- If possible, use a smaller model (<=7B parameters)\n"
             )
 
-    # --- Code generation: Advanced Code Agent or legacy single-shot ---
+    # --- Domain-specific guidance injection for non-ML domains ---
+    try:
+        from researchclaw.domains.detector import detect_domain as _dd_s10, is_ml_domain as _is_ml_s10
+        _dp = _dd_s10(topic=config.research.topic)
+        if not _is_ml_s10(_dp):
+            from researchclaw.domains.prompt_adapter import get_adapter as _ga
+            _adapter = _ga(_dp)
+            _blocks = _adapter.get_code_generation_blocks({})
+            if _blocks.compute_budget:
+                compute_budget = _blocks.compute_budget
+            if _blocks.dataset_guidance:
+                extra_guidance = _blocks.dataset_guidance + "\n" + extra_guidance
+            if _blocks.code_generation_hints:
+                extra_guidance += "\n" + _blocks.code_generation_hints
+            if _blocks.output_format_guidance:
+                extra_guidance += "\n" + _blocks.output_format_guidance
+            logger.info("Injected domain-specific guidance for %s", _dp.domain_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Domain guidance injection skipped", exc_info=True)
+
+    # --- Code generation: Beast Mode → CodeAgent → Legacy single-shot ---
     _code_agent_active = False
+    _beast_mode_used = False
     _code_max_tokens = 8192
 
-    if config.experiment.code_agent.enabled and llm is not None:
+    # ── Beast Mode: OpenCode external agent (optional) ─────────────────
+    _oc_cfg = config.experiment.opencode
+    if _oc_cfg.enabled:
+        from researchclaw.pipeline.opencode_bridge import (
+            OpenCodeBridge,
+            OpenCodeResult,
+            count_historical_failures,
+            score_complexity,
+        )
+
+        _hist_failures = count_historical_failures(run_dir)
+        _cplx = score_complexity(
+            exp_plan=exp_plan,
+            topic=config.research.topic,
+            historical_failures=_hist_failures,
+            threshold=_oc_cfg.complexity_threshold,
+        )
+
+        # Persist complexity analysis
+        (stage_dir / "complexity_analysis.json").write_text(
+            json.dumps(
+                {
+                    "score": _cplx.score,
+                    "signals": _cplx.signals,
+                    "recommendation": _cplx.recommendation,
+                    "reason": _cplx.reason,
+                    "threshold": _oc_cfg.complexity_threshold,
+                    "historical_failures": _hist_failures,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        if _cplx.recommendation == "beast_mode":
+            _proceed = _oc_cfg.auto
+            if not _proceed:
+                # Non-auto mode: check for HITL adapter
+                if adapters.hitl is not None:
+                    try:
+                        _proceed = adapters.hitl.confirm(
+                            f"Beast Mode: complexity={_cplx.score:.2f} "
+                            f"(threshold={_oc_cfg.complexity_threshold}). "
+                            f"Route to OpenCode?"
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.info(
+                            "Beast mode: HITL adapter unavailable, skipping "
+                            "(set opencode.auto=true for non-interactive runs)"
+                        )
+                else:
+                    logger.info(
+                        "Beast mode: no HITL adapter, skipping "
+                        "(set opencode.auto=true for non-interactive runs)"
+                    )
+
+            if _proceed:
+                _oc_model = _oc_cfg.model or config.llm.primary_model
+                _bridge = OpenCodeBridge(
+                    model=_oc_model,
+                    llm_base_url=config.llm.base_url,
+                    api_key_env=config.llm.api_key_env,
+                    llm_provider=config.llm.provider,
+                    timeout_sec=_oc_cfg.timeout_sec,
+                    max_retries=_oc_cfg.max_retries,
+                    workspace_cleanup=_oc_cfg.workspace_cleanup,
+                )
+
+                logger.info(
+                    "Beast mode: ENGAGED (complexity=%.2f, model=%s)",
+                    _cplx.score,
+                    _oc_model,
+                )
+
+                _oc_result: OpenCodeResult = _bridge.generate(
+                    stage_dir=stage_dir,
+                    topic=config.research.topic,
+                    exp_plan=exp_plan,
+                    metric=metric,
+                    pkg_hint=pkg_hint + "\n" + compute_budget,
+                    extra_guidance=extra_guidance,
+                    time_budget_sec=config.experiment.time_budget_sec,
+                )
+
+                # Persist beast mode log
+                (stage_dir / "beast_mode_log.json").write_text(
+                    json.dumps(
+                        {
+                            "success": _oc_result.success,
+                            "elapsed_sec": _oc_result.elapsed_sec,
+                            "files": list(_oc_result.files.keys()),
+                            "error": _oc_result.error,
+                            "complexity_score": _cplx.score,
+                            "model": _oc_model,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+
+                if _oc_result.success and _oc_result.files:
+                    files = _oc_result.files
+                    _beast_mode_used = True
+                    _code_agent_active = True  # skip legacy path
+                    logger.info(
+                        "Beast mode: SUCCESS — %d files in %.1fs",
+                        len(files),
+                        _oc_result.elapsed_sec,
+                    )
+                else:
+                    logger.warning(
+                        "Beast mode: FAILED (%s) — falling back to CodeAgent",
+                        _oc_result.error or "unknown error",
+                    )
+        else:
+            logger.info(
+                "Beast mode: complexity=%.2f (threshold=%.2f), not triggered",
+                _cplx.score,
+                _oc_cfg.complexity_threshold,
+            )
+
+    if not _beast_mode_used and config.experiment.code_agent.enabled and llm is not None:
         # ── F-02: Advanced Code Agent path ────────────────────────────────
         from researchclaw.pipeline.code_agent import CodeAgent as _CodeAgent
 
@@ -2883,6 +3333,38 @@ def _execute_code_generation(
         ):
             _code_max_tokens = 16384
 
+        # ── Domain detection + Code Search for non-ML domains ──────────
+        _domain_profile = None
+        _code_search_result = None
+        try:
+            from researchclaw.domains.detector import detect_domain as _dd
+            from researchclaw.domains.detector import is_ml_domain as _is_ml
+            _domain_profile = _dd(topic=config.research.topic)
+            logger.info(
+                "CodeAgent: domain=%s (%s)",
+                _domain_profile.display_name,
+                _domain_profile.domain_id,
+            )
+            # Run code search for non-ML domains (ML has enough built-in knowledge)
+            if not _is_ml(_domain_profile):
+                try:
+                    from researchclaw.agents.code_searcher import CodeSearchAgent
+                    _cs_agent = CodeSearchAgent(llm=llm)
+                    _code_search_result = _cs_agent.search(
+                        topic=config.research.topic,
+                        domain=_domain_profile,
+                    )
+                    if _code_search_result and _code_search_result.patterns.has_content:
+                        logger.info(
+                            "Code search: %d patterns, %d repos found",
+                            len(_code_search_result.patterns.api_patterns),
+                            len(_code_search_result.repos_found),
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.debug("Code search unavailable", exc_info=True)
+        except Exception:  # noqa: BLE001
+            logger.debug("Domain detection unavailable", exc_info=True)
+
         _agent = _CodeAgent(
             llm=llm,
             prompts=_pm,
@@ -2890,6 +3372,8 @@ def _execute_code_generation(
             stage_dir=stage_dir,
             sandbox_factory=_sandbox_factory,
             experiment_config=config.experiment,
+            domain_profile=_domain_profile,
+            code_search_result=_code_search_result,
         )
         _agent_result = _agent.generate(
             topic=config.research.topic,
@@ -2926,7 +3410,7 @@ def _execute_code_generation(
             _agent_result.total_sandbox_runs,
             _agent_result.best_score,
         )
-    elif llm is not None:
+    elif not _beast_mode_used and llm is not None:
         # ── Legacy single-shot generation ─────────────────────────────────
         topic = config.research.topic
         _md = config.experiment.metric_direction
@@ -3265,8 +3749,8 @@ def _execute_code_generation(
         )
         try:
             review_resp = llm.chat(
+                [{"role": "user", "content": review_prompt}],
                 system="You are a meticulous ML code reviewer. Be strict.",
-                user=review_prompt,
                 max_tokens=2048,
             )
             # Extract JSON from LLM response (may be wrapped in markdown fences)
@@ -3371,8 +3855,8 @@ def _execute_code_generation(
         )
         try:
             align_resp = llm.chat(
+                [{"role": "user", "content": align_prompt}],
                 system="You are a scientific code reviewer checking topic-experiment alignment.",
-                user=align_prompt,
                 max_tokens=1024,
             )
             align_data = _safe_json_loads(align_resp.content, {})
@@ -3427,8 +3911,8 @@ def _execute_code_generation(
                 '{"has_duplicates": true/false, "details": "which conditions are identical"}'
             )
             abl_resp = llm.chat(
+                [{"role": "user", "content": ablation_prompt}],
                 system="You are a code reviewer checking experimental conditions.",
-                user=ablation_prompt,
                 max_tokens=512,
             )
             abl_data = _safe_json_loads(abl_resp.content, {})
@@ -3440,6 +3924,46 @@ def _execute_code_generation(
                 (stage_dir / "ablation_warning.json").write_text(
                     json.dumps(abl_data, indent=2), encoding="utf-8"
                 )
+                # --- Attempt ablation repair ---
+                all_code_ctx = "\n\n".join(
+                    f"```filename:{f}\n{c}\n```" for f, c in files.items()
+                )
+                dup_details = abl_data.get("details", "unknown")
+                abl_repair_prompt = (
+                    f"ABLATION REPAIR REQUIRED — duplicate conditions detected:\n"
+                    f"{dup_details}\n\n"
+                    f"Rewrite the ablation/variant conditions so each one is "
+                    f"GENUINELY DIFFERENT. Concrete strategies:\n"
+                    f"- 'no_<component>': REMOVE the component entirely "
+                    f"(e.g., replace attention with mean pooling, remove a loss term)\n"
+                    f"- 'reduced_capacity': HALVE hidden dimensions or layers\n"
+                    f"- Different conditions MUST produce different outputs on the "
+                    f"same input. Add a startup assertion that runs one forward pass "
+                    f"per condition on identical input and prints:\n"
+                    f"  ABLATION_CHECK: <cond1> vs <cond2> outputs_differ=True\n\n"
+                    f"Return ALL files using ```filename:xxx.py format.\n\n"
+                    f"Current code:\n{all_code_ctx}\n"
+                )
+                try:
+                    abl_repair_resp = _chat_with_prompt(
+                        llm,
+                        _pm.prompts["code_generation"]["system"],
+                        abl_repair_prompt,
+                        max_tokens=_code_max_tokens,
+                    )
+                    repaired_files = _extract_multi_file_blocks(
+                        abl_repair_resp.content
+                    )
+                    if repaired_files and "main.py" in repaired_files:
+                        files = repaired_files
+                        for fname, code in files.items():
+                            (exp_dir / fname).write_text(code, encoding="utf-8")
+                        logger.info(
+                            "Stage 10: Ablation repair applied — "
+                            "rewrote duplicate conditions"
+                        )
+                except Exception as exc:
+                    logger.debug("Ablation repair failed: %s", exc)
         except Exception:
             pass
 
@@ -3924,6 +4448,15 @@ def _execute_iterative_refine(
     requested_iterations = int(getattr(config.experiment, "max_iterations", 10) or 10)
     max_iterations = max(1, min(requested_iterations, 10))
 
+    # BUG-57: Wall-clock time cap for the entire refinement stage.
+    # Default: 3× the per-iteration time budget (e.g., 2400s → 7200s = 2h).
+    import time as _time_bug57
+    _refine_start_time = _time_bug57.monotonic()
+    _per_iter_budget = int(getattr(config.experiment, "time_budget_sec", 2400) or 2400)
+    _max_refine_wall_sec = int(
+        getattr(config.experiment, "max_refine_duration_sec", 0) or 0
+    ) or (_per_iter_budget * 3)
+
     # --- Collect baseline metrics from prior runs ---
     runs_dir_path: Path | None = None
     runs_dir_text = _read_prior_artifact(run_dir, "runs/")
@@ -3973,7 +4506,23 @@ def _execute_iterative_refine(
                 baseline_metric = metric_val
 
     # --- Read experiment project (multi-file or single-file) ---
-    exp_dir_text = _read_prior_artifact(run_dir, "experiment/")
+    # BUG-58: When PIVOT rolls back to Stage 13, prefer the best refined code
+    # from a previous cycle (stage-13_vX/experiment_final/) over the original
+    # unrefined code (stage-12/experiment/ or stage-10/experiment/).
+    exp_dir_text: str | None = None
+    _prev_refine_dirs = sorted(
+        run_dir.glob("stage-13_v*/experiment_final"),
+        key=lambda p: p.parent.name,
+        reverse=True,  # latest version first
+    )
+    if _prev_refine_dirs and _prev_refine_dirs[0].is_dir():
+        exp_dir_text = str(_prev_refine_dirs[0])
+        logger.info(
+            "BUG-58: Recovered best refined code from previous PIVOT cycle: %s",
+            _prev_refine_dirs[0].parent.name,
+        )
+    if not exp_dir_text:
+        exp_dir_text = _read_prior_artifact(run_dir, "experiment/")
     best_files: dict[str, str] = {}
     if exp_dir_text and Path(exp_dir_text).is_dir():
         for pyfile in sorted(Path(exp_dir_text).glob("*.py")):
@@ -3999,6 +4548,23 @@ def _execute_iterative_refine(
 
     best_metric = baseline_metric
     best_version = "experiment/"
+    # BUG-58: Recover best_metric from previous PIVOT cycle
+    if _prev_refine_dirs:
+        _prev_log_path = _prev_refine_dirs[0].parent / "refinement_log.json"
+        if _prev_log_path.is_file():
+            _prev_log = _safe_json_loads(
+                _prev_log_path.read_text(encoding="utf-8"), {}
+            )
+            if isinstance(_prev_log, dict):
+                _prev_best = _prev_log.get("best_metric")
+                if isinstance(_prev_best, (int, float)) and _is_better(
+                    _prev_best, best_metric
+                ):
+                    best_metric = _prev_best
+                    logger.info(
+                        "BUG-58: Recovered best_metric=%.4f from previous PIVOT",
+                        best_metric,
+                    )
     no_improve_streak = 0
     consecutive_no_metrics = 0
 
@@ -4095,7 +4661,18 @@ def _execute_iterative_refine(
     _metrics_history: list[float | None] = [baseline_metric]
 
     for iteration in range(1, max_iterations + 1):
-        logger.info("Stage 13: refinement iteration %d/%d", iteration, max_iterations)
+        # BUG-57: Check wall-clock time before starting a new iteration
+        _elapsed = _time_bug57.monotonic() - _refine_start_time
+        if _elapsed > _max_refine_wall_sec:
+            logger.warning(
+                "Stage 13: Wall-clock time cap reached (%.0fs > %ds). "
+                "Stopping refinement after %d iterations.",
+                _elapsed, _max_refine_wall_sec, iteration - 1,
+            )
+            log["stop_reason"] = "wall_clock_time_cap"
+            break
+        logger.info("Stage 13: refinement iteration %d/%d (%.0fs elapsed, cap %ds)",
+                    iteration, max_iterations, _elapsed, _max_refine_wall_sec)
 
         # P1: Detect metric saturation and inject difficulty upgrade hint
         _saturation_hint = ""
@@ -6340,11 +6917,17 @@ def _execute_paper_draft(
                     ci_lo = cdata.get("ci95_low")
                     ci_hi = cdata.get("ci95_high")
                     if ci_lo is not None and ci_hi is not None:
-                        cond_block += f"- Bootstrap 95% CI: [{ci_lo:.4f}, {ci_hi:.4f}]\n"
+                        try:
+                            cond_block += f"- Bootstrap 95% CI: [{float(ci_lo):.4f}, {float(ci_hi):.4f}]\n"
+                        except (ValueError, TypeError):
+                            cond_block += f"- Bootstrap 95% CI: [{ci_lo}, {ci_hi}]\n"
                     cm = cdata.get("metrics", {})
                     if cm:
                         for mk, mv in sorted(cm.items()):
-                            cond_block += f"- {mk}: {mv:.4f}\n"
+                            if isinstance(mv, (int, float)):
+                                cond_block += f"- {mk}: {mv:.4f}\n"
+                            else:
+                                cond_block += f"- {mk}: {mv}\n"
                 exp_metrics_instruction += cond_block
 
             # R18-1: Inject paired statistical comparisons
@@ -6447,6 +7030,34 @@ def _execute_paper_draft(
                     "- Frame as: 'We evaluate each method across N seeds per regime.'\n"
                     "- The seed-level data IS the evidence base — it is NOT a single observation.\n"
                     "- Include per-regime breakdowns (easy vs hard) as separate rows in tables.\n"
+                )
+
+    # BUG-003: Inject actual evaluated datasets as a hard constraint
+    if exp_summary_text:
+        _ds_parsed = _safe_json_loads(exp_summary_text, {})
+        if isinstance(_ds_parsed, dict):
+            _datasets: set[str] = set()
+            # Extract from condition names (often contain dataset info)
+            for _cname in (_ds_parsed.get("condition_summaries") or {}).keys():
+                _datasets.add(str(_cname))
+            # Extract from explicit "datasets" field if present
+            for _ds in (_ds_parsed.get("datasets") or []):
+                if isinstance(_ds, str):
+                    _datasets.add(_ds)
+            # Extract from "benchmark" or "dataset" fields
+            for _key in ("benchmark", "dataset", "dataset_name"):
+                _dv = _ds_parsed.get(_key)
+                if isinstance(_dv, str) and _dv:
+                    _datasets.add(_dv)
+            if _datasets:
+                exp_metrics_instruction += (
+                    "\n\n## ACTUAL EVALUATED DATASETS (HARD CONSTRAINT)\n"
+                    "The following datasets/conditions were ACTUALLY tested in experiments:\n"
+                    + "".join(f"- {d}\n" for d in sorted(_datasets))
+                    + "\nCRITICAL: Do NOT claim evaluation on any dataset not listed above.\n"
+                    "Do NOT fabricate results for datasets you did not run experiments on.\n"
+                    "If you reference other datasets, clearly state they are 'not evaluated "
+                    "in this work' or are 'left for future work'.\n"
                 )
 
     # P7: Ablation effectiveness check
@@ -7324,7 +7935,74 @@ def _execute_quality_gate(
     verdict = report.get("verdict", "proceed")
     threshold = config.research.quality_threshold or 5.0
 
+    # --- Fabrication flag: collect real metrics for Stage 22 sanitization ---
+    _fabrication_info: dict[str, Any] = {
+        "experiment_failed": _exp_failed,
+        "quality_score": score,
+        "real_metric_values": [],
+    }
+    if isinstance(_exp_summary, dict):
+        # Collect ALL real numeric values from experiment_summary.json
+        _cond_summaries = _exp_summary.get("condition_summaries", {})
+        if isinstance(_cond_summaries, dict):
+            for cond_name, cond_data in _cond_summaries.items():
+                if not isinstance(cond_data, dict):
+                    continue
+                cond_status = cond_data.get("status", "")
+                if cond_status == "failed":
+                    continue  # skip failed conditions
+                for k, v in cond_data.items():
+                    if isinstance(v, (int, float)) and k not in (
+                        "seed_count", "total_steps", "training_steps",
+                    ):
+                        _fabrication_info["real_metric_values"].append(
+                            round(float(v), 4)
+                        )
+        _ms = _exp_summary.get("metrics_summary", {})
+        if isinstance(_ms, dict):
+            for _mk, _mv in _ms.items():
+                if isinstance(_mv, dict):
+                    for _stat in ("mean", "min", "max"):
+                        _sv = _mv.get(_stat)
+                        if isinstance(_sv, (int, float)):
+                            _fabrication_info["real_metric_values"].append(
+                                round(float(_sv), 4)
+                            )
+    _fabrication_info["has_real_data"] = bool(
+        _fabrication_info["real_metric_values"]
+    )
+    _fabrication_info["fabrication_suspected"] = (
+        _exp_failed and not _fabrication_info["has_real_data"]
+    )
+    (stage_dir / "fabrication_flags.json").write_text(
+        json.dumps(_fabrication_info, indent=2), encoding="utf-8"
+    )
+
     if isinstance(score, (int, float)) and score < threshold:
+        if config.research.graceful_degradation:
+            logger.warning(
+                "Quality gate DEGRADED: score %.1f < threshold %.1f — "
+                "continuing with sanitization (graceful_degradation=True)",
+                score, threshold,
+            )
+            # Write degradation signal for downstream stages
+            signal = {
+                "score": score,
+                "threshold": threshold,
+                "verdict": verdict,
+                "weaknesses": report.get("weaknesses", []),
+                "generated": _utcnow_iso(),
+            }
+            (run_dir / "degradation_signal.json").write_text(
+                json.dumps(signal, indent=2), encoding="utf-8"
+            )
+            return StageResult(
+                stage=Stage.QUALITY_GATE,
+                status=StageStatus.DONE,
+                artifacts=("quality_report.json",),
+                evidence_refs=("stage-20/quality_report.json",),
+                decision="degraded",
+            )
         logger.warning(
             "Quality gate FAILED: score %.1f < threshold %.1f (verdict=%s)",
             score, threshold, verdict,
@@ -7332,7 +8010,7 @@ def _execute_quality_gate(
         return StageResult(
             stage=Stage.QUALITY_GATE,
             status=StageStatus.FAILED,
-            artifacts=("quality_report.json",),
+            artifacts=("quality_report.json", "fabrication_flags.json"),
             evidence_refs=("stage-20/quality_report.json",),
             error=f"Quality score {score:.1f}/10 below threshold {threshold:.1f}. "
                   f"Paper needs revision before export.",
@@ -7345,7 +8023,7 @@ def _execute_quality_gate(
     return StageResult(
         stage=Stage.QUALITY_GATE,
         status=StageStatus.DONE,
-        artifacts=("quality_report.json",),
+        artifacts=("quality_report.json", "fabrication_flags.json"),
         evidence_refs=("stage-20/quality_report.json",),
     )
 
@@ -7422,6 +8100,153 @@ Generated: {_utcnow_iso()}
     )
 
 
+def _sanitize_fabricated_data(
+    paper: str,
+    run_dir: Path,
+) -> tuple[str, dict[str, Any]]:
+    """Replace unverified numerical data in markdown tables with '---'.
+
+    Loads experiment_summary.json as ground truth, extracts all verified
+    metric values, then scans markdown tables in Results/Experiment sections.
+    Numbers not matching any verified value (within 1% relative tolerance)
+    are replaced with ``---``.
+
+    Returns (sanitized_paper, sanitization_report).
+    """
+    import re as _re_san
+
+    # --- 1. Build verified values set from experiment_summary.json ---
+    verified_values: set[float] = set()
+    exp_path = run_dir / "stage-14" / "experiment_summary.json"
+    if not exp_path.exists():
+        # Try other common locations
+        for candidate in sorted(run_dir.glob("stage-14*/experiment_summary.json")):
+            exp_path = candidate
+            break
+
+    if exp_path.exists():
+        try:
+            exp_data = json.loads(exp_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            exp_data = {}
+
+        def _collect_numbers(obj: Any, depth: int = 0) -> None:
+            if depth > 10:
+                return
+            if isinstance(obj, (int, float)) and not isinstance(obj, bool):
+                verified_values.add(float(obj))
+            elif isinstance(obj, dict):
+                for v in obj.values():
+                    _collect_numbers(v, depth + 1)
+            elif isinstance(obj, list):
+                for v in obj:
+                    _collect_numbers(v, depth + 1)
+
+        # Extract from well-known keys
+        for key in (
+            "metrics_summary", "condition_summaries", "best_run",
+            "condition_metrics", "conditions", "ablation_results",
+        ):
+            if key in exp_data:
+                _collect_numbers(exp_data[key])
+
+    if not verified_values:
+        report: dict[str, Any] = {
+            "sanitized": False,
+            "reason": "no verified values found in experiment_summary.json",
+            "tables_processed": 0,
+            "numbers_replaced": 0,
+        }
+        return paper, report
+
+    def _is_verified(num: float) -> bool:
+        """Check if num matches any verified value within 1% relative tolerance."""
+        for v in verified_values:
+            if v == 0.0:
+                if abs(num) < 1e-9:
+                    return True
+            elif abs(num - v) / abs(v) <= 0.01:
+                return True
+        return False
+
+    # --- 2. Find and sanitize markdown tables ---
+    # Match markdown table blocks (header + separator + data rows)
+    table_pat = _re_san.compile(
+        r"((?:^[ \t]*\|.+\|[ \t]*\n)+"  # one or more pipe-delimited lines
+        r")",
+        _re_san.MULTILINE,
+    )
+    # Match numbers in table cells (integers, decimals, percentages, scientific)
+    num_pat = _re_san.compile(
+        r"(?<![a-zA-Z_])"  # not preceded by letter/underscore
+        r"(-?\d+\.?\d*(?:[eE][+-]?\d+)?)"
+        r"(%?)"  # optional percent
+        r"(?![a-zA-Z_])"  # not followed by letter/underscore
+    )
+
+    numbers_replaced = 0
+    numbers_kept = 0
+    tables_processed = 0
+    replaced_values: list[str] = []
+
+    def _sanitize_table(match: _re_san.Match[str]) -> str:
+        nonlocal numbers_replaced, numbers_kept, tables_processed
+        table_text = match.group(0)
+        lines = table_text.split("\n")
+
+        # Check if this looks like a results/experiment table
+        # (heuristic: has a separator row with dashes)
+        has_separator = any(
+            _re_san.match(r"^[ \t]*\|[\s:|-]+\|[ \t]*$", line)
+            for line in lines
+        )
+        if not has_separator:
+            return table_text
+
+        tables_processed += 1
+        sanitized_lines: list[str] = []
+        for i, line in enumerate(lines):
+            # Skip header row and separator row
+            is_separator = bool(
+                _re_san.match(r"^[ \t]*\|[\s:|-]+\|[ \t]*$", line)
+            )
+            is_header = i == 0  # first line is typically the header
+            if is_separator or is_header:
+                sanitized_lines.append(line)
+                continue
+
+            def _replace_num(m: _re_san.Match[str]) -> str:
+                nonlocal numbers_replaced, numbers_kept
+                num_str = m.group(1)
+                pct = m.group(2)
+                try:
+                    val = float(num_str)
+                except ValueError:
+                    return m.group(0)
+                if _is_verified(val):
+                    numbers_kept += 1
+                    return m.group(0)
+                numbers_replaced += 1
+                replaced_values.append(num_str + pct)
+                return "---"
+
+            sanitized_lines.append(num_pat.sub(_replace_num, line))
+        return "\n".join(sanitized_lines)
+
+    sanitized = table_pat.sub(_sanitize_table, paper)
+
+    report = {
+        "sanitized": numbers_replaced > 0,
+        "tables_processed": tables_processed,
+        "numbers_replaced": numbers_replaced,
+        "numbers_kept": numbers_kept,
+        "verified_values_count": len(verified_values),
+        "replaced_samples": replaced_values[:20],
+        "generated": _utcnow_iso(),
+    }
+    return sanitized, report
+
+
 def _execute_export_publish(
     stage_dir: Path,
     run_dir: Path,
@@ -7456,6 +8281,69 @@ def _execute_export_publish(
     if not final_paper.strip():
         final_paper = "# Final Paper\n\nNo content generated."
 
+    # --- Graceful degradation: sanitize fabricated data ---
+    _degradation_signal_path = run_dir / "degradation_signal.json"
+    if _degradation_signal_path.exists():
+        try:
+            _deg_signal = json.loads(
+                _degradation_signal_path.read_text(encoding="utf-8")
+            )
+        except (json.JSONDecodeError, OSError):
+            _deg_signal = {}
+
+        # Back up pre-sanitized version
+        (stage_dir / "paper_presanitized.md").write_text(
+            final_paper, encoding="utf-8"
+        )
+
+        # Sanitize unverified data in tables
+        final_paper, _san_report = _sanitize_fabricated_data(
+            final_paper, run_dir
+        )
+        (stage_dir / "sanitization_report.json").write_text(
+            json.dumps(_san_report, indent=2), encoding="utf-8"
+        )
+
+        # Insert degradation notice after abstract
+        _deg_score = _deg_signal.get("score", "N/A")
+        _deg_threshold = _deg_signal.get("threshold", "N/A")
+        _deg_notice = (
+            "\n\n> **Note:** This paper was produced in degraded mode. "
+            f"Quality gate score ({_deg_score}/{_deg_threshold}) was below "
+            "threshold. Unverified numerical results in tables have been "
+            "replaced with `---` and require independent verification.\n\n"
+        )
+        # Try to insert after ## Abstract section
+        _abstract_markers = ["## Abstract\n", "# Abstract\n"]
+        _notice_inserted = False
+        for _marker in _abstract_markers:
+            if _marker in final_paper:
+                _marker_end = final_paper.index(_marker) + len(_marker)
+                # Find the end of the abstract paragraph
+                _next_section = final_paper.find("\n## ", _marker_end)
+                _next_heading = final_paper.find("\n# ", _marker_end)
+                _insert_pos = min(
+                    p for p in (_next_section, _next_heading)
+                    if p > 0
+                ) if any(p > 0 for p in (_next_section, _next_heading)) else len(final_paper)
+                final_paper = (
+                    final_paper[:_insert_pos]
+                    + _deg_notice
+                    + final_paper[_insert_pos:]
+                )
+                _notice_inserted = True
+                break
+        if not _notice_inserted:
+            # Fallback: prepend to paper
+            final_paper = _deg_notice + final_paper
+
+        logger.info(
+            "Stage 22: Applied degraded-mode sanitization — "
+            "%d numbers replaced, %d kept",
+            _san_report.get("numbers_replaced", 0),
+            _san_report.get("numbers_kept", 0),
+        )
+
     # IMP-3: Deduplicate "due to computational constraints" — keep at most 1
     import re as _re_imp3
     _CONSTRAINT_PAT = _re_imp3.compile(
@@ -7474,7 +8362,7 @@ def _execute_export_publish(
             sentence = final_paper[start:end].strip()
             if sentence:
                 final_paper = final_paper[:start] + final_paper[end:]
-        final_paper = _re_imp3.sub(r"\s{2,}", " ", final_paper)
+        final_paper = re.sub(r"[^\S\n]{2,}", " ", final_paper)
         logger.info(
             "Stage 22: Removed %d duplicate 'computational constraints' "
             "disclaimers",
@@ -7560,6 +8448,75 @@ def _execute_export_publish(
         )
 
     (stage_dir / "paper_final.md").write_text(final_paper, encoding="utf-8")
+
+    # --- Fabrication sanitization: blank out unsupported numbers ---
+    _fab_flags_text = _read_prior_artifact(run_dir, "fabrication_flags.json") or ""
+    _fab_flags = _safe_json_loads(_fab_flags_text, {}) if _fab_flags_text else {}
+    if isinstance(_fab_flags, dict) and _fab_flags.get("fabrication_suspected"):
+        import re as _re_fab
+        _real_vals = set()
+        for rv in _fab_flags.get("real_metric_values", []):
+            if isinstance(rv, (int, float)) and math.isfinite(rv):
+                _real_vals.add(str(round(rv, 4)))
+                _real_vals.add(str(round(rv, 2)))
+                _real_vals.add(str(round(rv, 1)))
+                _real_vals.add(str(int(rv)) if rv == int(rv) else "")
+
+        def _sanitize_number(m: _re_fab.Match) -> str:  # type: ignore[name-defined]
+            """Replace fabricated numbers with '--' but keep real ones."""
+            num_str = m.group(0)
+            # Keep the number if it matches any known real metric value
+            try:
+                num_val = float(num_str)
+                if not math.isfinite(num_val):
+                    return "--"
+                rounded_strs = {
+                    str(round(num_val, 4)),
+                    str(round(num_val, 2)),
+                    str(round(num_val, 1)),
+                    str(int(num_val)) if num_val == int(num_val) else "",
+                }
+                if rounded_strs & _real_vals:
+                    return num_str  # real value — keep it
+            except (ValueError, OverflowError):
+                return num_str
+            return "--"
+
+        # Only sanitize numbers in Results/Experiments/Evaluation/Ablation sections
+        _result_section_pat = _re_fab.compile(
+            r"(##\s*(?:\d+\.?\s*)?(?:Results|Experiments|Evaluation|Ablation"
+            r"|Experimental Results|Quantitative).*?)(?=\n##\s|\Z)",
+            _re_fab.DOTALL | _re_fab.IGNORECASE,
+        )
+        _sanitized_count = 0
+
+        def _sanitize_section(sec_match: _re_fab.Match) -> str:  # type: ignore[name-defined]
+            nonlocal _sanitized_count
+            section_text = sec_match.group(0)
+            # Replace decimal numbers (e.g., 73.42, 0.891) but NOT integers
+            # that are likely structural (year, section number, figure number)
+            def _replace_in_section(m: _re_fab.Match) -> str:  # type: ignore[name-defined]
+                nonlocal _sanitized_count
+                result = _sanitize_number(m)
+                if result == "--":
+                    _sanitized_count += 1
+                return result
+            return _re_fab.sub(
+                r"\b\d+\.\d{1,6}\b", _replace_in_section, section_text
+            )
+
+        final_paper = _result_section_pat.sub(_sanitize_section, final_paper)
+
+        if _sanitized_count > 0:
+            logger.warning(
+                "Stage 22: Fabrication sanitization — blanked %d unsupported "
+                "numbers in Results sections (experiment had no real metrics)",
+                _sanitized_count,
+            )
+            # Rewrite the sanitized paper
+            (stage_dir / "paper_final.md").write_text(
+                final_paper, encoding="utf-8"
+            )
 
     # Initialize artifacts list
     artifacts = ["paper_final.md"]

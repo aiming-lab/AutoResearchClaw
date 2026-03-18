@@ -1,0 +1,26 @@
+domain_id: mathematics_optimization
+display_name: Mathematical Optimization
+parent_domain: mathematics
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: reference optimizer
+  proposed: proposed optimizer
+  variant: parameter variant
+  input: test function
+  metric: convergence rate
+typical_file_structure:
+  config.py: "Optimization parameters"
+  problems.py: "Test function definitions"
+  optimizers.py: "Optimizer implementations"
+  main.py: "Entry point"
+entry_point: main.py
+core_libraries: [numpy, scipy, matplotlib]
+docker_image: researchclaw/sandbox-math:latest
+gpu_required: false
+pip_packages: [numpy, scipy, matplotlib]
+metric_types: [scalar, convergence]
+standard_baselines: [Gradient Descent, L-BFGS, Nelder-Mead, Adam, CMA-ES]
+evaluation_protocol: "Run optimizers on standard test functions."
+statistical_tests: [paired_t_test, convergence_order_fit]
+github_search_terms: [optimization benchmark python, convex optimization scipy]
+paper_keywords: [optimization, convergence analysis]

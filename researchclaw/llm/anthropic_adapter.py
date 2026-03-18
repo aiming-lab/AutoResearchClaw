@@ -112,11 +112,19 @@ class AnthropicAdapter:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPStatusError as exc:
-            # Convert to urllib.error.HTTPError for upstream retry logic
+            # Convert to urllib.error.HTTPError for upstream retry logic.
+            # Include Anthropic's error body so upstream logs show the
+            # actual reason (e.g. "Prefilling not supported").
+            detail = ""
+            try:
+                detail = exc.response.text[:500]
+            except Exception:  # noqa: BLE001
+                pass
+            msg = f"{exc}: {detail}" if detail else str(exc)
             raise urllib.error.HTTPError(
                 url,
                 exc.response.status_code,
-                str(exc),
+                msg,
                 dict(exc.response.headers),
                 None,
             ) from exc

@@ -121,11 +121,11 @@ class VerificationReport:
 # ---------------------------------------------------------------------------
 
 _ENTRY_RE = re.compile(
-    r"@(\w+)\s*\{\s*([^,\s]+)\s*,\s*(.*?)\n\}",
+    r"@(\w+)\s*\{\s*([^,\s]+)\s*,\s*(.*?)\n\s*\}",
     re.DOTALL,
 )
 
-_FIELD_RE = re.compile(r"(\w+)\s*=\s*\{([^}]*)\}", re.DOTALL)
+_FIELD_RE = re.compile(r"(\w+)\s*=\s*\{((?:[^{}]|\{[^{}]*\})*)\}", re.DOTALL)
 
 
 def parse_bibtex_entries(bib_text: str) -> list[dict[str, str]]:
