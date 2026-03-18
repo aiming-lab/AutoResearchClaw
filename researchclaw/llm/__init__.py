@@ -24,7 +24,7 @@ PROVIDER_PRESETS = {
         "base_url": "https://api.anthropic.com",
     },
     "novita": {
-        "base_url": "https://api.novita.ai/v3/openai",
+        "base_url": "https://api.novita.ai/openai",
     },
     "openai-compatible": {
         "base_url": None,  # Use user-provided base_url
