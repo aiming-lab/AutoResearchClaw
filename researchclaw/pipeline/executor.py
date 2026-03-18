@@ -909,6 +909,36 @@ def _collect_experiment_results(
     return collected
 
 
+def _read_kb_files(
+    kb_root: str,
+    filenames: list[str],
+    max_chars_each: int = 3000,
+) -> list[tuple[str, str]]:
+    """Read files from the knowledge base directory.
+
+    Returns a list of (filename, content) pairs for files that exist and are
+    non-empty.  Contents are truncated to *max_chars_each* to prevent the KB
+    from dominating the context window when the combined preamble is large.
+    """
+    if not kb_root:
+        return []
+    kb_path = Path(kb_root)
+    if not kb_path.is_dir():
+        return []
+    results: list[tuple[str, str]] = []
+    for fname in filenames:
+        fpath = kb_path / fname
+        if not fpath.is_file():
+            continue
+        try:
+            text = fpath.read_text(encoding="utf-8").strip()
+            if text:
+                results.append((fname, text[:max_chars_each]))
+        except OSError:
+            pass
+    return results
+
+
 def _build_context_preamble(
     config: RCConfig,
     run_dir: Path,
@@ -920,6 +950,7 @@ def _build_context_preamble(
     include_analysis: bool = False,
     include_decision: bool = False,
     include_experiment_data: bool = False,
+    include_kb: bool = False,
 ) -> str:
     parts = [
         "## Research Context",
@@ -973,6 +1004,31 @@ def _build_context_preamble(
                     parts.append(
                         f"\n### LaTeX Table\n```latex\n{summary['latex_table']}\n```"
                     )
+    if include_kb:
+        # Inject pre-existing knowledge base files so stages that design or
+        # execute experiments can use real data rather than generating synthetic
+        # stand-ins.  Files are listed in priority order; missing files are
+        # silently skipped.  Each file is capped at 3000 chars to keep the
+        # preamble manageable.
+        _kb_files = _read_kb_files(
+            getattr(config.knowledge_base, "root", ""),
+            [
+                "experiments_summary.md",
+                "data_inventory.md",
+                "compute_inventory.md",
+                "claims_summary.md",
+                "insights_summary.md",
+            ],
+        )
+        if _kb_files:
+            parts.append("\n## Knowledge Base (pre-existing project results)")
+            parts.append(
+                "IMPORTANT: The following files document REAL experimental results "
+                "and REAL data that already exist in this project. Use these results "
+                "directly rather than generating synthetic data or placeholder values."
+            )
+            for _kb_fname, _kb_text in _kb_files:
+                parts.append(f"\n### {_kb_fname}\n{_kb_text}")
     return "\n".join(parts)
 
 
@@ -2619,7 +2675,10 @@ def _execute_experiment_design(
 ) -> StageResult:
     hypotheses = _read_prior_artifact(run_dir, "hypotheses.md") or ""
     preamble = _build_context_preamble(
-        config, run_dir, include_goal=True, include_hypotheses=True
+        config, run_dir,
+        include_goal=True,
+        include_hypotheses=True,
+        include_kb=True,  # inject pre-existing KB so real data paths reach the LLM
     )
     plan: dict[str, Any] | None = None
 
@@ -3021,6 +3080,22 @@ def _execute_code_generation(
 
     # --- Dataset guidance + setup script + HP reporting (docker/sandbox modes) ---
     extra_guidance = ""
+
+    # Inject KB files that list pre-built binaries and existing datasets so the
+    # code agent can call real executables instead of generating synthetic data.
+    _kb_for_code = _read_kb_files(
+        getattr(config.knowledge_base, "root", ""),
+        ["compute_inventory.md", "data_inventory.md", "experiments_summary.md"],
+        max_chars_each=2000,
+    )
+    if _kb_for_code:
+        extra_guidance += (
+            "\n\n## Pre-existing Project Resources (USE THESE — do not generate synthetic data)\n"
+            "The following files describe real data and pre-built binaries available for this experiment.\n"
+        )
+        for _kb_fn, _kb_txt in _kb_for_code:
+            extra_guidance += f"\n### {_kb_fn}\n{_kb_txt}\n"
+
     _net_policy = getattr(getattr(config, "docker", None), "network_policy", "setup_only")
     if config.experiment.mode in ("sandbox", "docker"):
         _net_policy = (
@@ -6160,6 +6235,55 @@ def _write_paper_sections(
     sections.append(part3)
     logger.info("Stage 17: Part 3 (Results+Discussion+Limitations+Conclusion) — %d chars", len(part3))
 
+    # --- Truncation recovery: ensure Limitations and Conclusion were written ---
+    # ACP ignores max_tokens; Claude can stop mid-section when context fills up.
+    # Detect missing required sections and request a targeted completion call.
+    _required_sections = ("## Limitations", "## Conclusion")
+    _missing = [s for s in _required_sections if s.lower() not in part3.lower()]
+    if _missing:
+        logger.warning(
+            "Stage 17: Part 3 truncated — missing sections: %s. Requesting completion.",
+            ", ".join(_missing),
+        )
+        _partial_end = part3[-3000:] if len(part3) > 3000 else part3
+        _completion_user = (
+            f"{preamble}\n\n"
+            "You are completing a scientific paper. The previous LLM call was truncated "
+            "before finishing all required sections. Here is where the paper ends:\n\n"
+            f"---\n{_partial_end}\n---\n\n"
+            f"The paper is MISSING these sections: {', '.join(_missing)}\n\n"
+            "Write ONLY the missing sections now, picking up exactly where the text above ends. "
+            "Do NOT repeat any text that already appears above. "
+            "Required sections to write:\n"
+        )
+        if "## Limitations" in _missing:
+            _completion_user += (
+                "- **Limitations** (200-300 words): honest assessment of scope, "
+                "dataset, methodology. ALL caveats consolidated here.\n"
+            )
+        if "## Conclusion" in _missing:
+            _completion_user += (
+                "- **Conclusion** (100-200 words MAXIMUM — HARD LIMIT): "
+                "Summarize contributions in 2-3 sentences. State main finding. "
+                "Suggest 2-3 concrete future directions. Do NOT repeat numbers from Results.\n"
+            )
+        _completion_user += "\nOutput markdown with ## headers only for the missing sections."
+        try:
+            _resp_completion = _chat_with_prompt(
+                llm, system, _completion_user, max_tokens=_paper_max_tokens, retries=1
+            )
+            _completion_text = _resp_completion.content.strip()
+            if _completion_text:
+                part3 = part3 + "\n\n" + _completion_text
+                # Replace the last entry we appended
+                sections[-1] = part3
+                logger.info(
+                    "Stage 17: Completion call added %d chars for missing sections",
+                    len(_completion_text),
+                )
+        except Exception:  # noqa: BLE001
+            logger.error("Stage 17: Completion call failed — truncated paper will proceed")
+
     # Combine all sections
     draft = "\n\n".join(sections)
 
@@ -8261,19 +8385,28 @@ def _execute_export_publish(
         _pm = prompts or PromptManager()
         _overlay = _get_evolution_overlay(run_dir, "export_publish")
         sp = _pm.for_stage("export_publish", evolution_overlay=_overlay, revised=revised)
-        resp = _chat_with_prompt(
-            llm,
-            sp.system,
-            sp.user,
-            json_mode=sp.json_mode,
-            max_tokens=sp.max_tokens,
-        )
-        final_paper = resp.content
-        # Content guard: reject LLM output that truncates the paper
-        if revised and len(final_paper) < 0.6 * len(revised):
+        try:
+            resp = _chat_with_prompt(
+                llm,
+                sp.system,
+                sp.user,
+                json_mode=sp.json_mode,
+                max_tokens=sp.max_tokens,
+            )
+            final_paper = resp.content
+            # Content guard: reject LLM output that truncates the paper
+            if revised and len(final_paper) < 0.6 * len(revised):
+                logger.warning(
+                    "Stage 22: LLM output is %.0f%% of input length — using original",
+                    100 * len(final_paper) / max(len(revised), 1),
+                )
+                final_paper = revised
+        except Exception:  # noqa: BLE001
+            # ACP session disconnect or other transient LLM failure — the paper
+            # itself is complete; just use the revised draft directly rather than
+            # failing the entire stage and losing all prior work.
             logger.warning(
-                "Stage 22: LLM output is %.0f%% of input length — using original",
-                100 * len(final_paper) / max(len(revised), 1),
+                "Stage 22: LLM call failed — falling back to paper_revised.md"
             )
             final_paper = revised
     else:

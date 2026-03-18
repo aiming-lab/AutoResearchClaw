@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 import weakref
 from dataclasses import dataclass
 from typing import Any
@@ -276,11 +277,35 @@ class ACPClient:
         raise last_exc  # type: ignore[misc]
 
     def _force_reconnect(self) -> None:
-        """Close the stale session and reset so _ensure_session creates a new one."""
+        """Close the stale session and reset so _ensure_session creates a fresh one.
+
+        Reuses the original session *name* on the first reconnect attempt so that
+        an agent that is merely slow to respond can be reattached.  On subsequent
+        attempts we append a short UUID suffix so acpx cannot accidentally reattach
+        to the dead session instead of spawning a new process.
+        """
         try:
             self.close()
         except Exception:  # noqa: BLE001
             pass
+        # Rotate to a unique session name so we cannot reattach to a dead session.
+        # Keep a counter on the instance; first reconnect reuses the base name to
+        # allow graceful reattach; subsequent reconnects get a fresh suffix.
+        _reconnect_count = getattr(self, "_reconnect_count", 0) + 1
+        self._reconnect_count = _reconnect_count
+        if _reconnect_count > 1:
+            _suffix = uuid.uuid4().hex[:8]
+            self.config = type(self.config)(  # type: ignore[call-arg]
+                **{
+                    **self.config.__dict__,
+                    "session_name": f"{self.config.session_name}-r{_suffix}",
+                }
+            )
+            logger.info(
+                "ACP reconnect %d: using fresh session name '%s'",
+                _reconnect_count,
+                self.config.session_name,
+            )
         self._session_ready = False
 
     def _send_prompt_cli(self, acpx: str, prompt: str) -> str:
