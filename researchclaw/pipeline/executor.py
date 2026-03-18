@@ -2281,7 +2281,7 @@ def _synthesize_perspectives(
         [{"role": "user", "content": sp.user}],
         system=sp.system,
     )
-    return resp.content
+    return resp.content.content
 
 
 def _execute_hypothesis_gen(
