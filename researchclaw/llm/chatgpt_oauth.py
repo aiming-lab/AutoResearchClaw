@@ -251,6 +251,10 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/auth/callback":
+            self.send_error(404, "Not Found")
+            return
+
         params = urllib.parse.parse_qs(parsed.query)
 
         code = params.get("code", [None])[0]
@@ -264,6 +268,7 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
                 f"<p>Error: {error}</p>"
                 "<p>You can close this window.</p>"
             )
+            _OAuthCallbackHandler._event.set()
         elif code:
             _OAuthCallbackHandler.auth_code = code
             _OAuthCallbackHandler.auth_state = state
@@ -272,13 +277,12 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
                 "<p>You can close this window and return to the terminal.</p>"
                 "<script>window.close()</script>"
             )
+            _OAuthCallbackHandler._event.set()
         else:
             self._send_html(
                 "<h1>Unknown Response</h1>"
                 "<p>No authorization code received.</p>"
             )
-
-        _OAuthCallbackHandler._event.set()
 
     def _send_html(self, body: str) -> None:
         html = (
@@ -356,7 +360,7 @@ def run_oauth_flow() -> AuthTokens:
     if not code:
         raise RuntimeError("No authorization code received.")
 
-    if callback_state and callback_state != state:
+    if callback_state != state:
         raise RuntimeError("OAuth state mismatch — possible CSRF attack.")
 
     # Exchange code for tokens
