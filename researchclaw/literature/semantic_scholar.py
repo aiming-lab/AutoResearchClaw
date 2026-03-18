@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -56,86 +57,92 @@ _cb_consecutive_429s: int = 0
 _cb_cooldown_sec: float = _CB_INITIAL_COOLDOWN
 _cb_open_since: float = 0.0  # monotonic timestamp when breaker opened
 _cb_trip_count: int = 0      # total number of trips in this process
+_cb_lock = threading.Lock()
 
 
 def _reset_circuit_breaker() -> None:
     """Reset circuit breaker state (for tests)."""
     global _cb_state, _cb_consecutive_429s, _cb_cooldown_sec  # noqa: PLW0603
     global _cb_open_since, _cb_trip_count  # noqa: PLW0603
-    _cb_state = _CB_CLOSED
-    _cb_consecutive_429s = 0
-    _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
-    _cb_open_since = 0.0
-    _cb_trip_count = 0
+    with _cb_lock:
+        _cb_state = _CB_CLOSED
+        _cb_consecutive_429s = 0
+        _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
+        _cb_open_since = 0.0
+        _cb_trip_count = 0
 
 
 def _cb_should_allow() -> bool:
     """Check if circuit breaker allows a request."""
     global _cb_state  # noqa: PLW0603
-    if _cb_state == _CB_CLOSED:
-        return True
-    if _cb_state == _CB_OPEN:
-        elapsed = time.monotonic() - _cb_open_since
-        if elapsed >= _cb_cooldown_sec:
-            _cb_state = _CB_HALF_OPEN
-            logger.info(
-                "S2 circuit breaker → HALF_OPEN after %.0fs cooldown. "
-                "Trying one probe request...",
-                elapsed,
-            )
+    with _cb_lock:
+        if _cb_state == _CB_CLOSED:
             return True
-        return False
-    # HALF_OPEN: allow the probe
-    return True
+        if _cb_state == _CB_OPEN:
+            elapsed = time.monotonic() - _cb_open_since
+            if elapsed >= _cb_cooldown_sec:
+                _cb_state = _CB_HALF_OPEN
+                logger.info(
+                    "S2 circuit breaker → HALF_OPEN after %.0fs cooldown. "
+                    "Trying one probe request...",
+                    elapsed,
+                )
+                return True
+            return False
+        # HALF_OPEN: allow the probe
+        return True
 
 
 def _cb_on_success() -> None:
     """Record a successful request."""
     global _cb_state, _cb_consecutive_429s, _cb_cooldown_sec  # noqa: PLW0603
-    _cb_consecutive_429s = 0
-    if _cb_state != _CB_CLOSED:
-        logger.info("S2 circuit breaker → CLOSED (request succeeded)")
-        _cb_state = _CB_CLOSED
-        _cb_cooldown_sec = _CB_INITIAL_COOLDOWN  # reset cooldown
+    with _cb_lock:
+        _cb_consecutive_429s = 0
+        if _cb_state != _CB_CLOSED:
+            logger.info("S2 circuit breaker → CLOSED (request succeeded)")
+            _cb_state = _CB_CLOSED
+            _cb_cooldown_sec = _CB_INITIAL_COOLDOWN  # reset cooldown
 
 
 def _cb_on_429() -> bool:
     """Record a 429 response. Returns True if breaker is now OPEN."""
     global _cb_state, _cb_consecutive_429s, _cb_cooldown_sec  # noqa: PLW0603
     global _cb_open_since, _cb_trip_count  # noqa: PLW0603
-    _cb_consecutive_429s += 1
+    with _cb_lock:
+        _cb_consecutive_429s += 1
 
-    if _cb_state == _CB_HALF_OPEN:
-        # Probe failed — back to OPEN with doubled cooldown
-        _cb_cooldown_sec = min(_cb_cooldown_sec * 2, _CB_MAX_COOLDOWN)
-        _cb_state = _CB_OPEN
-        _cb_open_since = time.monotonic()
-        _cb_trip_count += 1
-        logger.warning(
-            "S2 circuit breaker → OPEN (probe failed). "
-            "Next cooldown: %.0fs (trip #%d)",
-            _cb_cooldown_sec,
-            _cb_trip_count,
-        )
-        return True
+        if _cb_state == _CB_HALF_OPEN:
+            # Probe failed — back to OPEN with doubled cooldown
+            _cb_cooldown_sec = min(_cb_cooldown_sec * 2, _CB_MAX_COOLDOWN)
+            _cb_state = _CB_OPEN
+            _cb_open_since = time.monotonic()
+            _cb_trip_count += 1
+            logger.warning(
+                "S2 circuit breaker → OPEN (probe failed). "
+                "Next cooldown: %.0fs (trip #%d)",
+                _cb_cooldown_sec,
+                _cb_trip_count,
+            )
+            return True
 
-    if _cb_consecutive_429s >= _CB_THRESHOLD:
-        _cb_state = _CB_OPEN
-        _cb_open_since = time.monotonic()
-        _cb_trip_count += 1
-        logger.warning(
-            "S2 circuit breaker TRIPPED after %d consecutive 429s. "
-            "Cooldown: %.0fs (trip #%d). arXiv still active.",
-            _cb_consecutive_429s,
-            _cb_cooldown_sec,
-            _cb_trip_count,
-        )
-        return True
-    return False
+        if _cb_consecutive_429s >= _CB_THRESHOLD:
+            _cb_state = _CB_OPEN
+            _cb_open_since = time.monotonic()
+            _cb_trip_count += 1
+            logger.warning(
+                "S2 circuit breaker TRIPPED after %d consecutive 429s. "
+                "Cooldown: %.0fs (trip #%d). arXiv still active.",
+                _cb_consecutive_429s,
+                _cb_cooldown_sec,
+                _cb_trip_count,
+            )
+            return True
+        return False
 
 
 # Last request timestamp for rate limiting
 _last_request_time: float = 0.0
+_rate_lock = threading.Lock()
 
 
 def search_semantic_scholar(
@@ -165,12 +172,14 @@ def search_semantic_scholar(
     """
     global _last_request_time  # noqa: PLW0603
 
-    # Rate limiting: enforce minimum spacing between requests
-    now = time.monotonic()
-    rate_limit = 0.3 if api_key else _RATE_LIMIT_SEC
-    elapsed_since_last = now - _last_request_time
-    if elapsed_since_last < rate_limit:
-        time.sleep(rate_limit - elapsed_since_last)
+    # Rate limiting: locked to serialize concurrent callers
+    with _rate_lock:
+        now = time.monotonic()
+        rate_limit = 0.3 if api_key else _RATE_LIMIT_SEC
+        elapsed_since_last = now - _last_request_time
+        if elapsed_since_last < rate_limit:
+            time.sleep(rate_limit - elapsed_since_last)
+        _last_request_time = time.monotonic()
 
     limit = min(limit, _MAX_PER_REQUEST)
     params: dict[str, str] = {
@@ -186,8 +195,6 @@ def search_semantic_scholar(
     headers: dict[str, str] = {"Accept": "application/json"}
     if api_key:
         headers["x-api-key"] = api_key
-
-    _last_request_time = time.monotonic()
     data = _request_with_retry(url, headers)
     if data is None:
         return []
@@ -279,11 +286,13 @@ def batch_fetch_papers(
         return []
 
     global _last_request_time  # noqa: PLW0603
-    now = time.monotonic()
     rate = 0.3 if api_key else _RATE_LIMIT_SEC
-    elapsed = now - _last_request_time
-    if elapsed < rate:
-        time.sleep(rate - elapsed)
+    with _rate_lock:
+        now = time.monotonic()
+        elapsed = now - _last_request_time
+        if elapsed < rate:
+            time.sleep(rate - elapsed)
+        _last_request_time = time.monotonic()
 
     all_papers: list[Paper] = []
 
@@ -301,7 +310,8 @@ def batch_fetch_papers(
 
         body = json.dumps({"ids": chunk}).encode("utf-8")
 
-        _last_request_time = time.monotonic()
+        with _rate_lock:
+            _last_request_time = time.monotonic()
         result = _post_with_retry(url, headers, body)
         if result is None:
             continue
@@ -316,7 +326,9 @@ def batch_fetch_papers(
 
         # Delay between chunks
         if i + _BATCH_MAX < len(paper_ids):
-            time.sleep(rate)
+            with _rate_lock:
+                time.sleep(rate)
+                _last_request_time = time.monotonic()
 
     return all_papers
 
