@@ -9,6 +9,7 @@ Uses LLM to analyze reference code and extract:
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
@@ -144,7 +145,13 @@ def _llm_extract(
             code_snippets=combined,
         )
 
-        if hasattr(llm, "chat"):
+        if hasattr(llm, "chat_sync"):
+            resp = llm.chat_sync(
+                [{"role": "user", "content": prompt}],
+                system="You extract code patterns as JSON.",
+                max_tokens=1500,
+            )
+        elif hasattr(llm, "chat"):
             import asyncio
             try:
                 loop = asyncio.get_running_loop()
@@ -152,11 +159,12 @@ def _llm_extract(
                 loop = None
             if loop and loop.is_running():
                 return _heuristic_extract(snippets)
-            resp = llm.chat(
+            chat_call = llm.chat(
                 [{"role": "user", "content": prompt}],
                 system="You extract code patterns as JSON.",
                 max_tokens=1500,
             )
+            resp = asyncio.run(chat_call) if inspect.isawaitable(chat_call) else chat_call
         else:
             return _heuristic_extract(snippets)
 

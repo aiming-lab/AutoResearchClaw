@@ -20,6 +20,8 @@ from typing import Any
 from urllib.request import Request, urlopen
 from urllib.parse import quote_plus
 
+from researchclaw.utils.ssl_context import get_default_ssl_context
+
 logger = logging.getLogger(__name__)
 
 
@@ -201,7 +203,7 @@ class WebSearchClient:
         })
 
         try:
-            resp = urlopen(req, timeout=15)  # noqa: S310
+            resp = urlopen(req, timeout=15, context=get_default_ssl_context())  # noqa: S310
             html = resp.read().decode("utf-8", errors="replace")
         except Exception as exc:  # noqa: BLE001
             elapsed = time.monotonic() - t0

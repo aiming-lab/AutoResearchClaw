@@ -13,6 +13,7 @@ Detection strategy (three-level):
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 from dataclasses import dataclass, field
@@ -335,11 +336,30 @@ def _llm_detect(
     """
     try:
         prompt = _LLM_CLASSIFY_PROMPT.format(topic=topic, context=context)
-        response = llm.chat(
-            [{"role": "user", "content": prompt}],
-            system="You are a precise domain classifier.",
-            max_tokens=50,
-        )
+        if hasattr(llm, "chat_sync"):
+            response = llm.chat_sync(
+                [{"role": "user", "content": prompt}],
+                system="You are a precise domain classifier.",
+                max_tokens=50,
+            )
+        else:
+            chat_call = llm.chat(
+                [{"role": "user", "content": prompt}],
+                system="You are a precise domain classifier.",
+                max_tokens=50,
+            )
+            response = chat_call
+            if inspect.isawaitable(chat_call):
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop and loop.is_running():
+                    logger.warning("LLM domain detection called from running event loop")
+                    return None
+                response = asyncio.run(chat_call)
+
         content = getattr(response, "content", None)
         if not content or not content.strip():
             logger.warning("LLM domain detection returned empty response")

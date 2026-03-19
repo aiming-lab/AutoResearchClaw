@@ -743,6 +743,39 @@ class TestOpenAlex:
         papers = search_openalex("test", limit=5)
         assert papers == []
 
+    def test_openalex_uses_certifi_ssl_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OpenAlex requests should pass an explicit SSL context."""
+        from researchclaw.literature.openalex_client import search_openalex
+
+        response_bytes = json.dumps(SAMPLE_OPENALEX_RESPONSE).encode("utf-8")
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = response_bytes
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        ssl_context = object()
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(*args, **kwargs):
+            captured.update(kwargs)
+            return mock_resp
+
+        monkeypatch.setattr(
+            "researchclaw.literature.openalex_client.get_default_ssl_context",
+            lambda: ssl_context,
+        )
+        monkeypatch.setattr(
+            "researchclaw.literature.openalex_client.urllib.request.urlopen",
+            fake_urlopen,
+        )
+
+        papers = search_openalex("attention", limit=5)
+
+        assert len(papers) == 1
+        assert captured["context"] is ssl_context
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Multi-source fallback tests

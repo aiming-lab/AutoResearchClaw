@@ -112,6 +112,27 @@ class TestCrawlUrllibFallback:
         result = crawler._crawl_with_urllib("https://example.com", t0)
         assert len(result.markdown) <= 1100  # 1000 + truncation notice
 
+    def test_crawl_urllib_uses_certifi_ssl_context(self, monkeypatch: pytest.MonkeyPatch):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"<html><body><p>Content here</p></body></html>"
+        mock_resp.headers = {"Content-Type": "text/html; charset=utf-8"}
+        ssl_context = object()
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(*args, **kwargs):
+            captured["context"] = kwargs.get("context")
+            return mock_resp
+
+        monkeypatch.setattr("researchclaw.web.crawler.get_default_ssl_context", lambda: ssl_context)
+        monkeypatch.setattr("researchclaw.web.crawler.urlopen", fake_urlopen)
+
+        crawler = WebCrawler()
+        import time
+        t0 = time.monotonic()
+        _ = crawler._crawl_with_urllib("https://example.com", t0)
+
+        assert captured["context"] is ssl_context
+
 
 # ---------------------------------------------------------------------------
 # Sync crawl (goes through crawl4ai → urllib fallback chain)

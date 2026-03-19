@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.request import Request, urlopen
 
+from researchclaw.utils.ssl_context import get_default_ssl_context
+
 logger = logging.getLogger(__name__)
 
 
@@ -192,7 +194,7 @@ class WebCrawler:
     def _crawl_with_urllib(self, url: str, t0: float) -> CrawlResult:
         """Lightweight fallback: fetch HTML and strip tags."""
         req = Request(url, headers={"User-Agent": self.user_agent})
-        resp = urlopen(req, timeout=self.timeout)  # noqa: S310
+        resp = urlopen(req, timeout=self.timeout, context=get_default_ssl_context())  # noqa: S310
         content_type = resp.headers.get("Content-Type", "")
         raw = resp.read()
 

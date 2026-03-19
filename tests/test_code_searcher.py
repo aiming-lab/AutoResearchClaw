@@ -6,6 +6,7 @@ import json
 import time
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from researchclaw.agents.code_searcher.agent import CodeSearchAgent, CodeSearchResult
@@ -35,6 +36,24 @@ from researchclaw.domains.detector import DomainProfile, get_profile
 
 
 class TestQueryGeneration:
+    class _FakeAsyncLLM:
+        def __init__(self, response_text: str):
+            self.response_text = response_text
+            self.calls: list[tuple[list[dict[str, str]], dict[str, object]]] = []
+
+        async def chat(self, messages: list[dict[str, str]], **kwargs: object):
+            self.calls.append((messages, kwargs))
+            return SimpleNamespace(content=self.response_text)
+
+    class _FakeSyncLLM:
+        def __init__(self, response_text: str):
+            self.response_text = response_text
+            self.calls: list[tuple[list[dict[str, str]], dict[str, object]]] = []
+
+        def chat(self, messages: list[dict[str, str]], **kwargs: object):
+            self.calls.append((messages, kwargs))
+            return SimpleNamespace(content=self.response_text)
+
     def test_heuristic_generates_queries(self):
         queries = _heuristic_generate(
             topic="finite element method for Poisson equation",
@@ -73,6 +92,36 @@ class TestQueryGeneration:
         )
         assert isinstance(queries, list)
         assert len(queries) >= 2
+
+    def test_generate_with_llm_uses_messages_interface(self):
+        llm = self._FakeAsyncLLM('["numpy example", "scipy tutorial"]')
+
+        queries = generate_search_queries(
+            topic="molecular dynamics simulation",
+            domain_name="Computational Physics",
+            core_libraries=["numpy", "scipy"],
+            llm=llm,
+        )
+
+        assert queries == ["numpy example", "scipy tutorial"]
+        assert len(llm.calls) == 1
+        messages, kwargs = llm.calls[0]
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"]
+        assert kwargs["system"] == "You generate concise GitHub search queries."
+
+    def test_generate_with_sync_llm_does_not_require_asyncio(self):
+        llm = self._FakeSyncLLM('["numpy example", "scipy tutorial"]')
+
+        queries = generate_search_queries(
+            topic="molecular dynamics simulation",
+            domain_name="Computational Physics",
+            core_libraries=["numpy", "scipy"],
+            llm=llm,
+        )
+
+        assert queries == ["numpy example", "scipy tutorial"]
+        assert len(llm.calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +167,49 @@ class TestPatternExtractor:
 
         with_data = CodePatterns(api_patterns=["import x"])
         assert with_data.has_content
+
+    def test_extract_patterns_with_llm_uses_messages_interface(self):
+        llm = TestQueryGeneration._FakeAsyncLLM(
+            json.dumps({
+                "api_patterns": ["import numpy as np"],
+                "file_structure": {"main.py": "entry point"},
+                "evaluation_patterns": ["print(acc)"],
+                "library_versions": {"numpy": "1.0"},
+            }),
+        )
+
+        patterns = extract_patterns(
+            ["import numpy as np\nprint('hi')"],
+            topic="test topic",
+            domain_name="Test Domain",
+            llm=llm,
+        )
+
+        assert patterns.api_patterns == ["import numpy as np"]
+        assert len(llm.calls) == 1
+        messages, kwargs = llm.calls[0]
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"]
+        assert kwargs["system"] == "You extract code patterns as JSON."
+
+    def test_extract_patterns_with_sync_llm_does_not_require_asyncio(self):
+        llm = TestQueryGeneration._FakeSyncLLM(
+            json.dumps({
+                "api_patterns": ["import numpy as np"],
+                "file_structure": {"main.py": "entry point"},
+                "evaluation_patterns": ["print(acc)"],
+                "library_versions": {"numpy": "1.0"},
+            }),
+        )
+
+        patterns = extract_patterns(
+            ["import numpy as np\nprint('hi')"],
+            topic="test topic",
+            domain_name="Test Domain",
+            llm=llm,
+        )
+
+        assert patterns.api_patterns == ["import numpy as np"]
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +313,35 @@ class TestGitHubClient:
         client = GitHubClient(token="")
         headers = client._headers()
         assert "Authorization" not in headers
+
+    def test_get_uses_certifi_ssl_context(self, monkeypatch: pytest.MonkeyPatch):
+        client = GitHubClient(token="")
+        ssl_context = object()
+        captured: dict[str, object] = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"items":[]}'
+
+        def fake_urlopen(req, **kwargs):
+            captured["context"] = kwargs.get("context")
+            return _Resp()
+
+        monkeypatch.setattr(
+            "researchclaw.agents.code_searcher.github_client.get_default_ssl_context",
+            lambda: ssl_context,
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            result = client._get("https://api.github.com/search/repositories")
+
+        assert result == {"items": []}
+        assert captured["context"] is ssl_context
 
 
 # ---------------------------------------------------------------------------

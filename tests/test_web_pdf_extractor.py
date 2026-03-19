@@ -95,3 +95,22 @@ We evaluate on several benchmarks.
         extractor = PDFExtractor()
         result = extractor.extract_from_url("https://example.com/paper.pdf")
         assert not result.success or result.error
+
+    def test_extract_from_url_uses_certifi_ssl_context(self, monkeypatch: pytest.MonkeyPatch):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"%PDF-1.4"
+        ssl_context = object()
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(*args, **kwargs):
+            captured["context"] = kwargs.get("context")
+            return mock_resp
+
+        monkeypatch.setattr("researchclaw.web.pdf_extractor.get_default_ssl_context", lambda: ssl_context)
+        monkeypatch.setattr("researchclaw.web.pdf_extractor.urlopen", fake_urlopen)
+
+        extractor = PDFExtractor()
+        with patch.object(PDFExtractor, "extract", return_value=PDFContent(path="tmp.pdf", success=True)):
+            _ = extractor.extract_from_url("https://example.com/paper.pdf")
+
+        assert captured["context"] is ssl_context

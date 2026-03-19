@@ -6,6 +6,7 @@ for GitHub repository and code search.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
@@ -129,14 +130,28 @@ def _llm_generate(
             needs=", ".join(needs) if needs else "general usage",
         )
 
-        # Synchronous LLM call — LLMClient.chat() is sync and takes
-        # (messages, *, system=, max_tokens=) signature.
-        if hasattr(llm, "chat"):
-            resp = llm.chat(
+        if hasattr(llm, "chat_sync"):
+            resp = llm.chat_sync(
                 [{"role": "user", "content": prompt}],
                 system="You generate concise GitHub search queries.",
                 max_tokens=200,
             )
+        elif hasattr(llm, "chat"):
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                # Already in async context — use heuristic fallback
+                logger.debug("In async context, using heuristic query gen")
+                return _heuristic_generate(topic, domain_name, libraries, needs)
+            chat_call = llm.chat(
+                [{"role": "user", "content": prompt}],
+                system="You generate concise GitHub search queries.",
+                max_tokens=200,
+            )
+            resp = asyncio.run(chat_call) if inspect.isawaitable(chat_call) else chat_call
         else:
             return _heuristic_generate(topic, domain_name, libraries, needs)
 
