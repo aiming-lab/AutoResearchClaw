@@ -253,15 +253,23 @@ class TestRawCallRouting:
 # ---------------------------------------------------------------------------
 
 class TestCLILoginLogout:
-    def test_login_import_error(self) -> None:
-        """login should return 1 and print guidance when chatgpt extra is missing."""
+    def test_login_handles_import_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """login should return 1 and print install guidance when chatgpt extra is missing."""
         import argparse
-        from unittest.mock import patch as _patch
-        from researchclaw.cli import cmd_login
+        import sys
 
-        with _patch.dict("sys.modules", {"researchclaw.llm.chatgpt_oauth": None}):
-            with _patch("builtins.__import__", side_effect=ImportError("no keyring")):
-                pass  # ImportError is caught inside cmd_login via try/except
+        oauth_mod = sys.modules.pop("researchclaw.llm.chatgpt_oauth", None)
+        try:
+            with patch.dict(sys.modules, {"researchclaw.llm.chatgpt_oauth": None}):
+                from researchclaw.cli import cmd_login
+
+                result = cmd_login(argparse.Namespace())
+                assert result == 1
+                captured = capsys.readouterr()
+                assert "chatgpt extra" in captured.err.lower() or "pip install" in captured.err
+        finally:
+            if oauth_mod is not None:
+                sys.modules["researchclaw.llm.chatgpt_oauth"] = oauth_mod
 
     def test_logout_dispatches(self) -> None:
         """logout command should call clear_auth."""
