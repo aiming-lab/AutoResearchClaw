@@ -43,6 +43,14 @@ llm:
   fallback_models:
     - "gpt-4.1"
     - "gpt-4o-mini"
+  # ACP mode lets a logged-in local coding agent handle auth and model routing.
+  # Set llm.provider: "acp" to use this block instead of base_url/api_key_env.
+  acp:
+    agent: "codex"
+    cwd: "."
+    acpx_command: ""
+    session_name: "researchclaw"
+    timeout_sec: 1800
 
 security:
   hitl_required_stages: [5, 9, 20]

@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import weakref
 from dataclasses import dataclass
 from typing import Any
@@ -198,27 +199,77 @@ class ACPClient:
         if not acpx:
             raise RuntimeError("acpx not found")
 
-        # Use 'ensure' which finds existing or creates new
-        result = subprocess.run(
+        if self._session_exists(acpx):
+            self._session_ready = True
+            logger.info(
+                "ACP session '%s' already exists (%s)",
+                self.config.session_name,
+                self.config.agent,
+            )
+            return
+
+        # Newer acpx builds keep the session owner alive after `sessions ensure`.
+        # Spawn it in the background and poll until the session becomes visible.
+        proc = subprocess.Popen(
             [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
              self.config.agent, "sessions", "ensure",
              "--name", self.config.session_name],
-            capture_output=True, text=True, timeout=30,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
         )
-        if result.returncode != 0:
-            # Fall back to 'new'
-            result = subprocess.run(
-                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
-                 self.config.agent, "sessions", "new",
-                 "--name", self.config.session_name],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to create ACP session: {result.stderr.strip()}"
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if self._session_exists(acpx):
+                self._session_ready = True
+                logger.info(
+                    "ACP session '%s' ready (%s)",
+                    self.config.session_name,
+                    self.config.agent,
                 )
-        self._session_ready = True
-        logger.info("ACP session '%s' ready (%s)", self.config.session_name, self.config.agent)
+                return
+            if proc.poll() is not None:
+                break
+            time.sleep(0.25)
+
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+        raise RuntimeError(
+            f"Failed to create ACP session '{self.config.session_name}' via acpx"
+        )
+
+    def _session_exists(self, acpx: str) -> bool:
+        """Return True when acpx reports a matching named session for this cwd."""
+        try:
+            result = subprocess.run(
+                [acpx, "--cwd", self._abs_cwd(),
+                 self.config.agent, "sessions", "list"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        if result.returncode != 0:
+            return False
+
+        cwd = self._abs_cwd()
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            if "[closed]" in parts[0]:
+                continue
+            _, session_name, session_cwd = parts[:3]
+            if session_name == self.config.session_name and os.path.abspath(session_cwd) == cwd:
+                return True
+        return False
 
     # Linux MAX_ARG_STRLEN is 128KB; stay well under to leave room for env
     _MAX_CLI_PROMPT_BYTES = 100_000

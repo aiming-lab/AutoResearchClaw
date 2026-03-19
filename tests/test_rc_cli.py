@@ -243,6 +243,20 @@ def test_cmd_init_creates_config(
     assert "Created config.arc.yaml" in capsys.readouterr().out
 
 
+def test_cmd_init_copies_acp_block_from_example(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.stdin", type("FakeStdin", (), {"isatty": lambda self: False})())
+
+    code = rc_cli.cmd_init(argparse.Namespace(force=False))
+
+    assert code == 0
+    content = (tmp_path / "config.arc.yaml").read_text(encoding="utf-8")
+    assert 'provider: "openai"' in content
+    assert 'agent: "codex"' in content
+
+
 def test_cmd_init_refuses_overwrite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -212,13 +212,16 @@ AutoResearchClaw can use **any ACP-compatible coding agent** as its LLM backend 
 llm:
   provider: "acp"
   acp:
-    agent: "claude"   # Any ACP-compatible agent CLI command
+    agent: "codex"    # Any ACP-compatible agent CLI command
     cwd: "."          # Working directory for the agent
   # No base_url or api_key needed — the agent handles its own auth.
 ```
 
 ```bash
-# Just run — the agent uses its own credentials
+# One-time auth for Codex CLI
+codex login
+
+# Then run — the agent uses its own credentials
 researchclaw run --config config.yaml --topic "Your research idea" --auto-approve
 ```
 
@@ -401,7 +404,7 @@ llm:
   fallback_models: ["gpt-4o-mini"] # Fallback chain
   s2_api_key: ""                   # Semantic Scholar API key (optional, higher rate limits)
   acp:                             # Only used when provider: "acp"
-    agent: "claude"                # ACP agent CLI command (claude, codex, gemini, etc.)
+    agent: "codex"                 # ACP agent CLI command (codex, claude, gemini, etc.)
     cwd: "."                       # Working directory for the agent
 
 # === Experiment ===

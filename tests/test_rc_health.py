@@ -471,6 +471,35 @@ def test_check_acp_agent_missing() -> None:
     assert "Install claude" in result.fix
 
 
+def test_check_acpx_bridge_found_on_path() -> None:
+    with patch("shutil.which", return_value="/usr/local/bin/acpx"):
+        result = health.check_acpx_bridge()
+    assert result.status == "pass"
+    assert "/usr/local/bin/acpx" in result.detail
+
+
+def test_check_acpx_bridge_found_in_openclaw_bundle() -> None:
+    with (
+        patch("shutil.which", return_value=None),
+        patch("os.path.isfile", return_value=True),
+        patch("os.access", return_value=True),
+    ):
+        result = health.check_acpx_bridge()
+    assert result.status == "pass"
+    assert ".openclaw/extensions/acpx" in result.detail
+
+
+def test_check_acpx_bridge_missing() -> None:
+    with (
+        patch("shutil.which", return_value=None),
+        patch("os.path.isfile", return_value=False),
+    ):
+        result = health.check_acpx_bridge()
+    assert result.status == "fail"
+    assert "'acpx' not found" in result.detail
+    assert "npm install -g acpx" in result.fix
+
+
 def _write_acp_config(path: Path) -> None:
     _ = path.write_text(
         """\
@@ -508,6 +537,10 @@ def test_run_doctor_acp_skips_http_checks(tmp_path: Path) -> None:
         patch.object(
             health, "check_config_valid",
             return_value=health.CheckResult("config_valid", "pass", "ok"),
+        ),
+        patch.object(
+            health, "check_acpx_bridge",
+            return_value=health.CheckResult("acpx_bridge", "pass", "ok"),
         ),
         patch.object(
             health, "check_acp_agent",
@@ -551,6 +584,10 @@ def test_run_doctor_acp_includes_agent_check(tmp_path: Path) -> None:
             return_value=health.CheckResult("config_valid", "pass", "ok"),
         ),
         patch.object(
+            health, "check_acpx_bridge",
+            return_value=health.CheckResult("acpx_bridge", "pass", "ok"),
+        ),
+        patch.object(
             health, "check_acp_agent",
             return_value=health.CheckResult("acp_agent", "pass", "ok"),
         ),
@@ -570,9 +607,10 @@ def test_run_doctor_acp_includes_agent_check(tmp_path: Path) -> None:
         report = health.run_doctor(config_path)
 
     check_names = [c.name for c in report.checks]
+    assert "acpx_bridge" in check_names
     assert "acp_agent" in check_names
     assert report.overall == "pass"
-    assert len(report.checks) == 7
+    assert len(report.checks) == 8
 
 
 def test_print_doctor_report_ascii_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

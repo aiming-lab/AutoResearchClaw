@@ -530,6 +530,32 @@ def check_acp_agent(agent_command: str) -> CheckResult:
     )
 
 
+def check_acpx_bridge() -> CheckResult:
+    """Check that the ACP bridge CLI is available."""
+    resolved = shutil.which("acpx")
+    if resolved:
+        return CheckResult(
+            name="acpx_bridge",
+            status="pass",
+            detail=f"ACP bridge found: {resolved}",
+        )
+    openclaw_acpx = os.path.expanduser(
+        "~/.openclaw/extensions/acpx/node_modules/.bin/acpx"
+    )
+    if os.path.isfile(openclaw_acpx) and os.access(openclaw_acpx, os.X_OK):
+        return CheckResult(
+            name="acpx_bridge",
+            status="pass",
+            detail=f"ACP bridge found: {openclaw_acpx}",
+        )
+    return CheckResult(
+        name="acpx_bridge",
+        status="fail",
+        detail="ACP bridge 'acpx' not found on PATH",
+        fix="Install acpx with `npm install -g acpx` or set llm.acp.acpx_command",
+    )
+
+
 def check_docker_runtime(config: RCConfig) -> CheckResult:
     """Check Docker daemon, image availability, and optional NVIDIA runtime."""
     from researchclaw.experiment.docker_sandbox import DockerSandbox
@@ -590,6 +616,7 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
         logger.debug("Could not fully load config for doctor checks: %s", exc)
 
     if provider == "acp":
+        checks.append(check_acpx_bridge())
         checks.append(check_acp_agent(acp_agent_command))
     else:
         checks.append(check_llm_connectivity(base_url))
