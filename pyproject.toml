@@ -14,10 +14,12 @@ license = {text = "MIT"}
 
 [project.optional-dependencies]
 anthropic = ["httpx>=0.24"]
+chatgpt = ["keyring>=24.0"]
 web = ["scholarly>=1.7", "crawl4ai>=0.2", "tavily-python>=0.3"]
 pdf = ["PyMuPDF>=1.23"]
 all = [
     "httpx>=0.24",
+    "keyring>=24.0",
     "scholarly>=1.7",
     "crawl4ai>=0.2",
     "tavily-python>=0.3",

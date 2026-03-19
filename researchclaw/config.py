@@ -532,9 +532,9 @@ def validate_config(
     warnings: list[str] = []
 
     llm_provider = _get_by_path(data, "llm.provider")
+    _no_key_providers = {"acp", "chatgpt"}
     for key in REQUIRED_FIELDS:
-        # ACP provider doesn't need base_url or api_key_env
-        if llm_provider == "acp" and key in ("llm.base_url", "llm.api_key_env"):
+        if llm_provider in _no_key_providers and key in ("llm.base_url", "llm.api_key_env"):
             continue
         value = _get_by_path(data, key)
         if _is_blank(value):

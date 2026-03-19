@@ -323,7 +323,8 @@ _PROVIDER_CHOICES = {
     "1": ("openai", "OPENAI_API_KEY"),
     "2": ("openrouter", "OPENROUTER_API_KEY"),
     "3": ("deepseek", "DEEPSEEK_API_KEY"),
-    "4": ("acp", ""),
+    "4": ("chatgpt", ""),
+    "5": ("acp", ""),
 }
 
 _PROVIDER_URLS = {
@@ -339,6 +340,7 @@ _PROVIDER_MODELS = {
         ["google/gemini-pro-1.5", "meta-llama/llama-3.1-70b-instruct"],
     ),
     "deepseek": ("deepseek-chat", ["deepseek-reasoner"]),
+    "chatgpt": ("gpt-4o", ["gpt-4.1", "gpt-4o-mini"]),
 }
 
 
@@ -373,7 +375,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("  1) openai       (requires OPENAI_API_KEY)")
         print("  2) openrouter   (requires OPENROUTER_API_KEY)")
         print("  3) deepseek     (requires DEEPSEEK_API_KEY)")
-        print("  4) acp          (local AI agent — no API key needed)")
+        print("  4) chatgpt      (ChatGPT Plus/Pro subscription — browser login)")
+        print("  5) acp          (local AI agent — no API key needed)")
         try:
             raw = input("Choice [1]: ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -390,8 +393,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         'provider: "openai-compatible"', f'provider: "{provider}"'
     )
 
-    if provider == "acp":
-        # ACP doesn't need base_url or api_key_env
+    if provider in ("acp", "chatgpt"):
         content = content.replace(
             'base_url: "https://api.openai.com/v1"', 'base_url: ""'
         )
@@ -419,7 +421,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     dest.write_text(content, encoding="utf-8")
     print(f"Created {dest} (provider: {provider})")
 
-    if provider == "acp":
+    if provider == "chatgpt":
+        print("\nNext steps:")
+        print("  1. Install ChatGPT extras: pip install 'researchclaw[chatgpt]'")
+        print("  2. Login with your subscription: researchclaw login")
+        print("  3. Edit config.arc.yaml to customize your settings")
+        print("  4. Run: researchclaw doctor")
+    elif provider == "acp":
         print("\nNext steps:")
         print("  1. Ensure your ACP agent is installed and on PATH")
         print("  2. Edit config.arc.yaml to set llm.acp.agent if needed")
@@ -476,6 +484,54 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     print()
     print("Run 'researchclaw doctor' for a full environment health check.")
+    return 0
+
+
+_CHATGPT_TOS_DISCLAIMER = (
+    "DISCLAIMER: This feature uses OpenAI's public OAuth endpoints to "
+    "authenticate with your ChatGPT Plus/Pro subscription. By proceeding, "
+    "you confirm that your use complies with OpenAI's Terms of Service "
+    "(https://openai.com/policies/terms-of-use). ResearchClaw is not "
+    "affiliated with OpenAI."
+)
+
+
+def cmd_login(args: argparse.Namespace) -> int:
+    """Authenticate with ChatGPT Plus/Pro subscription via browser OAuth."""
+    from researchclaw.llm.chatgpt_oauth import load_auth, run_oauth_flow
+
+    existing = load_auth()
+    if existing and not existing.expired:
+        print("Already logged in with a valid ChatGPT session.")
+        print(f"  Account: {existing.account_id or 'unknown'}")
+        print("  Use 'researchclaw logout' to clear credentials.")
+        return 0
+
+    print(_CHATGPT_TOS_DISCLAIMER)
+    print()
+
+    if sys.stdin.isatty():
+        try:
+            confirm = input("Continue? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            confirm = ""
+        if confirm not in ("y", "yes"):
+            print("Login cancelled.")
+            return 1
+
+    tokens = run_oauth_flow()
+    print(f"\nLogged in successfully!")
+    print(f"  Account: {tokens.account_id or 'unknown'}")
+    print(f"  Tokens stored in OS keychain (service: researchclaw-chatgpt)")
+    return 0
+
+
+def cmd_logout(args: argparse.Namespace) -> int:
+    """Clear stored ChatGPT authentication credentials."""
+    from researchclaw.llm.chatgpt_oauth import clear_auth
+
+    clear_auth()
+    print("ChatGPT credentials cleared from OS keychain.")
     return 0
 
 
@@ -554,6 +610,9 @@ def main(argv: list[str] | None = None) -> int:
 
     _ = sub.add_parser("setup", help="Check and install optional tools (OpenCode, etc.)")
 
+    _ = sub.add_parser("login", help="Login with ChatGPT Plus/Pro subscription (browser OAuth)")
+    _ = sub.add_parser("logout", help="Clear stored ChatGPT credentials")
+
     rpt_p = sub.add_parser("report", help="Generate human-readable run report")
     _ = rpt_p.add_argument(
         "--run-dir", required=True, help="Path to run artifacts directory"
@@ -573,6 +632,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_init(args)
     elif command == "setup":
         return cmd_setup(args)
+    elif command == "login":
+        return cmd_login(args)
+    elif command == "logout":
+        return cmd_logout(args)
     elif command == "report":
         return cmd_report(args)
     else:

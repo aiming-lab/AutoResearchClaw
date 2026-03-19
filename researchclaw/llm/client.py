@@ -85,6 +85,7 @@ class LLMClient:
         self.config = config
         self._model_chain = [config.primary_model] + list(config.fallback_models)
         self._anthropic = None  # Will be set by from_rc_config if needed
+        self._chatgpt = None  # Will be set by from_rc_config if needed
 
     @classmethod
     def from_rc_config(cls, rc_config: Any) -> LLMClient:
@@ -133,9 +134,11 @@ class LLMClient:
         )
         client = cls(config)
 
-        # Detect Anthropic provider — use original URL/key (not the
-        # MetaClaw proxy URL which is OpenAI-compatible only).
-        if provider == "anthropic":
+        if provider == "chatgpt":
+            from .chatgpt_adapter import ChatGPTAdapter
+
+            client._chatgpt = ChatGPTAdapter(timeout_sec=config.timeout_sec)
+        elif provider == "anthropic":
             from .anthropic_adapter import AnthropicAdapter
 
             client._anthropic = AnthropicAdapter(
@@ -326,9 +329,12 @@ class LLMClient:
         json_mode: bool,
     ) -> LLMResponse:
         """Make a single API call."""
-        
-        # Use Anthropic adapter if configured
-        if self._anthropic:
+
+        if self._chatgpt:
+            data = self._chatgpt.chat_completion(
+                model, messages, max_tokens, temperature, json_mode
+            )
+        elif self._anthropic:
             data = self._anthropic.chat_completion(model, messages, max_tokens, temperature, json_mode)
         else:
             # Original OpenAI logic

@@ -1,4 +1,4 @@
-"""LLM integration — OpenAI-compatible and ACP agent clients."""
+"""LLM integration — OpenAI-compatible, Anthropic, ChatGPT, and ACP agent clients."""
 
 from __future__ import annotations
 
@@ -26,6 +26,9 @@ PROVIDER_PRESETS = {
     "novita": {
         "base_url": "https://api.novita.ai/openai",
     },
+    "chatgpt": {
+        "base_url": None,  # Uses ChatGPT backend API via OAuth
+    },
     "openai-compatible": {
         "base_url": None,  # Use user-provided base_url
     },
@@ -41,6 +44,7 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
     - ``"openai"`` → :class:`LLMClient` with OpenAI base URL
     - ``"deepseek"`` → :class:`LLMClient` with DeepSeek base URL
     - ``"novita"`` → :class:`LLMClient` with Novita AI base URL
+    - ``"chatgpt"`` → :class:`LLMClient` with ChatGPT subscription adapter (OAuth)
     - ``"openai-compatible"`` (default) → :class:`LLMClient` with custom base_url
 
     OpenRouter is fully compatible with the OpenAI API format, making it
@@ -53,5 +57,4 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
 
     from researchclaw.llm.client import LLMClient as _LLM
 
-    # Use from_rc_config to properly initialize adapters (e.g., Anthropic)
     return _LLM.from_rc_config(config)
