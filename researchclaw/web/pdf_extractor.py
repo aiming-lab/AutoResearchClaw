@@ -91,29 +91,27 @@ class PDFExtractor:
             return PDFContent(path=str(path), error=f"File not found: {path}")
 
         try:
-            doc = fitz.open(str(path))
-            pages_to_read = doc.page_count
-            if self.max_pages > 0:
-                pages_to_read = min(pages_to_read, self.max_pages)
+            with fitz.open(str(path)) as doc:
+                pages_to_read = doc.page_count
+                if self.max_pages > 0:
+                    pages_to_read = min(pages_to_read, self.max_pages)
 
-            all_text = []
-            for i in range(pages_to_read):
-                page = doc[i]
-                all_text.append(page.get_text())
+                all_text = []
+                for i in range(pages_to_read):
+                    page = doc[i]
+                    all_text.append(page.get_text())
 
-            full_text = "\n".join(all_text)
+                full_text = "\n".join(all_text)
 
-            # Extract metadata
-            meta = doc.metadata or {}
-            title = meta.get("title", "")
-            author = meta.get("author", "")
-            authors = [a.strip() for a in author.split(",")] if author else []
+                meta = doc.metadata or {}
+                title = meta.get("title", "")
+                author = meta.get("author", "")
+                authors = [a.strip() for a in author.split(",")] if author else []
 
-            abstract = self._extract_abstract(full_text)
-            sections = self._detect_sections(full_text) if self.extract_sections else []
+                abstract = self._extract_abstract(full_text)
+                sections = self._detect_sections(full_text) if self.extract_sections else []
 
-            page_count = doc.page_count
-            doc.close()
+                page_count = doc.page_count
 
             return PDFContent(
                 path=str(path),
