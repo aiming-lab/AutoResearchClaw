@@ -260,7 +260,7 @@ class ACPClient:
                 if use_file:
                     return self._send_prompt_via_file(acpx, prompt)
                 return self._send_prompt_cli(acpx, prompt)
-            except RuntimeError as exc:
+            except (RuntimeError, subprocess.TimeoutExpired) as exc:
                 if not any(pat in str(exc) for pat in self._RECONNECT_ERRORS):
                     raise
                 last_exc = exc

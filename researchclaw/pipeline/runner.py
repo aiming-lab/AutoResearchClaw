@@ -4,6 +4,7 @@ import json
 import importlib
 import logging
 import os
+import signal
 import shutil
 import tempfile
 import time as _time
@@ -209,24 +210,60 @@ def execute_pipeline(
     started = False
     total_stages = len(STAGE_SEQUENCE)
 
-    for stage in STAGE_SEQUENCE:
+    # --- Signal handling: survive SIGTERM/SIGHUP from parent session death ---
+    _interrupted = False
+    _original_sigterm = signal.getsignal(signal.SIGTERM)
+    _original_sighup = signal.getsignal(signal.SIGHUP)
+
+    def _graceful_shutdown(signum: int, frame: object) -> None:
+        nonlocal _interrupted
+        _interrupted = True
+        logger.warning(
+            "Received signal %d — will finish current stage then exit gracefully",
+            signum,
+        )
+
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+    signal.signal(signal.SIGHUP, _graceful_shutdown)
+    logger.info("Signal handlers installed (SIGTERM, SIGHUP → graceful shutdown)")
+
+    try:
+      for stage in STAGE_SEQUENCE:
         started = _should_start(stage, from_stage, started)
         if not started:
             continue
+
+        # Check for pending signal-based interruption
+        if _interrupted:
+            print(f"[{run_id}] Interrupted by signal — stopping pipeline")
+            logger.warning("Pipeline interrupted by signal before stage %s", stage.name)
+            break
 
         stage_num = int(stage)
         prefix = f"[{run_id}] Stage {stage_num:02d}/{total_stages}"
         print(f"{prefix} {stage.name} — running...")
         t0 = _time.monotonic()
 
-        result = execute_stage(
-            stage,
-            run_dir=run_dir,
-            run_id=run_id,
-            config=config,
-            adapters=adapters,
-            auto_approve_gates=auto_approve_gates,
-        )
+        try:
+            result = execute_stage(
+                stage,
+                run_dir=run_dir,
+                run_id=run_id,
+                config=config,
+                adapters=adapters,
+                auto_approve_gates=auto_approve_gates,
+            )
+        except (SystemExit, KeyboardInterrupt) as exc:
+            logger.error(
+                "Stage %s killed by %s: %s", stage.name, type(exc).__name__, exc
+            )
+            result = StageResult(
+                stage=stage,
+                status=StageStatus.FAILED,
+                artifacts=(),
+                error=f"Killed by {type(exc).__name__}: {exc}",
+                decision="retry",
+            )
         elapsed = _time.monotonic() - t0
         if result.status == StageStatus.DONE:
             arts = ", ".join(result.artifacts) if result.artifacts else "none"
@@ -355,6 +392,11 @@ def execute_pipeline(
                 break
         if result.status == StageStatus.BLOCKED_APPROVAL and stop_on_gate:
             break
+
+    finally:
+        # Restore original signal handlers
+        signal.signal(signal.SIGTERM, _original_sigterm)
+        signal.signal(signal.SIGHUP, _original_sighup)
 
     summary = _build_pipeline_summary(
         run_id=run_id,

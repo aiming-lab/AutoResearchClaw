@@ -3392,41 +3392,50 @@ def _execute_code_generation(
             domain_profile=_domain_profile,
             code_search_result=_code_search_result,
         )
-        _agent_result = _agent.generate(
-            topic=config.research.topic,
-            exp_plan=exp_plan,
-            metric=metric,
-            pkg_hint=pkg_hint + "\n" + compute_budget + "\n" + extra_guidance,
-            max_tokens=_code_max_tokens,
-        )
-        files = _agent_result.files
-        _code_agent_active = True
-
-        # Write agent artifacts
-        (stage_dir / "code_agent_log.json").write_text(
-            json.dumps(
-                {
-                    "log": _agent_result.validation_log,
-                    "llm_calls": _agent_result.total_llm_calls,
-                    "sandbox_runs": _agent_result.total_sandbox_runs,
-                    "best_score": _agent_result.best_score,
-                    "tree_nodes_explored": _agent_result.tree_nodes_explored,
-                    "review_rounds": _agent_result.review_rounds,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        if _agent_result.architecture_spec:
-            (stage_dir / "architecture_spec.yaml").write_text(
-                _agent_result.architecture_spec, encoding="utf-8",
+        try:
+            _agent_result = _agent.generate(
+                topic=config.research.topic,
+                exp_plan=exp_plan,
+                metric=metric,
+                pkg_hint=pkg_hint + "\n" + compute_budget + "\n" + extra_guidance,
+                max_tokens=_code_max_tokens,
             )
-        logger.info(
-            "CodeAgent: %d LLM calls, %d sandbox runs, score=%.2f",
-            _agent_result.total_llm_calls,
-            _agent_result.total_sandbox_runs,
-            _agent_result.best_score,
-        )
+            files = _agent_result.files
+            _code_agent_active = True
+
+            # Write agent artifacts
+            (stage_dir / "code_agent_log.json").write_text(
+                json.dumps(
+                    {
+                        "log": _agent_result.validation_log,
+                        "llm_calls": _agent_result.total_llm_calls,
+                        "sandbox_runs": _agent_result.total_sandbox_runs,
+                        "best_score": _agent_result.best_score,
+                        "tree_nodes_explored": _agent_result.tree_nodes_explored,
+                        "review_rounds": _agent_result.review_rounds,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            if _agent_result.architecture_spec:
+                (stage_dir / "architecture_spec.yaml").write_text(
+                    _agent_result.architecture_spec, encoding="utf-8",
+                )
+            logger.info(
+                "CodeAgent: %d LLM calls, %d sandbox runs, score=%.2f",
+                _agent_result.total_llm_calls,
+                _agent_result.total_sandbox_runs,
+                _agent_result.best_score,
+            )
+        except Exception as _ca_exc:
+            logger.warning(
+                "CodeAgent failed (%s: %s) — falling back to legacy/fallback code",
+                type(_ca_exc).__name__, _ca_exc,
+            )
+            (stage_dir / "code_agent_error.txt").write_text(
+                f"{type(_ca_exc).__name__}: {_ca_exc}", encoding="utf-8",
+            )
     elif not _beast_mode_used and llm is not None:
         # ── Legacy single-shot generation ─────────────────────────────────
         topic = config.research.topic
