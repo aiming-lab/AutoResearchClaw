@@ -155,3 +155,25 @@ class TestWebSearchClient:
                 r.url != responses[0].results[0].url
                 for r in responses[1].results
             )
+
+    def test_search_ddg_uses_certifi_ssl_context(self, monkeypatch: pytest.MonkeyPatch):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = b"""
+        <a class="result__a" href="https://paper.com">Paper Title</a>
+        <a class="result__snippet">About the paper</a>
+        """
+        ssl_context = object()
+        captured: dict[str, object] = {}
+
+        def fake_urlopen(*args, **kwargs):
+            captured["context"] = kwargs.get("context")
+            return mock_resp
+
+        monkeypatch.setattr("researchclaw.web.search.get_default_ssl_context", lambda: ssl_context)
+        monkeypatch.setattr("researchclaw.web.search.urlopen", fake_urlopen)
+
+        client = WebSearchClient(api_key="")
+        response = client.search("test query")
+
+        assert response.source == "duckduckgo"
+        assert captured["context"] is ssl_context

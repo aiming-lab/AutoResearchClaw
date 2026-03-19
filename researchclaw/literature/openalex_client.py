@@ -29,6 +29,7 @@ import urllib.request
 from typing import Any
 
 from researchclaw.literature.models import Author, Paper
+from researchclaw.utils.ssl_context import get_default_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +138,11 @@ def _request_with_retry(
                     "User-Agent": f"ResearchClaw/1.0 (mailto:{email})",
                 },
             )
-            with urllib.request.urlopen(req, timeout=_TIMEOUT_SEC) as resp:
+            with urllib.request.urlopen(
+                req,
+                timeout=_TIMEOUT_SEC,
+                context=get_default_ssl_context(),
+            ) as resp:
                 body = resp.read().decode("utf-8")
                 return json.loads(body)
         except urllib.error.HTTPError as exc:

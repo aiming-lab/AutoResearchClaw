@@ -28,6 +28,7 @@ import urllib.request
 from typing import Any
 
 from researchclaw.literature.models import Author, Paper
+from researchclaw.utils.ssl_context import get_default_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +229,11 @@ def _request_with_retry(
     for attempt in range(_MAX_RETRIES):
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=_TIMEOUT_SEC) as resp:
+            with urllib.request.urlopen(
+                req,
+                timeout=_TIMEOUT_SEC,
+                context=get_default_ssl_context(),
+            ) as resp:
                 body = resp.read().decode("utf-8")
                 _cb_on_success()
                 return json.loads(body)
@@ -345,7 +350,11 @@ def _post_with_retry(
     for attempt in range(_MAX_RETRIES):
         try:
             req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=_TIMEOUT_SEC) as resp:
+            with urllib.request.urlopen(
+                req,
+                timeout=_TIMEOUT_SEC,
+                context=get_default_ssl_context(),
+            ) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 _cb_on_success()
                 return data if isinstance(data, list) else None

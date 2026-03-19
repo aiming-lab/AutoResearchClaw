@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
+from researchclaw.utils.ssl_context import get_default_ssl_context
+
 try:
     import fitz  # PyMuPDF
     HAS_FITZ = True
@@ -145,7 +147,7 @@ class PDFExtractor:
             req = Request(url, headers={
                 "User-Agent": "ResearchClaw/0.5 (Academic Research Bot)"
             })
-            resp = urlopen(req, timeout=30)  # noqa: S310
+            resp = urlopen(req, timeout=30, context=get_default_ssl_context())  # noqa: S310
             data = resp.read()
 
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:

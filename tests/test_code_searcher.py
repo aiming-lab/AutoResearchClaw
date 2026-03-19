@@ -222,6 +222,35 @@ class TestGitHubClient:
         headers = client._headers()
         assert "Authorization" not in headers
 
+    def test_get_uses_certifi_ssl_context(self, monkeypatch: pytest.MonkeyPatch):
+        client = GitHubClient(token="")
+        ssl_context = object()
+        captured: dict[str, object] = {}
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return b'{"items":[]}'
+
+        def fake_urlopen(req, **kwargs):
+            captured["context"] = kwargs.get("context")
+            return _Resp()
+
+        monkeypatch.setattr(
+            "researchclaw.agents.code_searcher.github_client.get_default_ssl_context",
+            lambda: ssl_context,
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            result = client._get("https://api.github.com/search/repositories")
+
+        assert result == {"items": []}
+        assert captured["context"] is ssl_context
+
 
 # ---------------------------------------------------------------------------
 # RepoInfo / CodeSnippet data class tests

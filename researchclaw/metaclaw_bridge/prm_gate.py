@@ -15,6 +15,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from statistics import mode
 
+from researchclaw.utils.ssl_context import get_default_ssl_context
+
 logger = logging.getLogger(__name__)
 
 # Stage-specific evaluation instructions
@@ -95,7 +97,7 @@ def _single_judge_call(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=60, context=get_default_ssl_context()) as resp:
             data = json.loads(resp.read())
         content = data["choices"][0]["message"]["content"]
         # Parse "Score: X"

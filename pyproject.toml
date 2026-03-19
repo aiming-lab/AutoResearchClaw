@@ -8,6 +8,7 @@ dependencies = [
     "rich>=13.0",
     "arxiv>=2.1",
     "numpy>=1.24",
+    "certifi>=2024.0.0",
 ]
 readme = "README.md"
 license = {text = "MIT"}
