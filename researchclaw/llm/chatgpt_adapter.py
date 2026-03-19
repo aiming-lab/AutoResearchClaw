@@ -153,7 +153,7 @@ class ChatGPTAdapter:
         except urllib.error.HTTPError as exc:
             if exc.code == 401:
                 logger.info("Access token expired mid-request, refreshing...")
-                from .chatgpt_oauth import get_valid_tokens, save_auth, refresh_tokens, load_auth
+                from .chatgpt_oauth import save_auth, refresh_tokens, load_auth
 
                 tokens = load_auth()
                 if tokens and tokens.refresh_token:

@@ -94,17 +94,35 @@ def extract_account_id(access_token: str) -> str:
 # Secure token storage via OS keychain
 # ---------------------------------------------------------------------------
 
-def save_auth(tokens: AuthTokens) -> None:
+_NO_KEYRING_MSG = (
+    "No OS keychain backend available. On Linux, install one of: "
+    "gnome-keyring, kwallet, or secretstorage. On headless servers, "
+    "use an API key provider instead of chatgpt."
+)
+
+
+def _safe_keyring_call(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Wrap a keyring operation with user-friendly error handling."""
     _require_keyring()
-    keyring.set_password(
-        _KEYRING_SERVICE, _KEYRING_USERNAME, json.dumps(tokens.to_dict())
+    try:
+        return fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        exc_name = type(exc).__name__
+        if "NoKeyringError" in exc_name or "InitError" in exc_name:
+            raise RuntimeError(_NO_KEYRING_MSG) from exc
+        raise
+
+
+def save_auth(tokens: AuthTokens) -> None:
+    _safe_keyring_call(
+        keyring.set_password,
+        _KEYRING_SERVICE, _KEYRING_USERNAME, json.dumps(tokens.to_dict()),
     )
     logger.debug("Saved auth tokens to OS keychain")
 
 
 def load_auth() -> AuthTokens | None:
-    _require_keyring()
-    raw = keyring.get_password(_KEYRING_SERVICE, _KEYRING_USERNAME)
+    raw = _safe_keyring_call(keyring.get_password, _KEYRING_SERVICE, _KEYRING_USERNAME)
     if not raw:
         return None
     try:
@@ -114,10 +132,9 @@ def load_auth() -> AuthTokens | None:
 
 
 def clear_auth() -> None:
-    _require_keyring()
     try:
-        keyring.delete_password(_KEYRING_SERVICE, _KEYRING_USERNAME)
-    except keyring.errors.PasswordDeleteError:
+        _safe_keyring_call(keyring.delete_password, _KEYRING_SERVICE, _KEYRING_USERNAME)
+    except (RuntimeError, keyring.errors.PasswordDeleteError):
         pass
 
 
@@ -260,7 +277,7 @@ class _OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
         else:
             self._send_html(
                 "<h1>Unknown Response</h1>"
-                "<p>No authorization code received.</p>"
+                "<p>No authorization code received. Waiting for valid callback...</p>"
             )
 
     def _send_html(self, body: str) -> None:
@@ -298,7 +315,13 @@ def run_oauth_flow(timeout: int = 120) -> AuthTokens:
     _OAuthCallbackHandler._event = threading.Event()
 
     port = int(urllib.parse.urlparse(REDIRECT_URI).port or 1455)
-    server = http.server.HTTPServer(("127.0.0.1", port), _OAuthCallbackHandler)
+    try:
+        server = http.server.HTTPServer(("127.0.0.1", port), _OAuthCallbackHandler)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Port {port} is already in use. Close the other process "
+            f"occupying it and try again: {exc}"
+        ) from exc
     server.timeout = timeout
 
     print(f"\nOpening browser for authentication...\n  {auth_url}\n")
@@ -307,7 +330,11 @@ def run_oauth_flow(timeout: int = 120) -> AuthTokens:
     import webbrowser
     webbrowser.open(auth_url)
 
-    thread = threading.Thread(target=lambda: server.handle_request(), daemon=True)
+    def _serve_until_done() -> None:
+        while not _OAuthCallbackHandler._event.is_set():
+            server.handle_request()
+
+    thread = threading.Thread(target=_serve_until_done, daemon=True)
     thread.start()
 
     if not _OAuthCallbackHandler._event.wait(timeout=timeout):

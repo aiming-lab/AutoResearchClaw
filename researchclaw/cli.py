@@ -498,9 +498,22 @@ _CHATGPT_TOS_DISCLAIMER = (
 
 def cmd_login(args: argparse.Namespace) -> int:
     """Authenticate with ChatGPT Plus/Pro subscription via browser OAuth."""
-    from researchclaw.llm.chatgpt_oauth import load_auth, run_oauth_flow
+    try:
+        from researchclaw.llm.chatgpt_oauth import load_auth, run_oauth_flow
+    except ImportError:
+        print(
+            "ChatGPT authentication requires the chatgpt extra.\n"
+            "Install it with: pip install 'researchclaw[chatgpt]'",
+            file=sys.stderr,
+        )
+        return 1
 
-    existing = load_auth()
+    try:
+        existing = load_auth()
+    except RuntimeError as exc:
+        print(f"Keychain error: {exc}", file=sys.stderr)
+        return 1
+
     if existing and not existing.expired:
         print("Already logged in with a valid ChatGPT session.")
         print(f"  Account: {existing.account_id or 'unknown'}")
@@ -519,7 +532,11 @@ def cmd_login(args: argparse.Namespace) -> int:
             print("Login cancelled.")
             return 1
 
-    tokens = run_oauth_flow()
+    try:
+        tokens = run_oauth_flow()
+    except RuntimeError as exc:
+        print(f"Login failed: {exc}", file=sys.stderr)
+        return 1
     print(f"\nLogged in successfully!")
     print(f"  Account: {tokens.account_id or 'unknown'}")
     print(f"  Tokens stored in OS keychain (service: researchclaw-chatgpt)")
@@ -528,7 +545,15 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 def cmd_logout(args: argparse.Namespace) -> int:
     """Clear stored ChatGPT authentication credentials."""
-    from researchclaw.llm.chatgpt_oauth import clear_auth
+    try:
+        from researchclaw.llm.chatgpt_oauth import clear_auth
+    except ImportError:
+        print(
+            "ChatGPT extras not installed.\n"
+            "Install with: pip install 'researchclaw[chatgpt]'",
+            file=sys.stderr,
+        )
+        return 1
 
     clear_auth()
     print("ChatGPT credentials cleared from OS keychain.")

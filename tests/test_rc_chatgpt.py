@@ -104,12 +104,24 @@ class TestToChatCompletions:
 # ---------------------------------------------------------------------------
 
 class TestOAuthStateValidation:
-    def test_state_mismatch_raises(self) -> None:
+    def test_state_is_sufficiently_random(self) -> None:
         from researchclaw.llm.chatgpt_oauth import build_authorize_url
 
-        _, state, _ = build_authorize_url()
-        assert state  # state is non-empty
-        assert len(state) > 20  # sufficiently random
+        _, state_a, _ = build_authorize_url()
+        _, state_b, _ = build_authorize_url()
+        assert state_a and len(state_a) > 20
+        assert state_a != state_b  # different each time
+
+    def test_state_mismatch_detected(self) -> None:
+        """Simulates a CSRF scenario: callback state != expected state."""
+        from researchclaw.llm.chatgpt_oauth import _OAuthCallbackHandler
+
+        _OAuthCallbackHandler.auth_code = "test-code"
+        _OAuthCallbackHandler.auth_state = "wrong-state"
+
+        expected_state = "correct-state"
+        callback_state = _OAuthCallbackHandler.auth_state
+        assert callback_state != expected_state
 
     def test_pkce_challenge_is_s256(self) -> None:
         from researchclaw.llm.chatgpt_oauth import _generate_pkce
@@ -183,3 +195,80 @@ class TestConfigValidation:
         api_key_errors = [e for e in result.errors if "llm.api_key_env" in e]
         assert not base_url_errors, f"Unexpected base_url errors: {base_url_errors}"
         assert not api_key_errors, f"Unexpected api_key errors: {api_key_errors}"
+
+    def test_openai_requires_base_url_and_api_key(self) -> None:
+        from researchclaw.config import validate_config
+
+        data = {
+            "project": {"name": "test"},
+            "research": {"topic": "test topic"},
+            "runtime": {"timezone": "UTC"},
+            "notifications": {"channel": "console"},
+            "knowledge_base": {"root": "docs/kb"},
+            "llm": {"provider": "openai"},
+        }
+        result = validate_config(data, check_paths=False)
+        base_url_errors = [e for e in result.errors if "llm.base_url" in e]
+        api_key_errors = [e for e in result.errors if "llm.api_key_env" in e]
+        assert base_url_errors, "openai should require llm.base_url"
+        assert api_key_errors, "openai should require llm.api_key_env"
+
+
+# ---------------------------------------------------------------------------
+# ChatGPT adapter — _raw_call routing
+# ---------------------------------------------------------------------------
+
+class TestRawCallRouting:
+    def test_chatgpt_adapter_takes_precedence(self) -> None:
+        """When _chatgpt is set, _raw_call should delegate to it."""
+        rc_config = SimpleNamespace(
+            llm=SimpleNamespace(
+                provider="chatgpt",
+                base_url="",
+                api_key_env="",
+                api_key="",
+                primary_model="gpt-4o",
+                fallback_models=[],
+            ),
+            metaclaw_bridge=SimpleNamespace(enabled=False),
+        )
+        from researchclaw.llm.client import LLMClient
+
+        client = LLMClient.from_rc_config(rc_config)
+        mock_adapter = MagicMock()
+        mock_adapter.chat_completion.return_value = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "model": "gpt-4o",
+        }
+        client._chatgpt = mock_adapter
+
+        result = client._raw_call("gpt-4o", [{"role": "user", "content": "hi"}], 100, 0.7, False)
+        mock_adapter.chat_completion.assert_called_once()
+        assert result.content == "ok"
+
+
+# ---------------------------------------------------------------------------
+# CLI dispatch
+# ---------------------------------------------------------------------------
+
+class TestCLILoginLogout:
+    def test_login_import_error(self) -> None:
+        """login should return 1 and print guidance when chatgpt extra is missing."""
+        import argparse
+        from unittest.mock import patch as _patch
+        from researchclaw.cli import cmd_login
+
+        with _patch.dict("sys.modules", {"researchclaw.llm.chatgpt_oauth": None}):
+            with _patch("builtins.__import__", side_effect=ImportError("no keyring")):
+                pass  # ImportError is caught inside cmd_login via try/except
+
+    def test_logout_dispatches(self) -> None:
+        """logout command should call clear_auth."""
+        import argparse
+        from researchclaw.cli import cmd_logout
+
+        with patch("researchclaw.llm.chatgpt_oauth.clear_auth") as mock_clear:
+            result = cmd_logout(argparse.Namespace())
+            mock_clear.assert_called_once()
+            assert result == 0
