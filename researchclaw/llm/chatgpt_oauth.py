@@ -81,8 +81,9 @@ def extract_account_id(access_token: str) -> str:
     """Decode the JWT payload to extract the account/subject ID."""
     try:
         payload_b64 = access_token.split(".")[1]
-        padding = 4 - len(payload_b64) % 4
-        payload_b64 += "=" * padding
+        padding = (-len(payload_b64)) % 4
+        if padding:
+            payload_b64 += "=" * padding
         payload = json.loads(base64.urlsafe_b64decode(payload_b64))
         return payload.get("sub", payload.get("account_id", ""))
     except Exception:  # noqa: BLE001
