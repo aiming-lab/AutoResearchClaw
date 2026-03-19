@@ -80,12 +80,15 @@ def _write_checkpoint(run_dir: Path, stage: Stage, run_id: str) -> None:
     }
     target = run_dir / "checkpoint.json"
     fd, tmp_path = tempfile.mkstemp(dir=run_dir, suffix=".tmp", prefix="checkpoint_")
-    os.close(fd)
     try:
-        with open(tmp_path, "w", encoding="utf-8") as fh:
+        with open(fd, "w", encoding="utf-8", closefd=True) as fh:
             fh.write(json.dumps(checkpoint, indent=2))
         Path(tmp_path).replace(target)
     except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         Path(tmp_path).unlink(missing_ok=True)
         raise
 

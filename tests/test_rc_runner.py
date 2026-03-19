@@ -752,6 +752,28 @@ def test_write_checkpoint_preserves_old_on_write_failure(
     assert list(run_dir.glob("checkpoint_*.tmp")) == []
 
 
+def test_write_checkpoint_preserves_old_on_rename_failure(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the final rename fails, the existing checkpoint must survive."""
+    rc_runner._write_checkpoint(run_dir, Stage.TOPIC_INIT, "run-ok")
+
+    original_replace = Path.replace
+
+    def _exploding_replace(self: Path, target: Path) -> Path:
+        if self.name.startswith("checkpoint_") and self.suffix == ".tmp":
+            raise OSError("rename failed")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", _exploding_replace)
+    with pytest.raises(OSError):
+        rc_runner._write_checkpoint(run_dir, Stage.PROBLEM_DECOMPOSE, "run-ok")
+
+    data = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    assert data["last_completed_stage"] == int(Stage.TOPIC_INIT)
+    assert list(run_dir.glob("checkpoint_*.tmp")) == []
+
+
 def test_write_checkpoint_overwrites_previous(run_dir: Path) -> None:
     """A second checkpoint call must fully replace the first"""
     rc_runner._write_checkpoint(run_dir, Stage.TOPIC_INIT, "run-1")
