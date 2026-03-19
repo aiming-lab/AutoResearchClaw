@@ -254,7 +254,7 @@ def test_cmd_init_copies_acp_block_from_example(
     assert code == 0
     content = (tmp_path / "config.arc.yaml").read_text(encoding="utf-8")
     assert 'provider: "openai"' in content
-    assert 'agent: "codex"' in content
+    assert 'agent: "claude"' in content
 
 
 def test_cmd_init_refuses_overwrite(

@@ -46,7 +46,7 @@ llm:
   # ACP mode lets a logged-in local coding agent handle auth and model routing.
   # Set llm.provider: "acp" to use this block instead of base_url/api_key_env.
   acp:
-    agent: "codex"
+    agent: "claude"
     cwd: "."
     acpx_command: ""
     session_name: "researchclaw"
