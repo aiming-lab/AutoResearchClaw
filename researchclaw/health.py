@@ -148,8 +148,16 @@ def check_config_valid(config_path: str | Path) -> CheckResult:
     )
 
 
-def _models_url(base_url: str) -> str:
-    return f"{base_url.rstrip('/')}/models"
+def _endpoint_url(base_url: str, path: str) -> str:
+    clean_base = base_url.rstrip("/")
+    clean_path = path.strip() or "/"
+    if not clean_path.startswith("/"):
+        clean_path = f"/{clean_path}"
+    return f"{clean_base}{clean_path}"
+
+
+def _models_url(base_url: str, models_path: str = "/models") -> str:
+    return _endpoint_url(base_url, models_path)
 
 
 def _is_timeout(exc: BaseException) -> bool:
@@ -161,7 +169,77 @@ def _is_timeout(exc: BaseException) -> bool:
     return isinstance(reason, (TimeoutError, socket.timeout))
 
 
-def check_llm_connectivity(base_url: str) -> CheckResult:
+def _probe_chat_endpoint(
+    url: str, api_key: str = "", timeout: int = 5
+) -> CheckResult | None:
+    payload = json.dumps(
+        {
+            "model": "healthcheck",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0,
+        }
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "ResearchClaw-Doctor/1.0",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return CheckResult(
+                name="llm_connectivity",
+                status="pass",
+                detail=f"Reachable: {url}",
+            )
+    except urllib.error.HTTPError as exc:
+        if exc.code in (400, 401, 403):
+            return CheckResult(
+                name="llm_connectivity",
+                status="pass",
+                detail=f"Reachable: {url} (HTTP {exc.code})",
+            )
+        if exc.code == 404:
+            return CheckResult(
+                name="llm_connectivity",
+                status="fail",
+                detail=f"LLM endpoint HTTP {exc.code}",
+                fix="Check llm.base_url and provider status",
+            )
+        return CheckResult(
+            name="llm_connectivity",
+            status="fail",
+            detail=f"LLM endpoint HTTP {exc.code}",
+            fix="Check llm.base_url and provider status",
+        )
+    except urllib.error.URLError as exc:
+        if _is_timeout(exc):
+            return CheckResult(
+                name="llm_connectivity",
+                status="fail",
+                detail="LLM endpoint unreachable",
+                fix="Verify endpoint URL and network connectivity",
+            )
+        return CheckResult(
+            name="llm_connectivity",
+            status="fail",
+            detail=f"LLM connectivity error: {exc.reason}",
+            fix="Verify endpoint URL and network connectivity",
+        )
+    except TimeoutError:
+        return CheckResult(
+            name="llm_connectivity",
+            status="fail",
+            detail="LLM endpoint unreachable",
+            fix="Verify endpoint URL and network connectivity",
+        )
+
+
+def check_llm_connectivity(
+    base_url: str, endpoint_path: str = "/chat/completions", api_key: str = ""
+) -> CheckResult:
     if not base_url.strip():
         return CheckResult(
             name="llm_connectivity",
@@ -170,7 +248,7 @@ def check_llm_connectivity(base_url: str) -> CheckResult:
             fix="Set llm.base_url in config",
         )
 
-    url = _models_url(base_url)
+    url = _endpoint_url(base_url, endpoint_path)
     req = urllib.request.Request(url, method="HEAD")
 
     try:
@@ -181,42 +259,10 @@ def check_llm_connectivity(base_url: str) -> CheckResult:
                 detail=f"Reachable: {url}",
             )
     except urllib.error.HTTPError as exc:
-        if exc.code == 405:
-            try:
-                with urllib.request.urlopen(url, timeout=5):
-                    return CheckResult(
-                        name="llm_connectivity",
-                        status="pass",
-                        detail=f"Reachable: {url}",
-                    )
-            except urllib.error.HTTPError as get_exc:
-                return CheckResult(
-                    name="llm_connectivity",
-                    status="fail",
-                    detail=f"LLM endpoint HTTP {get_exc.code}",
-                    fix="Check llm.base_url and provider status",
-                )
-            except urllib.error.URLError as get_exc:
-                if _is_timeout(get_exc):
-                    return CheckResult(
-                        name="llm_connectivity",
-                        status="fail",
-                        detail="LLM endpoint unreachable",
-                        fix="Verify endpoint URL and network connectivity",
-                    )
-                return CheckResult(
-                    name="llm_connectivity",
-                    status="fail",
-                    detail=f"LLM connectivity error: {get_exc.reason}",
-                    fix="Verify endpoint URL and network connectivity",
-                )
-            except TimeoutError:
-                return CheckResult(
-                    name="llm_connectivity",
-                    status="fail",
-                    detail="LLM endpoint unreachable",
-                    fix="Verify endpoint URL and network connectivity",
-                )
+        if exc.code in (404, 405) and endpoint_path.strip():
+            probed = _probe_chat_endpoint(url, api_key=api_key, timeout=5)
+            if probed is not None:
+                return probed
 
         return CheckResult(
             name="llm_connectivity",
@@ -247,11 +293,15 @@ def check_llm_connectivity(base_url: str) -> CheckResult:
         )
 
 
-def _fetch_models(base_url: str, api_key: str = "") -> tuple[int, dict[str, object]]:
+def _fetch_models(
+    base_url: str, api_key: str = "", models_path: str = "/models"
+) -> tuple[int, dict[str, object]]:
+    if not models_path.strip():
+        raise ValueError("models_path is empty")
     headers: dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    request = urllib.request.Request(_models_url(base_url), headers=headers)
+    request = urllib.request.Request(_models_url(base_url, models_path), headers=headers)
     with _urlopen(request, timeout=5) as response:
         raw_bytes = _read_response_bytes(response)
         payload_map = _load_json_mapping(raw_bytes.decode("utf-8") or "{}")
@@ -289,7 +339,16 @@ def _load_json_mapping(content: str) -> Mapping[object, object]:
     return cast(Mapping[object, object], payload_obj)
 
 
-def check_api_key_valid(base_url: str, api_key: str) -> CheckResult:
+def check_api_key_valid(
+    base_url: str, api_key: str, models_path: str = "/models"
+) -> CheckResult:
+    if not models_path.strip():
+        return CheckResult(
+            name="api_key_valid",
+            status="warn",
+            detail="Skipped API key verification: llm.models_path is empty",
+            fix="Set llm.models_path if your provider supports model listing",
+        )
     if not api_key.strip():
         return CheckResult(
             name="api_key_valid",
@@ -299,7 +358,7 @@ def check_api_key_valid(base_url: str, api_key: str) -> CheckResult:
         )
 
     try:
-        status, _ = _fetch_models(base_url, api_key)
+        status, _ = _fetch_models(base_url, api_key, models_path)
         if status == 200:
             return CheckResult(
                 name="api_key_valid",
@@ -343,9 +402,18 @@ def check_api_key_valid(base_url: str, api_key: str) -> CheckResult:
     )
 
 
-def check_model_available(base_url: str, api_key: str, model: str) -> CheckResult:
+def check_model_available(
+    base_url: str, api_key: str, model: str, models_path: str = "/models"
+) -> CheckResult:
     """Check if a single model is available (kept for backward compat)."""
-    results = _check_models_against_endpoint(base_url, api_key, [model])
+    if not models_path.strip():
+        return CheckResult(
+            name="model_available",
+            status="warn",
+            detail="Skipped model availability check: llm.models_path is empty",
+            fix="Set llm.models_path if your provider supports model listing",
+        )
+    results = _check_models_against_endpoint(base_url, api_key, [model], models_path)
     if results is None:
         return CheckResult(
             name="model_available",
@@ -373,8 +441,16 @@ def check_model_chain(
     api_key: str,
     primary_model: str,
     fallback_models: tuple[str, ...] | list[str] = (),
+    models_path: str = "/models",
 ) -> CheckResult:
     """Check the full model fallback chain — pass if ANY model works."""
+    if not models_path.strip():
+        return CheckResult(
+            name="model_chain",
+            status="warn",
+            detail="Skipped model chain check: llm.models_path is empty",
+            fix="Set llm.models_path if your provider supports model listing",
+        )
     all_models = [m for m in [primary_model] + list(fallback_models) if m.strip()]
     if not all_models:
         return CheckResult(
@@ -384,7 +460,9 @@ def check_model_chain(
             fix="Set llm.primary_model in config",
         )
 
-    results = _check_models_against_endpoint(base_url, api_key, all_models)
+    results = _check_models_against_endpoint(
+        base_url, api_key, all_models, models_path
+    )
     if results is None:
         return CheckResult(
             name="model_chain",
@@ -421,7 +499,10 @@ def check_model_chain(
 
 
 def _check_models_against_endpoint(
-    base_url: str, api_key: str, models: list[str]
+    base_url: str,
+    api_key: str,
+    models: list[str],
+    models_path: str = "/models",
 ) -> tuple[set[str], set[str]] | None:
     """Return (available, missing) sets, or None if endpoint unreachable."""
     if not models or not all(m.strip() for m in models):
@@ -430,7 +511,7 @@ def _check_models_against_endpoint(
         return set(), set()
 
     try:
-        _, payload = _fetch_models(base_url, api_key)
+        _, payload = _fetch_models(base_url, api_key, models_path)
     except (
         urllib.error.HTTPError,
         urllib.error.URLError,
@@ -571,6 +652,8 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
     api_key = ""
     model = ""
     fallback_models: tuple[str, ...] = ()
+    chat_path = "/chat/completions"
+    models_path = "/models"
     sandbox_python_path = ""
     experiment_mode = ""
     provider = ""
@@ -583,6 +666,8 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
         api_key = config.llm.api_key or os.environ.get(config.llm.api_key_env, "")
         model = config.llm.primary_model
         fallback_models = config.llm.fallback_models
+        chat_path = config.llm.chat_path
+        models_path = config.llm.models_path
         sandbox_python_path = config.experiment.sandbox.python_path
         experiment_mode = config.experiment.mode
         acp_agent_command = config.llm.acp.agent
@@ -592,9 +677,11 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
     if provider == "acp":
         checks.append(check_acp_agent(acp_agent_command))
     else:
-        checks.append(check_llm_connectivity(base_url))
-        checks.append(check_api_key_valid(base_url, api_key))
-        checks.append(check_model_chain(base_url, api_key, model, fallback_models))
+        checks.append(check_llm_connectivity(base_url, chat_path, api_key))
+        checks.append(check_api_key_valid(base_url, api_key, models_path))
+        checks.append(
+            check_model_chain(base_url, api_key, model, fallback_models, models_path)
+        )
     checks.append(check_sandbox_python(sandbox_python_path))
     checks.append(check_matplotlib())
     checks.append(check_experiment_mode(experiment_mode))

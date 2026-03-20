@@ -167,6 +167,8 @@ class AcpConfig:
 class LlmConfig:
     provider: str
     base_url: str = ""
+    chat_path: str = "/chat/completions"
+    models_path: str = "/models"
     api_key_env: str = ""
     api_key: str = ""
     primary_model: str = ""
@@ -647,6 +649,8 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
     return LlmConfig(
         provider=data.get("provider", "openai-compatible"),
         base_url=data.get("base_url", ""),
+        chat_path=data.get("chat_path", "/chat/completions"),
+        models_path=data.get("models_path", "/models"),
         api_key_env=data.get("api_key_env", ""),
         api_key=data.get("api_key", ""),
         primary_model=data.get("primary_model", ""),

@@ -138,6 +138,58 @@ def test_check_llm_connectivity_http_error() -> None:
     assert "503" in result.detail
 
 
+def test_check_llm_connectivity_chat_probe_turns_head_404_into_pass() -> None:
+    calls: list[object] = []
+
+    def fake_urlopen(req: object, timeout: int) -> _DummyHTTPResponse:
+        calls.append(req)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                "https://qianfan.baidubce.com/v2/coding/chat/completions",
+                404,
+                "not found",
+                {},
+                None,
+            )
+        raise urllib.error.HTTPError(
+            "https://qianfan.baidubce.com/v2/coding/chat/completions",
+            400,
+            "bad request",
+            {},
+            None,
+        )
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        result = health.check_llm_connectivity(
+            "https://qianfan.baidubce.com/v2/coding",
+            "/chat/completions",
+            "sk-test",
+        )
+
+    assert result.status == "pass"
+    assert "Reachable" in result.detail
+
+
+def test_check_llm_connectivity_uses_configured_endpoint_path() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(req: object, timeout: int) -> _DummyHTTPResponse:
+        captured["req"] = req
+        return _DummyHTTPResponse(status=200)
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        result = health.check_llm_connectivity(
+            "https://qianfan.baidubce.com/v2/coding", "/custom/chat"
+        )
+
+    assert result.status == "pass"
+    req = captured["req"]
+    if isinstance(req, str):
+        assert req == "https://qianfan.baidubce.com/v2/coding/custom/chat"
+    else:
+        assert getattr(req, "full_url") == "https://qianfan.baidubce.com/v2/coding/custom/chat"
+
+
 def test_check_api_key_valid() -> None:
     with patch(
         "urllib.request.urlopen",
@@ -224,6 +276,42 @@ def test_check_model_chain_all_missing() -> None:
         )
     assert result.status == "fail"
     assert "No models available" in result.detail
+
+
+def test_fetch_models_uses_configured_models_path() -> None:
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(req: object, timeout: int) -> _DummyHTTPResponse:
+        captured["req"] = req
+        return _DummyHTTPResponse(status=200, payload={"data": []})
+
+    with patch("researchclaw.health._urlopen", side_effect=fake_urlopen):
+        status, payload = health._fetch_models(
+            "https://qianfan.baidubce.com/v2/coding",
+            "sk-test",
+            "/custom/models",
+        )
+
+    assert status == 200
+    assert payload == {"data": []}
+    req = captured["req"]
+    assert getattr(req, "full_url") == "https://qianfan.baidubce.com/v2/coding/custom/models"
+
+
+def test_check_api_key_valid_skips_when_models_path_empty() -> None:
+    result = health.check_api_key_valid(
+        "https://qianfan.baidubce.com/v2/coding", "sk-test", ""
+    )
+    assert result.status == "warn"
+    assert "Skipped API key verification" in result.detail
+
+
+def test_check_model_chain_skips_when_models_path_empty() -> None:
+    result = health.check_model_chain(
+        "https://qianfan.baidubce.com/v2/coding", "sk-test", "kimi-k2.5", (), ""
+    )
+    assert result.status == "warn"
+    assert "Skipped model chain check" in result.detail
 
 
 def test_check_model_chain_no_models() -> None:

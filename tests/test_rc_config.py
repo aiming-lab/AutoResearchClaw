@@ -83,6 +83,8 @@ def _valid_config_data() -> dict[str, dict[str, object]]:
         "llm": {
             "provider": "openai-compatible",
             "base_url": "https://example.invalid/v1",
+            "chat_path": "/chat/completions",
+            "models_path": "/models",
             "api_key_env": "OPENAI_API_KEY",
             "primary_model": "gpt-4.1",
             "fallback_models": ["gpt-4o-mini", "gpt-4o"],
@@ -204,6 +206,8 @@ def test_rcconfig_from_dict_happy_path(tmp_path: Path):
     assert isinstance(config, RCConfig)
     assert config.project.name == "demo"
     assert config.research.domains == ("ml", "agents")
+    assert config.llm.chat_path == "/chat/completions"
+    assert config.llm.models_path == "/models"
     assert config.llm.fallback_models == ("gpt-4o-mini", "gpt-4o")
 
 

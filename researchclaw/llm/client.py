@@ -61,6 +61,8 @@ class LLMConfig:
 
     base_url: str
     api_key: str
+    chat_path: str = "/chat/completions"
+    models_path: str = "/models"
     primary_model: str = "gpt-4o"
     fallback_models: list[str] = field(
         default_factory=lambda: ["gpt-4.1", "gpt-4o-mini"]
@@ -85,6 +87,14 @@ class LLMClient:
         self.config = config
         self._model_chain = [config.primary_model] + list(config.fallback_models)
         self._anthropic = None  # Will be set by from_rc_config if needed
+
+    @staticmethod
+    def _build_endpoint_url(base_url: str, path: str) -> str:
+        clean_base = base_url.rstrip("/")
+        clean_path = path.strip() or "/"
+        if not clean_path.startswith("/"):
+            clean_path = f"/{clean_path}"
+        return f"{clean_base}{clean_path}"
 
     @classmethod
     def from_rc_config(cls, rc_config: Any) -> LLMClient:
@@ -126,6 +136,8 @@ class LLMClient:
         config = LLMConfig(
             base_url=base_url,
             api_key=api_key,
+            chat_path=getattr(rc_config.llm, "chat_path", "/chat/completions"),
+            models_path=getattr(rc_config.llm, "models_path", "/models"),
             primary_model=rc_config.llm.primary_model or "gpt-4o",
             fallback_models=list(rc_config.llm.fallback_models or []),
             fallback_url=fallback_url,
@@ -379,7 +391,9 @@ class LLMClient:
                     body["response_format"] = {"type": "json_object"}
 
             payload = json.dumps(body).encode("utf-8")
-            url = f"{self.config.base_url.rstrip('/')}/chat/completions"
+            url = self._build_endpoint_url(
+                self.config.base_url, self.config.chat_path
+            )
 
             headers = {
                 "Authorization": f"Bearer {self.config.api_key}",
@@ -402,8 +416,8 @@ class LLMClient:
                         self.config.fallback_url,
                         exc,
                     )
-                    fallback_url = (
-                        f"{self.config.fallback_url.rstrip('/')}/chat/completions"
+                    fallback_url = self._build_endpoint_url(
+                        self.config.fallback_url, self.config.chat_path
                     )
                     fallback_key = self.config.fallback_api_key or self.config.api_key
                     fallback_headers = {
@@ -480,6 +494,8 @@ def create_client_from_yaml(yaml_path: str | None = None) -> LLMClient:
         LLMConfig(
             base_url=llm_section.get("base_url", "https://api.openai.com/v1"),
             api_key=api_key,
+            chat_path=llm_section.get("chat_path", "/chat/completions"),
+            models_path=llm_section.get("models_path", "/models"),
             primary_model=llm_section.get("primary_model", "gpt-4o"),
             fallback_models=llm_section.get(
                 "fallback_models", ["gpt-4.1", "gpt-4o-mini"]
