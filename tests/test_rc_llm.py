@@ -76,6 +76,8 @@ def test_llm_config_custom_values():
     config = LLMConfig(
         base_url="https://custom.example/v1",
         api_key="custom",
+        chat_path="/custom/chat",
+        models_path="/custom/models",
         primary_model="o3",
         fallback_models=["o3-mini"],
         max_tokens=2048,
@@ -84,6 +86,8 @@ def test_llm_config_custom_values():
     )
     assert config.primary_model == "o3"
     assert config.fallback_models == ["o3-mini"]
+    assert config.chat_path == "/custom/chat"
+    assert config.models_path == "/custom/models"
     assert config.max_tokens == 2048
     assert config.temperature == 0.1
     assert config.timeout_sec == 30
@@ -203,6 +207,8 @@ def test_from_rc_config_builds_expected_llm_config():
     rc_config = SimpleNamespace(
         llm=SimpleNamespace(
             base_url="https://proxy.example/v1",
+            chat_path="/custom/chat",
+            models_path="/custom/models",
             api_key="inline-key",
             api_key_env="OPENAI_API_KEY",
             primary_model="o3",
@@ -211,6 +217,8 @@ def test_from_rc_config_builds_expected_llm_config():
     )
     client = LLMClient.from_rc_config(rc_config)
     assert client.config.base_url == "https://proxy.example/v1"
+    assert client.config.chat_path == "/custom/chat"
+    assert client.config.models_path == "/custom/models"
     assert client.config.api_key == "inline-key"
     assert client.config.primary_model == "o3"
     assert client.config.fallback_models == ["o3-mini", "gpt-4o"]
@@ -257,6 +265,30 @@ def test_raw_call_adds_json_mode_response_format(monkeypatch: pytest.MonkeyPatch
     body = json.loads(data.decode("utf-8"))
     assert isinstance(body, dict)
     assert body["response_format"] == {"type": "json_object"}
+
+
+def test_raw_call_uses_configured_chat_path(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(req: urllib.request.Request, timeout: int) -> _DummyHTTPResponse:
+        captured["request"] = req
+        return _DummyHTTPResponse({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = LLMClient(
+        LLMConfig(
+            base_url="https://qianfan.baidubce.com/v2/coding",
+            api_key="k",
+            chat_path="/chat/completions",
+        )
+    )
+    _ = client._raw_call(
+        "gpt-4o", [{"role": "user", "content": "hello"}], 32, 0.2, False
+    )
+
+    request = captured["request"]
+    assert isinstance(request, urllib.request.Request)
+    assert request.full_url == "https://qianfan.baidubce.com/v2/coding/chat/completions"
 
 
 def test_raw_call_sets_auth_and_user_agent_headers(monkeypatch: pytest.MonkeyPatch):

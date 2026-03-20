@@ -36,13 +36,18 @@ openclaw_bridge:
 
 llm:
   provider: "openai-compatible"
-  base_url: "https://api.openai.com/v1"
+  base_url: "https://qianfan.baidubce.com/v2/coding/v1"
+  # Optional endpoint overrides for non-standard OpenAI-compatible providers.
+  # Example for Baidu Qianfan if /v1 is not part of the chat route:
+  # base_url: "https://qianfan.baidubce.com/v2/coding"
+  # chat_path: "/chat/completions"
+  # models_path: "/models"
   api_key_env: "OPENAI_API_KEY"
-  api_key: ""
-  primary_model: "gpt-4o"
+  api_key: "bce-v3/ALTAKSP-vfQGGLDQPx8x2EAtax0Ge/72fdba93329a4e971abfc3e506bdd024c25af10f"
+  primary_model: "kimi-k2.5"
   fallback_models:
-    - "gpt-4.1"
-    - "gpt-4o-mini"
+    - "glm-5"
+    - "minimax-m2.5"
   # --- MiniMax provider example ---
   # provider: "minimax"
   # api_key_env: "MINIMAX_API_KEY"
