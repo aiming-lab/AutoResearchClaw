@@ -284,6 +284,7 @@ class DockerSandbox:
             stdout = completed.stdout
             stderr = completed.stderr
             returncode = completed.returncode
+            elapsed = time.monotonic() - start
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             stdout = exc.stdout or ""
@@ -295,6 +296,7 @@ class DockerSandbox:
             returncode = -1
             # Force-kill the container on timeout
             self._kill_container(container_name)
+            elapsed = time.monotonic() - start
         except Exception as exc:  # noqa: BLE001
             elapsed = time.monotonic() - start
             return SandboxResult(
@@ -304,12 +306,12 @@ class DockerSandbox:
                 elapsed_sec=elapsed,
                 metrics={},
             )
-
-        elapsed = time.monotonic() - start
-
-        # Cleanup container (unless keep_containers is set)
-        if not cfg.keep_containers:
-            self._remove_container(container_name)
+        finally:
+            # Always clean up the container regardless of how we exit.
+            # docker rm -f is idempotent: safe even if container was
+            # already removed by --rm, already dead, or never created.
+            if not cfg.keep_containers:
+                self._remove_container(container_name)
 
         # Parse metrics from stdout
         metrics = parse_metrics(stdout)
