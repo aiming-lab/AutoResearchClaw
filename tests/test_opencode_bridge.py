@@ -129,11 +129,17 @@ class TestOpenCodeBridge:
     """Tests for the OpenCode bridge class."""
 
     def test_check_available_returns_false_when_not_installed(self):
-        with patch("shutil.which", return_value=None):
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value=None,
+        ):
             assert OpenCodeBridge.check_available() is False
 
     def test_check_available_returns_false_on_timeout(self):
-        with patch("shutil.which", return_value="/usr/bin/opencode"), patch(
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value=r"C:\Users\tester\AppData\Roaming\npm\opencode.cmd",
+        ), patch(
             "researchclaw.pipeline.opencode_bridge.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="opencode", timeout=15),
         ):
@@ -142,11 +148,15 @@ class TestOpenCodeBridge:
     def test_check_available_returns_true(self):
         mock_result = MagicMock()
         mock_result.returncode = 0
-        with patch("shutil.which", return_value="/usr/bin/opencode"), patch(
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value=r"C:\Users\tester\AppData\Roaming\npm\opencode.cmd",
+        ), patch(
             "researchclaw.pipeline.opencode_bridge.subprocess.run",
             return_value=mock_result,
-        ):
+        ) as run_mock:
             assert OpenCodeBridge.check_available() is True
+        assert run_mock.call_args.args[0][0].endswith("opencode.cmd")
 
     def test_workspace_creates_correct_files(self, tmp_path):
         bridge = OpenCodeBridge(
@@ -353,6 +363,25 @@ class TestOpenCodeBridge:
         assert result.success
         assert "main.py" in result.files
         assert result.elapsed_sec == 5.0
+
+    def test_invoke_opencode_uses_resolved_path(self, tmp_path):
+        bridge = OpenCodeBridge(model="gpt-5.2", timeout_sec=10)
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "{}"
+        mock_result.stderr = ""
+
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value=r"C:\Users\tester\AppData\Roaming\npm\opencode.cmd",
+        ), patch(
+            "researchclaw.pipeline.opencode_bridge.subprocess.run",
+            return_value=mock_result,
+        ) as run_mock:
+            success, _log, _elapsed = bridge._invoke_opencode(tmp_path, "test prompt")
+
+        assert success is True
+        assert run_mock.call_args.args[0][0].endswith("opencode.cmd")
 
 
 # ============================================================
