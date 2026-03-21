@@ -291,6 +291,8 @@ class ACPClient:
                  self.config.agent, "-s", self.config.session_name,
                  prompt],
                 capture_output=True, text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self.config.timeout_sec,
             )
         except subprocess.TimeoutExpired as exc:
@@ -301,6 +303,14 @@ class ACPClient:
         if result.returncode != 0:
             stderr = result.stderr.strip()
             raise RuntimeError(f"ACP prompt failed (exit {result.returncode}): {stderr}")
+        
+        if result.stderr:
+            print("ACP STDERR:", result.stderr[:4000])
+
+        if result.stdout is None:
+            raise RuntimeError(
+                f"ACP returned no stdout. stderr={result.stderr[:2000] if result.stderr else '<empty>'}"
+            )
 
         return self._extract_response(result.stdout)
 
@@ -326,6 +336,8 @@ class ACPClient:
                      self.config.agent, "-s", self.config.session_name,
                      short_prompt],
                     capture_output=True, text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=self.config.timeout_sec,
                 )
             except subprocess.TimeoutExpired as exc:
@@ -337,6 +349,14 @@ class ACPClient:
                 stderr = result.stderr.strip()
                 raise RuntimeError(
                     f"ACP prompt failed (exit {result.returncode}): {stderr}"
+                )
+            
+            if result.stderr:
+                print("ACP STDERR:", result.stderr[:4000])
+
+            if result.stdout is None:
+                raise RuntimeError(
+                    f"ACP returned no stdout. stderr={result.stderr[:2000] if result.stderr else '<empty>'}"
                 )
 
             return self._extract_response(result.stdout)
@@ -354,6 +374,8 @@ class ACPClient:
         and their continuation lines (indented or sub-field lines like
         ``input:``, ``output:``, ``files:``, ``kind:``).
         """
+        if raw_output is None:
+            raise RuntimeError("ACP subprocess returned no stdout. Check stderr and subprocess encoding.")
         lines: list[str] = []
         in_tool_block = False
         for line in raw_output.splitlines():
