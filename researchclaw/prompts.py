@@ -527,7 +527,7 @@ _DEFAULT_BLOCKS: dict[str, str] = {
         "```python\n"
         "import json\n"
         "results = {'hyperparameters': HYPERPARAMETERS, 'metrics': collected_metrics}\n"
-        "with open('results.json', 'w') as f:\n"
+        "with open('results.json', 'w', encoding='utf-8') as f:\n"
         "    json.dump(results, f, indent=2)\n"
         "```\n"
         "EVERY hyperparameter must be used in the code — no dead parameters.\n"
