@@ -133,9 +133,9 @@ class LLMClient:
         )
         client = cls(config)
 
-        # Detect Anthropic provider — use original URL/key (not the
+        # Detect Anthropic or Kimi-Anthropic provider — use original URL/key (not the
         # MetaClaw proxy URL which is OpenAI-compatible only).
-        if provider == "anthropic":
+        if provider in ("anthropic", "kimi-anthropic"):
             from .anthropic_adapter import AnthropicAdapter
 
             client._anthropic = AnthropicAdapter(
