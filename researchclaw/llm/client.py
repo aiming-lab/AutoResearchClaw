@@ -35,6 +35,8 @@ _NEW_PARAM_MODELS = frozenset(
     }
 )
 
+_NO_TEMPERATURE_MODELS = _NEW_PARAM_MODELS
+
 _DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -61,6 +63,7 @@ class LLMConfig:
 
     base_url: str
     api_key: str
+    wire_api: str = "chat_completions"
     primary_model: str = "gpt-4o"
     fallback_models: list[str] = field(
         default_factory=lambda: ["gpt-4.1", "gpt-4o-mini"]
@@ -86,6 +89,27 @@ class LLMClient:
         self._model_chain = [config.primary_model] + list(config.fallback_models)
         self._anthropic = None  # Will be set by from_rc_config if needed
 
+    @staticmethod
+    def _normalize_wire_api(wire_api: str) -> str:
+        normalized = (wire_api or "").strip().lower().replace("-", "_")
+        if normalized in ("", "chat/completions", "chat_completions"):
+            return "chat_completions"
+        if normalized == "responses":
+            return "responses"
+        return normalized
+
+    def _endpoint_path(self) -> str:
+        if self._normalize_wire_api(self.config.wire_api) == "responses":
+            return "/responses"
+        return "/chat/completions"
+
+    def _endpoint_url(self, base_url: str) -> str:
+        return f"{base_url.rstrip('/')}{self._endpoint_path()}"
+
+    @staticmethod
+    def _supports_temperature(model: str) -> bool:
+        return not any(model.startswith(prefix) for prefix in _NO_TEMPERATURE_MODELS)
+
     @classmethod
     def from_rc_config(cls, rc_config: Any) -> LLMClient:
         from researchclaw.llm import PROVIDER_PRESETS
@@ -95,9 +119,7 @@ class LLMClient:
         preset_base_url = preset.get("base_url")
 
         api_key = str(
-            rc_config.llm.api_key
-            or os.environ.get(rc_config.llm.api_key_env, "")
-            or ""
+            rc_config.llm.api_key or os.environ.get(rc_config.llm.api_key_env, "") or ""
         )
 
         # Use preset base_url if available and config doesn't override
@@ -126,6 +148,7 @@ class LLMClient:
         config = LLMConfig(
             base_url=base_url,
             api_key=api_key,
+            wire_api=getattr(rc_config.llm, "wire_api", "chat_completions"),
             primary_model=rc_config.llm.primary_model or "gpt-4o",
             fallback_models=list(rc_config.llm.fallback_models or []),
             fallback_url=fallback_url,
@@ -186,6 +209,7 @@ class LLMClient:
                 resp = self._call_with_retry(m, messages, max_tok, temp, json_mode)
                 if strip_thinking:
                     from researchclaw.utils.thinking_tags import strip_thinking_tags
+
                     resp = LLMResponse(
                         content=strip_thinking_tags(resp.content),
                         model=resp.model,
@@ -227,7 +251,7 @@ class LLMClient:
             status_map = {
                 401: "Invalid API key",
                 403: f"Model {self.config.primary_model} not allowed for this key",
-                404: f"Endpoint not found: {self.config.base_url}",
+                404: f"Endpoint not found: {self._endpoint_url(self.config.base_url)}",
                 429: "Rate limited - try again in a moment",
             }
             msg = status_map.get(e.code, f"HTTP {e.code}")
@@ -241,7 +265,7 @@ class LLMClient:
                 status_map = {
                     401: "Invalid API key",
                     403: f"Model {self.config.primary_model} not allowed for this key",
-                    404: f"Endpoint not found: {self.config.base_url}",
+                    404: f"Endpoint not found: {self._endpoint_url(self.config.base_url)}",
                     429: "Rate limited - try again in a moment",
                 }
                 msg = status_map.get(cause.code, f"HTTP {cause.code}")
@@ -280,9 +304,16 @@ class LLMClient:
                 if status == 400:
                     _transient_400 = any(
                         kw in body.lower()
-                        for kw in ("rate limit", "ratelimit", "overloaded",
-                                   "temporarily", "capacity", "throttl",
-                                   "too many", "retry")
+                        for kw in (
+                            "rate limit",
+                            "ratelimit",
+                            "overloaded",
+                            "temporarily",
+                            "capacity",
+                            "throttl",
+                            "too many",
+                            "retry",
+                        )
                     )
                     if not _transient_400:
                         raise  # Genuine bad request — don't retry
@@ -328,10 +359,12 @@ class LLMClient:
         json_mode: bool,
     ) -> LLMResponse:
         """Make a single API call."""
-        
+
         # Use Anthropic adapter if configured
         if self._anthropic:
-            data = self._anthropic.chat_completion(model, messages, max_tokens, temperature, json_mode)
+            data = self._anthropic.chat_completion(
+                model, messages, max_tokens, temperature, json_mode
+            )
         else:
             # Original OpenAI logic
             # Copy messages to avoid mutating the caller's list (important for
@@ -344,42 +377,45 @@ class LLMClient:
             if "api.minimax.io" in self.config.base_url:
                 _temp = max(0.0, min(_temp, 1.0))
 
-            body: dict[str, Any] = {
-                "model": model,
-                "messages": msgs,
-                "temperature": _temp,
-            }
-
-            # Use correct token parameter based on model
-            if any(model.startswith(prefix) for prefix in _NEW_PARAM_MODELS):
-                reasoning_min = 32768
-                body["max_completion_tokens"] = max(max_tokens, reasoning_min)
+            if self._normalize_wire_api(self.config.wire_api) == "responses":
+                body = self._build_responses_body(model, msgs, max_tokens, _temp)
             else:
-                body["max_tokens"] = max_tokens
+                body = {
+                    "model": model,
+                    "messages": msgs,
+                }
+                if self._supports_temperature(model):
+                    body["temperature"] = _temp
+
+                # Use correct token parameter based on model
+                if any(model.startswith(prefix) for prefix in _NEW_PARAM_MODELS):
+                    reasoning_min = 32768
+                    body["max_completion_tokens"] = max(max_tokens, reasoning_min)
+                else:
+                    body["max_tokens"] = max_tokens
 
             if json_mode:
                 # Many OpenAI-compatible proxies serving Claude models don't
                 # support the response_format parameter and return HTTP 400.
                 # Fall back to a system-prompt injection for non-OpenAI models.
-                if model.startswith("claude"):
+                if (
+                    model.startswith("claude")
+                    or self._normalize_wire_api(self.config.wire_api) == "responses"
+                ):
                     _json_hint = (
                         "You MUST respond with valid JSON only. "
                         "Do not include any text outside the JSON object."
                     )
                     # Prepend to existing system message or add as new one
                     if msgs and msgs[0]["role"] == "system":
-                        msgs[0]["content"] = (
-                            _json_hint + "\n\n" + msgs[0]["content"]
-                        )
+                        msgs[0]["content"] = _json_hint + "\n\n" + msgs[0]["content"]
                     else:
-                        msgs.insert(
-                            0, {"role": "system", "content": _json_hint}
-                        )
+                        msgs.insert(0, {"role": "system", "content": _json_hint})
                 else:
                     body["response_format"] = {"type": "json_object"}
 
             payload = json.dumps(body).encode("utf-8")
-            url = f"{self.config.base_url.rstrip('/')}/chat/completions"
+            url = self._endpoint_url(self.config.base_url)
 
             headers = {
                 "Authorization": f"Bearer {self.config.api_key}",
@@ -392,7 +428,9 @@ class LLMClient:
             req = urllib.request.Request(url, data=payload, headers=headers)
 
             try:
-                with urllib.request.urlopen(req, timeout=self.config.timeout_sec) as resp:
+                with urllib.request.urlopen(
+                    req, timeout=self.config.timeout_sec
+                ) as resp:
                     data = json.loads(resp.read())
             except (urllib.error.URLError, OSError) as exc:
                 # MetaClaw bridge: fallback to direct LLM if proxy unreachable
@@ -402,9 +440,7 @@ class LLMClient:
                         self.config.fallback_url,
                         exc,
                     )
-                    fallback_url = (
-                        f"{self.config.fallback_url.rstrip('/')}/chat/completions"
-                    )
+                    fallback_url = self._endpoint_url(self.config.fallback_url)
                     fallback_key = self.config.fallback_api_key or self.config.api_key
                     fallback_headers = {
                         "Authorization": f"Bearer {fallback_key}",
@@ -421,18 +457,68 @@ class LLMClient:
                 else:
                     raise
 
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Malformed API response: expected JSON object, got {type(data).__name__}: {data}"
+            )
+
         # Handle API error responses
-        if "error" in data:
+        if "error" in data and data["error"] is not None:
             error_info = data["error"]
-            error_msg = error_info.get("message", str(error_info))
-            error_type = error_info.get("type", "api_error")
+            if isinstance(error_info, dict):
+                error_msg = str(error_info.get("message", str(error_info)))
+                error_type = str(error_info.get("type", "api_error"))
+            else:
+                error_msg = str(error_info)
+                error_type = "api_error"
             import io
+
             raise urllib.error.HTTPError(
-                "", 500, f"{error_type}: {error_msg}", {},
+                "",
+                500,
+                f"{error_type}: {error_msg}",
+                None,
                 io.BytesIO(error_msg.encode()),
             )
 
-        # Validate response structure
+        if self._normalize_wire_api(self.config.wire_api) == "responses":
+            return self._parse_responses_response(data, model)
+        return self._parse_chat_completions_response(data, model)
+
+    def _build_responses_body(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "model": model,
+            "input": self._messages_to_responses_input(messages),
+        }
+        if self._supports_temperature(model):
+            body["temperature"] = temperature
+        body["max_output_tokens"] = max_tokens
+        return body
+
+    def _messages_to_responses_input(
+        self, messages: list[dict[str, str]]
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role", "user") or "user")
+            content = str(message.get("content", "") or "")
+            items.append(
+                {
+                    "role": role,
+                    "content": [{"type": "input_text", "text": content}],
+                }
+            )
+        return items
+
+    def _parse_chat_completions_response(
+        self, data: dict[str, Any], model: str
+    ) -> LLMResponse:
         if "choices" not in data or not data["choices"]:
             raise ValueError(f"Malformed API response: missing choices. Got: {data}")
 
@@ -450,6 +536,64 @@ class LLMClient:
             total_tokens=usage.get("total_tokens", 0),
             finish_reason=choice.get("finish_reason", ""),
             truncated=(choice.get("finish_reason", "") == "length"),
+            raw=data,
+        )
+
+    def _parse_responses_response(
+        self, data: dict[str, Any], model: str
+    ) -> LLMResponse:
+        output_items = data.get("output")
+        if not isinstance(output_items, list) or not output_items:
+            raise ValueError(
+                f"Malformed responses API payload: missing output. Got: {data}"
+            )
+
+        chunks: list[str] = []
+        finish_reason = str(data.get("status", "") or "")
+        truncated = False
+
+        for item in output_items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "message":
+                continue
+            content_items = item.get("content")
+            if not isinstance(content_items, list):
+                continue
+            for content_item in content_items:
+                if not isinstance(content_item, dict):
+                    continue
+                if content_item.get("type") == "output_text":
+                    text = content_item.get("text")
+                    if isinstance(text, str):
+                        chunks.append(text)
+
+        incomplete_details = data.get("incomplete_details")
+        if isinstance(incomplete_details, dict):
+            reason = incomplete_details.get("reason")
+            if isinstance(reason, str) and reason:
+                finish_reason = reason
+                truncated = reason in ("max_output_tokens", "content_filter")
+
+        usage = data.get("usage", {})
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        if isinstance(usage, dict):
+            prompt_tokens = int(usage.get("input_tokens", 0) or 0)
+            completion_tokens = int(usage.get("output_tokens", 0) or 0)
+            total_tokens = int(
+                usage.get("total_tokens", prompt_tokens + completion_tokens) or 0
+            )
+
+        return LLMResponse(
+            content="".join(chunks),
+            model=data.get("model", model),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            finish_reason=finish_reason,
+            truncated=truncated,
             raw=data,
         )
 
@@ -480,6 +624,7 @@ def create_client_from_yaml(yaml_path: str | None = None) -> LLMClient:
         LLMConfig(
             base_url=llm_section.get("base_url", "https://api.openai.com/v1"),
             api_key=api_key,
+            wire_api=llm_section.get("wire_api", "chat_completions"),
             primary_model=llm_section.get("primary_model", "gpt-4o"),
             fallback_models=llm_section.get(
                 "fallback_models", ["gpt-4.1", "gpt-4o-mini"]

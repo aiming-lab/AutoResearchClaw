@@ -9,7 +9,9 @@ from typing import Any
 import sys
 import yaml
 
-DEFAULT_PYTHON_PATH = ".venv/Scripts/python.exe" if sys.platform == "win32" else ".venv/bin/python3"
+DEFAULT_PYTHON_PATH = (
+    ".venv/Scripts/python.exe" if sys.platform == "win32" else ".venv/bin/python3"
+)
 
 CONFIG_SEARCH_ORDER: tuple[str, ...] = ("config.arc.yaml", "config.yaml")
 
@@ -32,8 +34,11 @@ def _validate_network_policy(val: object, default: str = "setup_only") -> str:
     s = str(val).strip().lower() if val else default
     if s not in _VALID_NETWORK_POLICIES:
         import logging as _cfg_log
+
         _cfg_log.getLogger(__name__).warning(
-            "Invalid network_policy %r, using %r", val, default,
+            "Invalid network_policy %r, using %r",
+            val,
+            default,
         )
         return default
     return s
@@ -47,6 +52,8 @@ def _safe_float(val: Any, default: float) -> float:
         return float(val)
     except (ValueError, TypeError):
         return default
+
+
 EXAMPLE_CONFIG = "config.researchclaw.example.yaml"
 
 
@@ -167,6 +174,7 @@ class AcpConfig:
 class LlmConfig:
     provider: str
     base_url: str = ""
+    wire_api: str = "chat_completions"
     api_key_env: str = ""
     api_key: str = ""
     primary_model: str = ""
@@ -433,11 +441,14 @@ class ExportConfig:
     authors: str = "Anonymous"
     bib_file: str = "references"
 
+
 @dataclass(frozen=True)
 class PromptsConfig:
     """Configuration for prompt externalization."""
 
     custom_file: str = ""  # Path to custom prompts YAML (empty = use defaults)
+
+
 @dataclass(frozen=True)
 class RCConfig:
     project: ProjectConfig
@@ -452,9 +463,7 @@ class RCConfig:
     export: ExportConfig = field(default_factory=ExportConfig)
     prompts: PromptsConfig = field(default_factory=PromptsConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
-    metaclaw_bridge: MetaClawBridgeConfig = field(
-        default_factory=MetaClawBridgeConfig
-    )
+    metaclaw_bridge: MetaClawBridgeConfig = field(default_factory=MetaClawBridgeConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -546,10 +555,14 @@ class RCConfig:
             web_search=WebSearchConfig(
                 enabled=bool(web_search.get("enabled", True)),
                 tavily_api_key=str(web_search.get("tavily_api_key", "")),
-                tavily_api_key_env=str(web_search.get("tavily_api_key_env", "TAVILY_API_KEY")),
+                tavily_api_key_env=str(
+                    web_search.get("tavily_api_key_env", "TAVILY_API_KEY")
+                ),
                 enable_scholar=bool(web_search.get("enable_scholar", True)),
                 enable_crawling=bool(web_search.get("enable_crawling", True)),
-                enable_pdf_extraction=bool(web_search.get("enable_pdf_extraction", True)),
+                enable_pdf_extraction=bool(
+                    web_search.get("enable_pdf_extraction", True)
+                ),
                 max_web_results=int(web_search.get("max_web_results", 10)),
                 max_scholar_results=int(web_search.get("max_scholar_results", 10)),
                 max_crawl_urls=int(web_search.get("max_crawl_urls", 5)),
@@ -607,6 +620,13 @@ def validate_config(
     if not _is_blank(kb_backend) and kb_backend not in KB_BACKENDS:
         errors.append(f"Invalid knowledge_base.backend: {kb_backend}")
 
+    llm_wire_api = _get_by_path(data, "llm.wire_api")
+    if not _is_blank(llm_wire_api) and llm_wire_api not in (
+        "chat_completions",
+        "responses",
+    ):
+        errors.append(f"Invalid llm.wire_api: {llm_wire_api}")
+
     hitl_required_stages = _get_by_path(data, "security.hitl_required_stages")
     if hitl_required_stages is not None:
         if not isinstance(hitl_required_stages, list):
@@ -647,6 +667,7 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
     return LlmConfig(
         provider=data.get("provider", "openai-compatible"),
         base_url=data.get("base_url", ""),
+        wire_api=data.get("wire_api", "chat_completions"),
         api_key_env=data.get("api_key_env", ""),
         api_key=data.get("api_key", ""),
         primary_model=data.get("primary_model", ""),
@@ -687,9 +708,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         docker=DockerSandboxConfig(
             image=docker_data.get("image", "researchclaw/experiment:latest"),
             gpu_enabled=bool(docker_data.get("gpu_enabled", True)),
-            gpu_device_ids=tuple(
-                int(g) for g in docker_data.get("gpu_device_ids", ())
-            ),
+            gpu_device_ids=tuple(int(g) for g in docker_data.get("gpu_device_ids", ())),
             memory_limit_mb=_safe_int(docker_data.get("memory_limit_mb"), 8192),
             network_policy=_validate_network_policy(
                 docker_data.get("network_policy", "setup_only"),
@@ -716,7 +735,9 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
             docker_network_policy=_validate_network_policy(
                 ssh_data.get("docker_network_policy", "none"),
             ),
-            docker_memory_limit_mb=_safe_int(ssh_data.get("docker_memory_limit_mb"), 8192),
+            docker_memory_limit_mb=_safe_int(
+                ssh_data.get("docker_memory_limit_mb"), 8192
+            ),
             docker_shm_size_mb=_safe_int(ssh_data.get("docker_shm_size_mb"), 2048),
             timeout_sec=_safe_int(ssh_data.get("timeout_sec"), 600),
             scp_timeout_sec=_safe_int(ssh_data.get("scp_timeout_sec"), 300),
@@ -766,9 +787,7 @@ def _parse_figure_agent_config(data: dict[str, Any]) -> FigureAgentConfig:
         max_figures=_safe_int(data.get("max_figures"), 8),
         max_iterations=_safe_int(data.get("max_iterations"), 3),
         render_timeout_sec=_safe_int(data.get("render_timeout_sec"), 30),
-        use_docker=(
-            None if use_docker_raw is None else bool(use_docker_raw)
-        ),
+        use_docker=(None if use_docker_raw is None else bool(use_docker_raw)),
         docker_image=data.get("docker_image", "researchclaw/experiment:latest"),
         output_format=data.get("output_format", "python"),
         gemini_api_key=data.get("gemini_api_key", ""),
@@ -800,7 +819,9 @@ def _parse_code_agent_config(data: dict[str, Any]) -> CodeAgentConfig:
         architecture_planning=bool(data.get("architecture_planning", True)),
         sequential_generation=bool(data.get("sequential_generation", True)),
         hard_validation=bool(data.get("hard_validation", True)),
-        hard_validation_max_repairs=_safe_int(data.get("hard_validation_max_repairs"), 2),
+        hard_validation_max_repairs=_safe_int(
+            data.get("hard_validation_max_repairs"), 2
+        ),
         exec_fix_max_iterations=_safe_int(data.get("exec_fix_max_iterations"), 3),
         exec_fix_timeout_sec=_safe_int(data.get("exec_fix_timeout_sec"), 60),
         tree_search_enabled=bool(data.get("tree_search_enabled", False)),

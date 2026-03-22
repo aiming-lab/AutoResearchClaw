@@ -29,11 +29,13 @@ def _make_client(
     api_key: str = "test-key",
     primary_model: str = "gpt-5.2",
     fallback_models: list[str] | None = None,
+    wire_api: str = "chat_completions",
     timeout_sec: int = 120,
 ) -> LLMClient:
     config = LLMConfig(
         base_url="https://api.example.com/v1",
         api_key=api_key,
+        wire_api=wire_api,
         primary_model=primary_model,
         fallback_models=fallback_models or ["gpt-5.1", "gpt-4.1", "gpt-4o"],
         timeout_sec=timeout_sec,
@@ -205,6 +207,7 @@ def test_from_rc_config_builds_expected_llm_config():
             base_url="https://proxy.example/v1",
             api_key="inline-key",
             api_key_env="OPENAI_API_KEY",
+            wire_api="responses",
             primary_model="o3",
             fallback_models=("o3-mini", "gpt-4o"),
         )
@@ -212,8 +215,108 @@ def test_from_rc_config_builds_expected_llm_config():
     client = LLMClient.from_rc_config(rc_config)
     assert client.config.base_url == "https://proxy.example/v1"
     assert client.config.api_key == "inline-key"
+    assert client.config.wire_api == "responses"
     assert client.config.primary_model == "o3"
     assert client.config.fallback_models == ["o3-mini", "gpt-4o"]
+
+
+def test_responses_wire_api_uses_responses_endpoint(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(req: urllib.request.Request, timeout: int) -> _DummyHTTPResponse:
+        captured["request"] = req
+        captured["timeout"] = timeout
+        return _DummyHTTPResponse(
+            {
+                "model": "gpt-4.1",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "hello"}],
+                    }
+                ],
+                "usage": {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18},
+                "status": "completed",
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = _make_client(primary_model="gpt-4.1", wire_api="responses")
+    resp = client._raw_call(
+        "gpt-4.1", [{"role": "user", "content": "hello"}], 123, 0.2, False
+    )
+
+    request = captured["request"]
+    assert isinstance(request, urllib.request.Request)
+    assert request.full_url == "https://api.example.com/v1/responses"
+    assert captured["timeout"] == 120
+
+    data = request.data
+    assert isinstance(data, bytes)
+    body = json.loads(data.decode("utf-8"))
+    assert body["model"] == "gpt-4.1"
+    assert body["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "hello"}]}
+    ]
+    assert body["max_output_tokens"] == 123
+    assert resp.content == "hello"
+    assert resp.prompt_tokens == 11
+    assert resp.completion_tokens == 7
+    assert resp.total_tokens == 18
+
+
+def test_responses_wire_api_omits_temperature_for_reasoning_models(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(req: urllib.request.Request, timeout: int) -> _DummyHTTPResponse:
+        captured["request"] = req
+        return _DummyHTTPResponse(
+            {
+                "model": "gpt-5.2",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {},
+                "status": "completed",
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = _make_client(primary_model="gpt-5.2", wire_api="responses")
+    _ = client._raw_call(
+        "gpt-5.2", [{"role": "user", "content": "hello"}], 55, 0.2, False
+    )
+
+    request = captured["request"]
+    assert isinstance(request, urllib.request.Request)
+    data = request.data
+    assert isinstance(data, bytes)
+    body = json.loads(data.decode("utf-8"))
+    assert "temperature" not in body
+
+
+def test_preflight_404_reports_responses_endpoint():
+    client = _make_client(primary_model="gpt-4.1", wire_api="responses")
+
+    def fake_chat(*args: Any, **kwargs: Any) -> LLMResponse:
+        raise urllib.error.HTTPError(
+            url="https://api.example.com/v1/responses",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=None,
+        )
+
+    client.chat = fake_chat  # type: ignore[method-assign]
+    ok, msg = client.preflight()
+
+    assert ok is False
+    assert msg == "Endpoint not found: https://api.example.com/v1/responses"
 
 
 def test_from_rc_config_reads_api_key_from_env_when_missing(

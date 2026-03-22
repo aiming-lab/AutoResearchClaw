@@ -37,6 +37,7 @@ openclaw_bridge:
 llm:
   provider: "openai-compatible"
   base_url: "https://api.openai.com/v1"
+  wire_api: "chat_completions"  # Set to "responses" for Responses-only gateways
   api_key_env: "OPENAI_API_KEY"
   api_key: ""
   primary_model: "gpt-4o"
