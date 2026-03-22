@@ -35,7 +35,13 @@ _NEW_PARAM_MODELS = frozenset(
     }
 )
 
-_NO_TEMPERATURE_MODELS = _NEW_PARAM_MODELS
+_NO_TEMPERATURE_MODELS = frozenset(
+    {
+        "o3",
+        "o3-mini",
+        "o4-mini",
+    }
+)
 
 _DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

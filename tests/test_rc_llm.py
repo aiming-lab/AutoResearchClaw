@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
+from http.client import HTTPMessage
 from types import SimpleNamespace
 from typing import Any, Mapping
 
 import pytest
 
-from researchclaw.llm.client import LLMClient, LLMConfig, LLMResponse, _NEW_PARAM_MODELS
+from researchclaw.llm.client import (
+    LLMClient,
+    LLMConfig,
+    LLMResponse,
+    _NEW_PARAM_MODELS,
+    _NO_TEMPERATURE_MODELS,
+)
 
 
 class _DummyHTTPResponse:
@@ -147,6 +155,7 @@ def test_build_request_uses_max_completion_tokens_for_new_models(
     # Reasoning models enforce a minimum of 32768 tokens
     assert body["max_completion_tokens"] == 32768
     assert "max_tokens" not in body
+    assert body["temperature"] == 0.2
 
 
 def test_build_request_uses_max_tokens_for_old_models(monkeypatch: pytest.MonkeyPatch):
@@ -265,7 +274,7 @@ def test_responses_wire_api_uses_responses_endpoint(monkeypatch: pytest.MonkeyPa
     assert resp.total_tokens == 18
 
 
-def test_responses_wire_api_omits_temperature_for_reasoning_models(
+def test_responses_wire_api_includes_temperature_for_gpt5_models(
     monkeypatch: pytest.MonkeyPatch,
 ):
     captured: dict[str, object] = {}
@@ -297,6 +306,39 @@ def test_responses_wire_api_omits_temperature_for_reasoning_models(
     data = request.data
     assert isinstance(data, bytes)
     body = json.loads(data.decode("utf-8"))
+    assert body["temperature"] == 0.2
+
+
+def test_responses_wire_api_omits_temperature_for_o_series_models(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(req: urllib.request.Request, timeout: int) -> _DummyHTTPResponse:
+        captured["request"] = req
+        return _DummyHTTPResponse(
+            {
+                "model": "o3",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {},
+                "status": "completed",
+            }
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    client = _make_client(primary_model="o3", wire_api="responses")
+    _ = client._raw_call("o3", [{"role": "user", "content": "hello"}], 55, 0.2, False)
+
+    request = captured["request"]
+    assert isinstance(request, urllib.request.Request)
+    data = request.data
+    assert isinstance(data, bytes)
+    body = json.loads(data.decode("utf-8"))
     assert "temperature" not in body
 
 
@@ -308,7 +350,7 @@ def test_preflight_404_reports_responses_endpoint():
             url="https://api.example.com/v1/responses",
             code=404,
             msg="Not Found",
-            hdrs=None,
+            hdrs=HTTPMessage(),
             fp=None,
         )
 
@@ -339,6 +381,10 @@ def test_from_rc_config_reads_api_key_from_env_when_missing(
 def test_new_param_models_contains_expected_models():
     expected = {"gpt-5", "gpt-5.1", "gpt-5.2", "gpt-5.4", "o3", "o3-mini", "o4-mini"}
     assert expected.issubset(_NEW_PARAM_MODELS)
+
+
+def test_no_temperature_models_only_contains_o_series_models():
+    assert _NO_TEMPERATURE_MODELS == frozenset({"o3", "o3-mini", "o4-mini"})
 
 
 def test_raw_call_adds_json_mode_response_format(monkeypatch: pytest.MonkeyPatch):
