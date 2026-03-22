@@ -5,6 +5,12 @@ Uses acpx as the ACP bridge to communicate with any ACP-compatible agent
 
 Key advantage: a single persistent session maintains context across all
 23 pipeline stages — the agent remembers everything.
+
+On Windows, acpx subprocess communication suffers from encoding issues
+(GBK codec errors) and process hangs.  When ``direct_mode`` is enabled
+(the default on Windows), prompts are sent directly via the agent's
+``--print`` flag, bypassing acpx entirely.  Large prompts are piped
+through stdin to avoid the Windows CreateProcess ~32 KB argument limit.
 """
 
 from __future__ import annotations
@@ -30,6 +36,20 @@ _CLIENT_RE = re.compile(r"^\[client\]")
 _ACPX_RE = re.compile(r"^\[acpx\]")
 _TOOL_RE = re.compile(r"^\[tool\]")
 
+# Agent CLIs known to support a ``--print`` (or equivalent) non-interactive
+# mode that reads from stdin and writes the response to stdout.
+_DIRECT_MODE_AGENTS: dict[str, list[str]] = {
+    "claude": ["--print", "--output-format", "text"],
+    # Future agents can be added here, e.g.:
+    # "gemini": ["--print"],
+    # "codex": ["--print"],
+}
+
+# Windows CreateProcess has a ~32 KB command-line limit.  On POSIX the
+# limit is 128 KB (MAX_ARG_STRLEN).  We stay well under both.
+_WIN_CLI_ARG_LIMIT = 20_000
+_POSIX_CLI_ARG_LIMIT = 100_000
+
 
 @dataclass
 class ACPConfig:
@@ -40,6 +60,7 @@ class ACPConfig:
     acpx_command: str = ""  # auto-detect if empty
     session_name: str = "researchclaw"
     timeout_sec: int = 1800  # per-prompt timeout
+    direct_mode: bool | None = None  # None = auto-detect (True on Windows)
 
 
 def _find_acpx() -> str | None:
@@ -56,12 +77,38 @@ def _find_acpx() -> str | None:
     return None
 
 
+def _should_use_direct_mode(config: ACPConfig) -> bool:
+    """Decide whether to use direct CLI mode instead of acpx.
+
+    Returns ``True`` when:
+    - ``direct_mode`` is explicitly ``True`` in config, OR
+    - ``direct_mode`` is ``None`` (auto) AND we are on Windows, OR
+    - ``direct_mode`` is ``None`` (auto) AND acpx is not found.
+    """
+    if config.direct_mode is True:
+        return True
+    if config.direct_mode is False:
+        return False
+    # Auto-detect: prefer direct mode on Windows (acpx has encoding bugs)
+    if os.name == "nt":
+        return True
+    # Also fall back to direct mode if acpx is not installed
+    if not _find_acpx():
+        return True
+    return False
+
+
 class ACPClient:
     """LLM client that uses acpx to communicate with ACP agents.
 
     Spawns persistent named sessions via acpx, reusing them across
     ``.chat()`` calls so the agent maintains context across the full
     23-stage pipeline.
+
+    On Windows (or when ``direct_mode`` is enabled), bypasses acpx and
+    invokes the agent CLI directly via ``--print`` mode.  This avoids
+    subprocess encoding issues (GBK codec errors on Windows) and process
+    hangs that plague acpx on non-POSIX platforms.
     """
 
     # Track live instances for atexit cleanup (weak refs to avoid preventing GC)
@@ -71,6 +118,12 @@ class ACPClient:
         self.config = acp_config
         self._acpx: str | None = acp_config.acpx_command or None
         self._session_ready = False
+        self._use_direct = _should_use_direct_mode(acp_config)
+        if self._use_direct:
+            logger.info(
+                "ACP direct mode enabled — bypassing acpx, using '%s --print'",
+                acp_config.agent,
+            )
         # Register for atexit cleanup to prevent zombie acpx processes
         ACPClient._live_instances.append(weakref.ref(self))
         atexit.register(ACPClient._atexit_cleanup)
@@ -85,6 +138,7 @@ class ACPClient:
             acpx_command=getattr(acp, "acpx_command", ""),
             session_name=getattr(acp, "session_name", "researchclaw"),
             timeout_sec=getattr(acp, "timeout_sec", 1800),
+            direct_mode=getattr(acp, "direct_mode", None),
         ))
 
     # ------------------------------------------------------------------
@@ -121,18 +175,28 @@ class ACPClient:
         )
 
     def preflight(self) -> tuple[bool, str]:
-        """Check that acpx and the agent are available."""
+        """Check that the agent is available (and acpx, if not in direct mode)."""
+        agent = self.config.agent
+        if not shutil.which(agent):
+            return False, f"ACP agent CLI not found: {agent!r} (not on PATH)"
+
+        if self._use_direct:
+            if agent not in _DIRECT_MODE_AGENTS:
+                return False, (
+                    f"Direct mode not supported for agent {agent!r}. "
+                    f"Supported agents: {', '.join(_DIRECT_MODE_AGENTS)}"
+                )
+            return True, (
+                f"OK - ACP direct mode ready ({agent} --print)"
+            )
+
+        # acpx path
         acpx = self._resolve_acpx()
         if not acpx:
             return False, (
                 "acpx not found. Install it: npm install -g acpx  "
                 "or set llm.acp.acpx_command in config."
             )
-        # Check the agent binary exists
-        agent = self.config.agent
-        if not shutil.which(agent):
-            return False, f"ACP agent CLI not found: {agent!r} (not on PATH)"
-        # Create the session
         try:
             self._ensure_session()
             return True, f"OK - ACP session ready ({agent} via acpx)"
@@ -140,8 +204,8 @@ class ACPClient:
             return False, f"ACP session init failed: {exc}"
 
     def close(self) -> None:
-        """Close the acpx session."""
-        if not self._session_ready:
+        """Close the acpx session (no-op in direct mode)."""
+        if self._use_direct or not self._session_ready:
             return
         acpx = self._resolve_acpx()
         if not acpx:
@@ -232,6 +296,91 @@ class ACPClient:
     _MAX_RECONNECT_ATTEMPTS = 2
 
     def _send_prompt(self, prompt: str) -> str:
+        """Route the prompt to direct mode or acpx depending on config."""
+        if self._use_direct:
+            agent_bin = shutil.which(self.config.agent)
+            if not agent_bin:
+                raise RuntimeError(
+                    f"Agent CLI not found: {self.config.agent!r}"
+                )
+            return self._send_prompt_direct(agent_bin, prompt)
+
+        return self._send_prompt_acpx(prompt)
+
+    # ------------------------------------------------------------------
+    # Direct mode (bypasses acpx — Windows-safe)
+    # ------------------------------------------------------------------
+
+    def _send_prompt_direct(self, agent_bin: str, prompt: str) -> str:
+        """Send prompt directly via the agent's ``--print`` mode.
+
+        Small prompts (< OS arg limit) are passed as a ``-p`` argument.
+        Large prompts are piped through stdin to avoid the Windows
+        ``CreateProcess`` ~32 KB command-line length limit.
+
+        This bypasses acpx entirely, avoiding:
+        - GBK encoding errors on Windows (subprocess stdout decoding)
+        - Zombie acpx/node processes that hang indefinitely
+        - Session reconnection failures
+        """
+        agent_name = self.config.agent
+        extra_args = _DIRECT_MODE_AGENTS.get(agent_name, ["--print"])
+        prompt_bytes = len(prompt.encode("utf-8"))
+        arg_limit = _WIN_CLI_ARG_LIMIT if os.name == "nt" else _POSIX_CLI_ARG_LIMIT
+
+        env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+
+        if prompt_bytes > arg_limit:
+            # Large prompt: pipe via stdin
+            logger.debug(
+                "Prompt too large for CLI arg (%d bytes > %d). Using stdin.",
+                prompt_bytes, arg_limit,
+            )
+            try:
+                result = subprocess.run(
+                    [agent_bin, *extra_args],
+                    input=prompt,
+                    capture_output=True, text=True,
+                    timeout=self.config.timeout_sec,
+                    cwd=self._abs_cwd(),
+                    env=env,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"{agent_name} --print timed out after "
+                    f"{self.config.timeout_sec}s (stdin mode, "
+                    f"{prompt_bytes} bytes)"
+                ) from exc
+        else:
+            # Short prompt: pass as -p argument
+            try:
+                result = subprocess.run(
+                    [agent_bin, *extra_args, "-p", prompt],
+                    capture_output=True, text=True,
+                    timeout=self.config.timeout_sec,
+                    cwd=self._abs_cwd(),
+                    env=env,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"{agent_name} --print timed out after "
+                    f"{self.config.timeout_sec}s"
+                ) from exc
+
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            raise RuntimeError(
+                f"{agent_name} --print failed (exit {result.returncode}): "
+                f"{stderr}"
+            )
+
+        return result.stdout.strip()
+
+    # ------------------------------------------------------------------
+    # acpx mode (original implementation)
+    # ------------------------------------------------------------------
+
+    def _send_prompt_acpx(self, prompt: str) -> str:
         """Send a prompt via acpx and return the response text.
 
         For large prompts that would exceed the OS argument-length limit
@@ -306,8 +455,9 @@ class ACPClient:
 
     def _send_prompt_via_file(self, acpx: str, prompt: str) -> str:
         """Write prompt to a temp file, ask the agent to read and respond."""
+        tmp_dir = tempfile.gettempdir()
         fd, prompt_path = tempfile.mkstemp(
-            suffix=".md", prefix="rc_prompt_", dir="/tmp"
+            suffix=".md", prefix="rc_prompt_", dir=tmp_dir
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
