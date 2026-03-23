@@ -239,7 +239,8 @@ def test_acp_large_prompt_uses_file_transport_before_cli_limit():
     client = ACPClient(ACPConfig(agent="codex"))
     client._acpx = "acpx"
     client._session_ready = True
-    client._MAX_CLI_PROMPT_BYTES = 10  # type: ignore[attr-defined]
+    original_limit = ACPClient._MAX_CLI_PROMPT_BYTES
+    ACPClient._MAX_CLI_PROMPT_BYTES = 10
     client._ensure_session = lambda: None  # type: ignore[assignment]
 
     def fail_cli(acpx: str, prompt: str) -> str:
@@ -248,8 +249,11 @@ def test_acp_large_prompt_uses_file_transport_before_cli_limit():
     client._send_prompt_cli = fail_cli  # type: ignore[assignment]
     client._send_prompt_via_file = lambda acpx, prompt: "ok-from-file"  # type: ignore[assignment]
 
-    result = client._send_prompt("x" * 11)
-    assert result == "ok-from-file"
+    try:
+        result = client._send_prompt("x" * 11)
+        assert result == "ok-from-file"
+    finally:
+        ACPClient._MAX_CLI_PROMPT_BYTES = original_limit
 
 
 def test_acp_command_line_too_long_falls_back_to_file_transport():
@@ -274,6 +278,14 @@ def test_acp_command_line_too_long_falls_back_to_file_transport():
     result = client._send_prompt("short prompt")
     assert result == "ok-from-file"
     assert call_count == 1
+
+
+def test_acp_windows_cmd_wrapper_uses_lower_inline_limit(monkeypatch: pytest.MonkeyPatch):
+    from researchclaw.llm.acp_client import ACPClient
+
+    monkeypatch.setattr("researchclaw.llm.acp_client.sys.platform", "win32")
+    limit = ACPClient._cli_prompt_limit(r"C:\Users\test\AppData\Roaming\npm\acpx.CMD")
+    assert limit == ACPClient._MAX_CMD_WRAPPER_PROMPT_BYTES
 
 
 def test_new_param_models_contains_expected_models():

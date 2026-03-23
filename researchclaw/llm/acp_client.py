@@ -228,6 +228,10 @@ class ACPClient:
     # several fixed arguments plus quoting overhead, so leave generous headroom
     # on Windows and switch to temp-file transport earlier.
     _MAX_CLI_PROMPT_BYTES = 20_000 if sys.platform == "win32" else 100_000
+    # On Windows, npm-installed CLIs usually resolve to ``.cmd`` launchers,
+    # which are routed through ``cmd.exe`` and hit a much smaller practical
+    # command-line limit (~8 KB). Use file transport much earlier there.
+    _MAX_CMD_WRAPPER_PROMPT_BYTES = 6_000 if sys.platform == "win32" else 100_000
 
     # Localized error snippets for "command line too long" (may be in any OS language)
     _CMD_TOO_LONG_HINTS = (
@@ -246,6 +250,16 @@ class ACPClient:
     )
     _MAX_RECONNECT_ATTEMPTS = 2
 
+    @classmethod
+    def _cli_prompt_limit(cls, acpx: str | None) -> int:
+        """Return the safe inline-prompt size for the resolved ACP launcher."""
+        limit = cls._MAX_CLI_PROMPT_BYTES
+        if sys.platform == "win32" and acpx:
+            lower = acpx.lower()
+            if lower.endswith((".cmd", ".bat")):
+                return min(limit, cls._MAX_CMD_WRAPPER_PROMPT_BYTES)
+        return limit
+
     def _send_prompt(self, prompt: str) -> str:
         """Send a prompt via acpx and return the response text.
 
@@ -261,11 +275,13 @@ class ACPClient:
             raise RuntimeError("acpx not found")
 
         prompt_bytes = len(prompt.encode("utf-8"))
-        use_file = prompt_bytes > self._MAX_CLI_PROMPT_BYTES
+        prompt_limit = self._cli_prompt_limit(acpx)
+        use_file = prompt_bytes > prompt_limit
         if use_file:
             logger.info(
-                "Prompt too large for CLI arg (%d bytes). Using temp file.",
+                "Prompt too large for CLI arg (%d bytes > %d). Using temp file.",
                 prompt_bytes,
+                prompt_limit,
             )
 
         last_exc: RuntimeError | None = None
