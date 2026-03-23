@@ -233,6 +233,49 @@ def test_from_rc_config_reads_api_key_from_env_when_missing(
     assert client.config.api_key == "env-key"
 
 
+def test_acp_large_prompt_uses_file_transport_before_cli_limit():
+    from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+    client = ACPClient(ACPConfig(agent="codex"))
+    client._acpx = "acpx"
+    client._session_ready = True
+    client._MAX_CLI_PROMPT_BYTES = 10  # type: ignore[attr-defined]
+    client._ensure_session = lambda: None  # type: ignore[assignment]
+
+    def fail_cli(acpx: str, prompt: str) -> str:
+        raise AssertionError("CLI transport should not be used for oversized prompts")
+
+    client._send_prompt_cli = fail_cli  # type: ignore[assignment]
+    client._send_prompt_via_file = lambda acpx, prompt: "ok-from-file"  # type: ignore[assignment]
+
+    result = client._send_prompt("x" * 11)
+    assert result == "ok-from-file"
+
+
+def test_acp_command_line_too_long_falls_back_to_file_transport():
+    from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+    client = ACPClient(ACPConfig(agent="codex"))
+    client._acpx = "acpx"
+    client._session_ready = True
+    client._MAX_CLI_PROMPT_BYTES = 1000  # type: ignore[attr-defined]
+    client._ensure_session = lambda: None  # type: ignore[assignment]
+
+    call_count = 0
+
+    def fail_cli(acpx: str, prompt: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError("ACP prompt failed (exit 1): The command line is too long.")
+
+    client._send_prompt_cli = fail_cli  # type: ignore[assignment]
+    client._send_prompt_via_file = lambda acpx, prompt: "ok-from-file"  # type: ignore[assignment]
+
+    result = client._send_prompt("short prompt")
+    assert result == "ok-from-file"
+    assert call_count == 1
+
+
 def test_new_param_models_contains_expected_models():
     expected = {"gpt-5", "gpt-5.1", "gpt-5.2", "gpt-5.4", "o3", "o3-mini", "o4-mini"}
     assert expected.issubset(_NEW_PARAM_MODELS)

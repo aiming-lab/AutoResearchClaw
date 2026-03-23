@@ -223,8 +223,11 @@ class ACPClient:
         self._session_ready = True
         logger.info("ACP session '%s' ready (%s)", self.config.session_name, self.config.agent)
 
-    # Linux MAX_ARG_STRLEN is 128 KB; Windows CreateProcess limit is ~32 KB.
-    _MAX_CLI_PROMPT_BYTES = 30_000 if sys.platform == "win32" else 100_000
+    # Linux MAX_ARG_STRLEN is 128 KB; Windows CreateProcess limit is ~32 KB
+    # for the entire command line, not just the prompt payload. acpx adds
+    # several fixed arguments plus quoting overhead, so leave generous headroom
+    # on Windows and switch to temp-file transport earlier.
+    _MAX_CLI_PROMPT_BYTES = 20_000 if sys.platform == "win32" else 100_000
 
     # Localized error snippets for "command line too long" (may be in any OS language)
     _CMD_TOO_LONG_HINTS = (
