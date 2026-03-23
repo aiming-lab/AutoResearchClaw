@@ -18,7 +18,7 @@
 <p align="center">
   <a href="../LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
-  <a href="#الاختبار"><img src="https://img.shields.io/badge/Tests-1634%20passed-brightgreen?logo=pytest&logoColor=white" alt="1634 Tests Passed"></a>
+  <a href="#الاختبار"><img src="https://img.shields.io/badge/Tests-1823%20passed-brightgreen?logo=pytest&logoColor=white" alt="1823 Tests Passed"></a>
   <a href="https://github.com/aiming-lab/AutoResearchClaw"><img src="https://img.shields.io/badge/GitHub-AutoResearchClaw-181717?logo=github" alt="GitHub"></a>
   <a href="#-تكامل-openclaw"><img src="https://img.shields.io/badge/OpenClaw-Compatible-ff4444?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==" alt="OpenClaw Compatible"></a>
   <a href="https://discord.gg/u4ksqW5P"><img src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
@@ -63,6 +63,7 @@
 ---
 
 ## 🔥 News
+- **[03/22/2026]** [v0.3.2](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.2) — **دعم متعدد المنصات + استقرار كبير** — يعمل AutoResearchClaw الآن مع أي وكيل متوافق مع ACP (Claude Code، Codex CLI، Copilot CLI، Gemini CLI، Kimi CLI) ويدعم منصات المراسلة (Discord، Telegram، Lark، WeChat) عبر جسر OpenClaw. واجهة خلفية جديدة لتوليد الكود عبر CLI-agent تفوّض المرحلتين 10 و13 لوكلاء CLI خارجيين مع التحكم في الميزانية وإدارة المهلة الزمنية. يتضمن نظام مكافحة التلفيق (VerifiedRegistry + حلقة تشخيص وإصلاح التجارب)، 100+ إصلاح أخطاء، إعادة هيكلة modular executor، كشف تلقائي لـ `--resume`، تعزيز إعادة محاولات LLM، وإصلاحات المجتمع.
 - **[03/18/2026]** [v0.3.1](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.1) — **OpenCode Beast Mode + Community Contributions** — New "Beast Mode" routes complex code generation to [OpenCode](https://github.com/anomalyco/opencode) with automatic complexity scoring and graceful fallback. Added Novita AI provider support, thread-safety hardening, improved LLM output parsing robustness, and 20+ bug fixes from community PRs and internal audit.
 - **[03/17/2026]** [v0.3.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.0) — **MetaClaw Integration** — AutoResearchClaw now supports [MetaClaw](https://github.com/aiming-lab/MetaClaw) cross-run learning: pipeline failures → structured lessons → reusable skills, injected into all 23 stages. **+18.3%** robustness in controlled experiments. Opt-in (`metaclaw_bridge.enabled: true`), fully backward-compatible. See [Integration Guide](#-metaclaw-integration).
 - **[03/16/2026]** [v0.2.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.2.0) — Three multi-agent subsystems (CodeAgent, BenchmarkAgent, FigureAgent), hardened Docker sandbox with network-policy-aware execution, 4-round paper quality audit (AI-slop detection, 7-dim review scoring, NeurIPS checklist), and 15+ bug fixes from production runs.
@@ -98,6 +99,8 @@ pip install -e . && researchclaw setup && researchclaw init && researchclaw run 
 </table>
 
 يعمل خط الأنابيب **من البداية إلى النهاية بدون تدخل بشري**. عندما تفشل التجارب، يصلح نفسه. عندما لا تصمد الفرضيات، يغيّر المسار. عندما تكون الاستشهادات مُلفّقة، يزيلها.
+
+🌍 **شغّله من أي مكان.** AutoResearchClaw ليس مقيّدًا بمنصة واحدة. استخدمه مستقلاً عبر CLI، أو وصّله بـ [OpenClaw](https://github.com/openclaw/openclaw)، أو ادمجه مع أي وكيل متوافق مع ACP — 🤖 Claude Code، 💻 Codex CLI، 🐙 Copilot CLI، ♊ Gemini CLI، 🌙 Kimi CLI، وغيرها. بفضل جسر الرسائل في OpenClaw، يمكنك إطلاق بحث كامل من 💬 Discord، ✈️ Telegram، 🐦 Lark (飞书)، 💚 WeChat، أو أي منصة يستخدمها فريقك بالفعل. موضوع واحد كمُدخل، ورقة بحثية كمُخرج — بغض النظر عن المكان الذي تكتب منه.
 
 ---
 
@@ -384,7 +387,7 @@ researchclaw run --config config.arc.yaml --topic "Your idea" --auto-approve
 
 - **الافتراضي: مُعطّل.** إذا كان `metaclaw_bridge` غائباً أو `enabled: false`، يعمل خط الأنابيب تماماً كما كان.
 - **بدون تبعيات جديدة.** MetaClaw اختياري — خط الأنابيب الأساسي يعمل بدونه.
-- **جميع الاختبارات الـ 1,634 الحالية تنجح** مع وجود كود التكامل.
+- **جميع الاختبارات الـ 1,823 الحالية تنجح** مع وجود كود التكامل.
 
 ---
 

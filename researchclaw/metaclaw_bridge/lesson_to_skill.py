@@ -120,7 +120,8 @@ def _write_skill(skills_dir: Path, skill: dict[str, str]) -> Path | None:
 
     content = f"---\nname: {name}\n"
     content += f"description: {skill['description']}\n"
-    content += f"category: {skill['category']}\n"
+    content += "metadata:\n"
+    content += f"  category: {skill['category']}\n"
     content += f"---\n{skill['content']}\n"
 
     skill_path.write_text(content, encoding="utf-8")

@@ -86,11 +86,27 @@ def _execute_experiment_design(
         _rl_kws = ("reinforcement learning", "ppo", "sac", "td3", "ddpg",
                     "dqn", "mujoco", "continuous control", "actor-critic",
                     "policy gradient", "exploration bonus")
-        if any(kw in config.research.topic.lower() for kw in _rl_kws):
+        _is_rl_topic = any(kw in config.research.topic.lower() for kw in _rl_kws)
+        if _is_rl_topic:
             try:
                 _dg_block += _pm.block("rl_step_guidance")
             except Exception:  # noqa: BLE001
                 pass
+            # Improvement G: For RL with short budget, constrain to classic control
+            if config.experiment.time_budget_sec <= 3600:
+                _dg_block += (
+                    "\n\n## RL TIME CONSTRAINT (MANDATORY):\n"
+                    f"Your time budget is {config.experiment.time_budget_sec}s (≤ 3600s).\n"
+                    "You MUST use ONLY classic control environments: "
+                    "CartPole-v1, Pendulum-v1, MountainCar-v0, Acrobot-v1, LunarLander-v3.\n"
+                    "Do NOT use MuJoCo (HalfCheetah, Hopper, Walker2d, Ant, Humanoid) — "
+                    "they require >5000s for meaningful training.\n"
+                )
+            if config.experiment.time_budget_sec <= 1800:
+                _dg_block += (
+                    "Time budget ≤ 1800s: use ONLY CartPole-v1 or Pendulum-v1 "
+                    "(the simplest environments).\n"
+                )
         # F-01: Inject framework docs for experiment design
         try:
             from researchclaw.data import detect_frameworks, load_framework_docs
@@ -101,6 +117,15 @@ def _execute_experiment_design(
                     _dg_block += _fw_docs
         except Exception:  # noqa: BLE001
             pass
+        # Improvement A: Compute hardware profile + per-condition budget
+        _hw_profile_str = (
+            "- GPU: NVIDIA RTX 6000 Ada (49140 MB VRAM)\n"
+            "- GPU count: 1\n"
+            "- CPU: shared server"
+        )
+        _per_condition_sec = int(config.experiment.time_budget_sec * 0.7 / 6)
+        _tier1 = "CIFAR-10, CIFAR-100, MNIST, FashionMNIST, STL-10, SVHN"
+
         _overlay = _get_evolution_overlay(run_dir, "experiment_design")
         sp = _pm.for_stage(
             "experiment_design",
@@ -111,6 +136,9 @@ def _execute_experiment_design(
             time_budget_sec=config.experiment.time_budget_sec,
             metric_key=config.experiment.metric_key,
             metric_direction=config.experiment.metric_direction,
+            hardware_profile=_hw_profile_str,
+            per_condition_budget_sec=_per_condition_sec,
+            available_tier1_datasets=_tier1,
         )
         resp = _chat_with_prompt(
             llm,

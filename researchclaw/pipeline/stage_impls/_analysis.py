@@ -60,8 +60,19 @@ def _execute_result_analysis(
             _refine_data = json.loads(_refine_log_text)
             _best_iter = None
             _best_ver = _refine_data.get("best_version", "")
+
+            def _get_best_sandbox(it: dict) -> dict:
+                """BUG-181: Metrics may be in sandbox or sandbox_after_fix."""
+                sbx = it.get("sandbox", {})
+                if sbx.get("metrics"):
+                    return sbx
+                sbx_fix = it.get("sandbox_after_fix", {})
+                if sbx_fix.get("metrics"):
+                    return sbx_fix
+                return sbx
+
             for _it in _refine_data.get("iterations", []):
-                _sbx = _it.get("sandbox", {})
+                _sbx = _get_best_sandbox(_it)
                 _it_metrics = _sbx.get("metrics", {})
                 if _it.get("version_dir", "") == _best_ver and _it_metrics:
                     _best_iter = _it
@@ -69,17 +80,71 @@ def _execute_result_analysis(
             # If no version match, take the first iteration with metrics
             if _best_iter is None:
                 for _it in _refine_data.get("iterations", []):
-                    _sbx = _it.get("sandbox", {})
+                    _sbx = _get_best_sandbox(_it)
                     if _sbx.get("metrics"):
                         _best_iter = _it
                         break
             if _best_iter is not None:
-                _sbx = _best_iter.get("sandbox", {})
+                _sbx = _get_best_sandbox(_best_iter)
                 _refine_metrics = _sbx.get("metrics", {})
-                if _refine_metrics and (
-                    not exp_data["metrics_summary"]
-                    or len(_refine_metrics) > len(exp_data["metrics_summary"])
-                ):
+                # BUG-165 fix: Prefer Stage 13 refinement data when it is
+                # actually better.  The old `or True` unconditionally
+                # replaced existing data, causing catastrophic regressions
+                # (BUG-205: v1=78.93% destroyed by v3=8.65%).
+                _refine_is_better = not exp_data["metrics_summary"]
+                if not _refine_is_better and _refine_metrics:
+                    # Compare primary_metric values to decide
+                    _mkey = config.experiment.metric_key or "primary_metric"
+                    _mdir = config.experiment.metric_direction or "maximize"
+                    _existing_pm: float | None = None
+                    _refine_pm: float | None = None
+                    # BUG-214: Use exact match first, then substring fallback
+                    # to avoid "accuracy" matching "balanced_accuracy".
+                    _ms_items = list((exp_data.get("metrics_summary") or {}).items())
+                    for _k, _v in _ms_items:
+                        if _k == _mkey:
+                            try:
+                                _existing_pm = float(_v["mean"] if isinstance(_v, dict) else _v)
+                            except (TypeError, ValueError, KeyError):
+                                pass
+                            break
+                    else:
+                        for _k, _v in _ms_items:
+                            if _mkey in _k:
+                                try:
+                                    _existing_pm = float(_v["mean"] if isinstance(_v, dict) else _v)
+                                except (TypeError, ValueError, KeyError):
+                                    pass
+                                break
+                    _refine_items = list(_refine_metrics.items())
+                    for _k, _v in _refine_items:
+                        if _k == _mkey:
+                            try:
+                                _refine_pm = float(_v)
+                            except (TypeError, ValueError):
+                                pass
+                            break
+                    else:
+                        for _k, _v in _refine_items:
+                            if _mkey in _k:
+                                try:
+                                    _refine_pm = float(_v)
+                                except (TypeError, ValueError):
+                                    pass
+                                break
+                    if _existing_pm is None:
+                        _refine_is_better = True  # no existing data
+                    elif _refine_pm is not None:
+                        if _mdir == "maximize":
+                            _refine_is_better = _refine_pm > _existing_pm
+                        else:
+                            _refine_is_better = _refine_pm < _existing_pm
+                    logger.info(
+                        "Stage 14: Refine metric comparison: existing=%s, refine=%s, "
+                        "direction=%s → refine_is_better=%s",
+                        _existing_pm, _refine_pm, _mdir, _refine_is_better,
+                    )
+                if _refine_metrics and _refine_is_better:
                     # Refinement has richer data — rebuild metrics_summary from it
                     _new_summary: dict[str, dict[str, float | None]] = {}
                     for _mk, _mv in _refine_metrics.items():
@@ -197,10 +262,15 @@ def _execute_result_analysis(
                 if cond not in _condition_summaries:
                     _condition_summaries[cond] = {"metrics": {}}
                 try:
-                    _val = float(_mv) if not isinstance(_mv, dict) else None
+                    # BUG-182: metrics_summary values are dicts {min,max,mean,count},
+                    # not plain floats. Extract the mean value.
+                    if isinstance(_mv, dict):
+                        _val = float(_mv["mean"]) if "mean" in _mv else None
+                    else:
+                        _val = float(_mv)
                     if _val is not None:
                         _condition_summaries[cond]["metrics"][metric_name] = _val
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, KeyError):
                     pass
     if not _condition_summaries:
         # Last resort: build from structured_results condition keys
@@ -398,6 +468,18 @@ def _execute_result_analysis(
                         _ablation_warnings.append(_warn)
                         logger.warning("P8: %s", _warn)
 
+    # --- Improvement B: Validate seed counts ---
+    _seed_insufficiency_warnings: list[str] = []
+    for _sc_name, _sc_seeds in _seed_data.items():
+        _n_seeds = len(_sc_seeds)
+        if 0 < _n_seeds < 3:
+            _warn = (
+                f"SEED_INSUFFICIENCY: Condition '{_sc_name}' has only "
+                f"{_n_seeds} seed(s) (minimum 3 required for statistical validity)"
+            )
+            _seed_insufficiency_warnings.append(_warn)
+            logger.warning("B: %s", _warn)
+
     # --- Write structured experiment summary ---
     summary_payload = {
         "metrics_summary": exp_data["metrics_summary"],
@@ -406,6 +488,8 @@ def _execute_result_analysis(
         "latex_table": exp_data["latex_table"],
         "generated": _utcnow_iso(),
     }
+    if _seed_insufficiency_warnings:
+        summary_payload["seed_insufficiency_warnings"] = _seed_insufficiency_warnings
     # R13-1: Detect zero-variance across conditions (all conditions identical primary metric)
     if _condition_summaries and len(_condition_summaries) >= 2:
         _primary_vals = []
@@ -689,11 +773,15 @@ def _parse_decision(text: str) -> str:
         if pattern.search(search_text):
             return kw.lower()
 
-    # Last resort: simple containment (original behavior)
+    # Last resort: position-based — prefer whichever keyword appears LAST
+    # (the final conclusion after deliberation is more reliable than early mentions)
+    # BUG-DA8-08: Old code always returned "refine" when both keywords present
     search_upper = search_text.upper()
-    if "REFINE" in search_upper:
+    last_refine = search_upper.rfind("REFINE")
+    last_pivot = search_upper.rfind("PIVOT")
+    if last_refine >= 0 and (last_pivot < 0 or last_refine > last_pivot):
         return "refine"
-    if "PIVOT" in search_upper:
+    if last_pivot >= 0 and (last_refine < 0 or last_pivot > last_refine):
         return "pivot"
     return "proceed"
 
@@ -762,15 +850,42 @@ def _execute_research_decision(
         except (json.JSONDecodeError, OSError):
             pass
 
+    # Improvement C: Check ablation quality — if >50% trivial, push REFINE
+    _ablation_refine_hint = ""
+    # BUG-DA8-16: Prefer experiment_summary_best.json (promoted best) over
+    # alphabetically-last stage-14* (which could be a stale versioned dir)
+    _exp_sum_path = run_dir / "experiment_summary_best.json"
+    if not _exp_sum_path.is_file():
+        _exp_sum_path = None
+        for _s14 in sorted(run_dir.glob("stage-14*/experiment_summary.json"), reverse=True):
+            _exp_sum_path = _s14
+            break
+    if _exp_sum_path and _exp_sum_path.is_file():
+        try:
+            from researchclaw.pipeline.stage_impls._paper_writing import _check_ablation_effectiveness
+            _abl_exp = json.loads(_exp_sum_path.read_text(encoding="utf-8"))
+            _abl_warnings = _check_ablation_effectiveness(_abl_exp, threshold=0.02)
+            if _abl_warnings:
+                _trivial_count = sum(1 for w in _abl_warnings if "ineffective" in w.lower() or "trivial" in w.lower())
+                _total_abl = max(1, len(_abl_warnings))
+                if _trivial_count / _total_abl > 0.5:
+                    _ablation_refine_hint = (
+                        "\n\n## ABLATION QUALITY ASSESSMENT (CRITICAL)\n"
+                        f"STRONG RECOMMENDATION: Choose REFINE.\n"
+                        f"{_trivial_count}/{_total_abl} ablations show <2% difference from baseline "
+                        f"(trivially similar). This means the ablation design is broken.\n"
+                        "Warnings:\n" + "\n".join(f"- {w}" for w in _abl_warnings) + "\n"
+                    )
+                    logger.warning("C: %d/%d ablations trivial → recommending REFINE", _trivial_count, _total_abl)
+        except Exception:  # noqa: BLE001
+            pass
+
     if llm is not None:
         _pm = prompts or PromptManager()
         _overlay = _get_evolution_overlay(run_dir, "research_decision")
         sp = _pm.for_stage("research_decision", evolution_overlay=_overlay, analysis=analysis)
-        _user = sp.user + _degenerate_hint + _diagnosis_hint
-        resp = llm.chat(
-            [{"role": "user", "content": _user}],
-            system=sp.system,
-        )
+        _user = sp.user + _degenerate_hint + _diagnosis_hint + _ablation_refine_hint
+        resp = _chat_with_prompt(llm, sp.system, _user)
         decision_md = resp.content
     else:
         decision_md = f"""# Research Decision

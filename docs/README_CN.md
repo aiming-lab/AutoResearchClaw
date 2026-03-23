@@ -18,7 +18,7 @@
 <p align="center">
   <a href="../LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
-  <a href="#测试"><img src="https://img.shields.io/badge/Tests-1634%20passed-brightgreen?logo=pytest&logoColor=white" alt="1634 Tests Passed"></a>
+  <a href="#测试"><img src="https://img.shields.io/badge/Tests-1823%20passed-brightgreen?logo=pytest&logoColor=white" alt="1823 Tests Passed"></a>
   <a href="https://github.com/aiming-lab/AutoResearchClaw"><img src="https://img.shields.io/badge/GitHub-AutoResearchClaw-181717?logo=github" alt="GitHub"></a>
   <a href="#openclaw-集成"><img src="https://img.shields.io/badge/OpenClaw-Compatible-ff4444?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==" alt="OpenClaw Compatible"></a>
   <a href="https://discord.gg/u4ksqW5P"><img src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
@@ -63,6 +63,7 @@
 ---
 
 ## 🔥 News
+- **[03/22/2026]** [v0.3.2](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.2) — **跨平台支持 + 重大稳定性更新** — AutoResearchClaw 现已支持任何 ACP 兼容的 AI 代理后端（Claude Code、Codex CLI、Copilot CLI、Gemini CLI、Kimi CLI），并通过 OpenClaw 桥接支持消息平台（Discord、Telegram、飞书、微信）。新增 CLI-agent 代码生成后端，将 Stage 10 和 13 委托给外部 CLI agent，支持预算控制和超时管理。同时包含反数据捏造系统（VerifiedRegistry + 实验诊断与修复循环），100+ 个 bug 修复，模块化 executor 重构，`--resume` 自动检测，LLM 重试加固，以及社区反馈修复。
 - **[03/18/2026]** [v0.3.1](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.1) — **OpenCode Beast Mode + Community Contributions** — New "Beast Mode" routes complex code generation to [OpenCode](https://github.com/anomalyco/opencode) with automatic complexity scoring and graceful fallback. Added Novita AI provider support, thread-safety hardening, improved LLM output parsing robustness, and 20+ bug fixes from community PRs and internal audit.
 - **[03/17/2026]** [v0.3.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.0) — **MetaClaw Integration** — AutoResearchClaw now supports [MetaClaw](https://github.com/aiming-lab/MetaClaw) cross-run learning: pipeline failures → structured lessons → reusable skills, injected into all 23 stages. **+18.3%** robustness in controlled experiments. Opt-in (`metaclaw_bridge.enabled: true`), fully backward-compatible. See [Integration Guide](#-metaclaw-integration).
 - **[03/16/2026]** [v0.2.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.2.0) — Three multi-agent subsystems (CodeAgent, BenchmarkAgent, FigureAgent), hardened Docker sandbox with network-policy-aware execution, 4-round paper quality audit (AI-slop detection, 7-dim review scoring, NeurIPS checklist), and 15+ bug fixes from production runs.
@@ -98,6 +99,8 @@ pip install -e . && researchclaw setup && researchclaw init && researchclaw run 
 </table>
 
 流水线**端到端无需人工介入**运行。实验失败时自动修复。假设不成立时自主转向。引用是假的？自动删除。
+
+🌍 **随处可用。** AutoResearchClaw 不绑定任何单一平台。你可以通过 CLI 独立运行，接入 [OpenClaw](https://github.com/openclaw/openclaw)，或对接任何 ACP 兼容的 AI 代理 —— 🤖 Claude Code、💻 Codex CLI、🐙 Copilot CLI、♊ Gemini CLI、🌙 Kimi CLI，应有尽有。而且，借助 OpenClaw 的消息桥接能力，你还可以从 💬 Discord、✈️ Telegram、🐦 飞书、💚 微信，或任何你团队日常使用的平台发起一次完整的研究。输入一个课题，输出一篇论文 —— 无论你在哪里输入。
 
 ---
 
@@ -313,6 +316,7 @@ researchclaw run --config config.yaml --topic "Your research idea" --auto-approv
 | **🧪 沙箱实验** | AST 验证代码、不可变 harness、NaN/Inf 快速失败、自修复、迭代优化（最多 10 轮）、部分结果捕获 |
 | **📝 顶会级写作** | NeurIPS/ICML/ICLR 模板，分段撰写（5,000-6,500 词），反数据捏造守卫、修订长度保障、反免责声明强制 |
 | **📐 模板切换** | `neurips_2025`、`iclr_2026`、`icml_2026` — Markdown → LaTeX，含数学公式、表格、图片、交叉引用、`\cite{}` |
+| **🛡️ 反数据捏造** | VerifiedRegistry 强制论文中使用经过验证的实验数据。自动诊断失败实验并在写作前修复。未验证数字被清理。 |
 | **🚦 质量门控** | 3 个人工审批门控（阶段 5、9、20），支持回滚。用 `--auto-approve` 跳过。 |
 
 ---
@@ -384,7 +388,7 @@ researchclaw run --config config.arc.yaml --topic "Your idea" --auto-approve
 
 - **默认：关闭。** 如果 `metaclaw_bridge` 不存在或 `enabled: false`，流水线行为与之前完全一致。
 - **无新依赖。** MetaClaw 是可选的——核心流水线无需它即可运行。
-- **所有 1,634 项现有测试通过**（包含集成代码）。
+- **所有 1,823 项现有测试通过**（包含集成代码）。
 
 ---
 
@@ -456,6 +460,42 @@ experiment:
     timeout_sec: 600                 # OpenCode 生成最大秒数
     max_retries: 1                   # 失败重试次数
     workspace_cleanup: true          # 采集后清理临时工作区
+  code_agent:                        # CodeAgent v2 — 多阶段代码生成
+    enabled: true                    # 使用 CodeAgent 替代传统单 prompt 代码生成
+    architecture_planning: true      # 生成代码前先生成深度实现蓝图
+    sequential_generation: true      # 按依赖 DAG 逐文件生成
+    hard_validation: true            # 基于 AST 的验证门控（拦截相同消融、硬编码指标）
+    hard_validation_max_repairs: 2   # 验证失败时最大修复次数
+    exec_fix_max_iterations: 3       # 执行修复循环最大次数
+    exec_fix_timeout_sec: 60         # 每次执行修复超时（秒）
+  benchmark_agent:                   # BenchmarkAgent — 自动数据集和基线选择
+    enabled: true                    # 启用 4-agent 基准测试流水线（Surveyor→Selector→Acquirer→Validator）
+    enable_hf_search: true           # 搜索 HuggingFace Datasets
+    enable_web_search: true          # 搜索 Google Scholar 获取基准
+    tier_limit: 2                    # 数据集级别过滤（1=小型/已缓存，2=中型，3=大型）
+    min_benchmarks: 1                # 最少需要的数据集数量
+    min_baselines: 2                 # 最少需要的基线方法数量
+  figure_agent:                      # FigureAgent — 学术图表生成
+    enabled: true                    # 启用 5-agent 图表流水线（Planner→CodeGen→Renderer→Critic→Integrator）
+    min_figures: 3                   # 最少生成图表数
+    max_figures: 8                   # 最多生成图表数
+    max_iterations: 3                # Critic 驱动的迭代优化次数
+    dpi: 300                         # 输出分辨率
+    strict_mode: false               # 图表生成失败时是否阻塞流水线
+  repair:                            # 反数据捏造实验修复
+    enabled: true                    # 自动诊断并修复失败的实验
+    max_cycles: 3                    # 修复重试循环数
+    min_completion_rate: 0.5         # >=50% 条件必须完成才可继续
+    min_conditions: 2                # 有效实验至少需要 2 个条件
+    use_opencode: true               # 通过 OpenCode Beast Mode 进行修复
+
+# === 网络搜索（可选）===
+web_search:
+  enabled: true                      # 启用网络增强文献搜索
+  tavily_api_key_env: "TAVILY_API_KEY"  # Tavily API key 环境变量（可选）
+  enable_scholar: true               # Google Scholar 搜索
+  enable_pdf_extraction: true        # 从 PDF 中提取文本
+  max_web_results: 10                # 每次查询最大网络结果数
 
 # === 导出 ===
 export:
@@ -494,6 +534,11 @@ metaclaw_bridge:
     enabled: true                  # 自动将教训转换为技能
     min_severity: "warning"        # 转换的最低严重级别
     max_skills_per_run: 3          # 每次流水线运行的最大新技能数
+  prm:                             # 过程奖励模型质量门控（可选）
+    enabled: false                 # 使用 LLM-as-judge 评分阶段产出
+    model: "gpt-5.4"              # PRM 评判模型
+    votes: 3                       # 多数投票次数
+    gate_stages: [5, 9, 15, 20]   # 应用 PRM 门控的阶段
 
 # === OpenClaw Bridge ===
 openclaw_bridge:

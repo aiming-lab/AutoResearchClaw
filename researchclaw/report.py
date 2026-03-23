@@ -118,7 +118,14 @@ def _experiment_section(run_dir: Path) -> str:
     else:
         lines.append("- Results: not available")
 
+    # BUG-215: Also search stage-14* versioned dirs when stage-14/ is missing.
     analysis_path = run_dir / "stage-14" / "analysis.md"
+    if not analysis_path.exists():
+        for _s14 in sorted(run_dir.glob("stage-14*"), reverse=True):
+            _alt = _s14 / "analysis.md"
+            if _alt.exists():
+                analysis_path = _alt
+                break
     if analysis_path.exists():
         lines.append(f"- Analysis: `{analysis_path.relative_to(run_dir)}`")
 

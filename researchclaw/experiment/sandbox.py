@@ -62,6 +62,18 @@ _CONDITION_METRIC_PATTERN = re.compile(
 _CONDITION_RATIO_PATTERN = re.compile(
     r"^condition=(\S+)\s+((?:\S+=\S+\s+)*)(\w[\w.]*)\s*:\s*(\d+)/(\d+)\s*$"
 )
+# BUG-181: Parse SUMMARY lines: "SUMMARY condition=X metric=Y mean=M std=S [success_rate=R]"
+_SUMMARY_PATTERN = re.compile(
+    r"^SUMMARY\s+condition=(\S+)\s+metric=(\S+)\s+mean=("
+    + _FLOAT_RE
+    + r")\s+std=("
+    + _FLOAT_RE
+    + r")"
+)
+# BUG-181: Multi-metric condition line: extract all "metric: value" pairs
+_CONDITION_MULTI_METRIC_RE = re.compile(
+    r"(\w[\w.]*)\s*:\s*(" + _FLOAT_RE + r")"
+)
 
 
 def _to_text(value: str | bytes | None) -> str:
@@ -76,6 +88,24 @@ def parse_metrics(stdout: str) -> dict[str, float]:
     metrics: dict[str, float] = {}
     for line in stdout.splitlines():
         stripped = line.strip()
+
+        # BUG-181: Parse SUMMARY lines first (most reliable, one metric per line)
+        # Format: "SUMMARY condition=X metric=Y mean=M std=S [success_rate=R]"
+        summary_match = _SUMMARY_PATTERN.match(stripped)
+        if summary_match:
+            cond_name, metric_name, mean_str, std_str = summary_match.groups()
+            if is_metric_name(metric_name):
+                try:
+                    mean_val = float(mean_str)
+                    std_val = float(std_str)
+                except ValueError:
+                    continue
+                if not (math.isnan(mean_val) or math.isinf(mean_val)):
+                    metrics[f"{cond_name}/{metric_name}"] = mean_val
+                    metrics[f"{cond_name}/{metric_name}_mean"] = mean_val
+                    metrics[f"{cond_name}/{metric_name}_std"] = std_val
+                    metrics[metric_name] = mean_val
+            continue
 
         # R16-1: Try ratio format first: "condition=X [tags] metric: N/M"
         ratio_match = _CONDITION_RATIO_PATTERN.match(stripped)
@@ -119,6 +149,33 @@ def parse_metrics(stdout: str) -> dict[str, float]:
                 metrics[f"{cond_name}/{name}"] = val
                 metrics[name] = val
             continue
+
+        # BUG-181: Multi-metric condition line fallback
+        # Handles: "condition=X seed=S metric1: v1 metric2: v2 ..."
+        # (lines not matched by _CONDITION_METRIC_PATTERN due to multiple metrics)
+        if stripped.startswith("condition="):
+            _parts = stripped.split()
+            _cond = _parts[0].split("=", 1)[1] if "=" in _parts[0] else None
+            _seed = None
+            for _p in _parts[1:]:
+                if _p.startswith("seed="):
+                    _seed = _p.split("=", 1)[1]
+                    break
+            if _cond:
+                for _mm in _CONDITION_MULTI_METRIC_RE.finditer(stripped):
+                    _mname, _mval_str = _mm.groups()
+                    if is_metric_name(_mname):
+                        try:
+                            _mval = float(_mval_str)
+                        except ValueError:
+                            continue
+                        if math.isnan(_mval) or math.isinf(_mval):
+                            continue
+                        if _seed is not None:
+                            metrics[f"{_cond}/{_seed}/{_mname}"] = _mval
+                        metrics[f"{_cond}/{_mname}"] = _mval
+                        metrics[_mname] = _mval
+                continue
 
         # Plain format: "metric: value"
         match = _METRIC_PATTERN.match(stripped)
@@ -301,7 +358,9 @@ class ExperimentSandbox:
         """
         import shutil
 
-        sandbox_project = self.workdir / "_project"
+        # BUG-DA8-06: Use unique dir name to prevent races under concurrent calls
+        self._run_counter += 1
+        sandbox_project = self.workdir / f"_project_{self._run_counter}"
         if sandbox_project.exists():
             shutil.rmtree(sandbox_project)
         sandbox_project.mkdir(parents=True, exist_ok=True)
@@ -326,6 +385,10 @@ class ExperimentSandbox:
                     logger.warning("Project contains experiment_harness.py — skipping (immutable)")
                     continue
                 dest.write_bytes(src_file.read_bytes())
+            elif src_file.is_dir() and not src_file.name.startswith("."):
+                import shutil as _shutil_proj
+                dest_dir = sandbox_project / src_file.name
+                _shutil_proj.copytree(src_file, dest_dir, dirs_exist_ok=True)
 
         # Post-copy resolve check — catches symlink-based escapes
         err = validate_entry_point_resolved(sandbox_project, entry_point)

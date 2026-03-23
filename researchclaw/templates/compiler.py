@@ -21,6 +21,23 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# BUG-201: Cyrillic → Latin transliteration for author names from Semantic Scholar.
+# pdflatex without T2A font encoding chokes on Cyrillic (e.g. "А. И. Колесников").
+_CYRILLIC_TO_LATIN_MAP: dict[str, str] = {
+    "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E",
+    "Ё": "E", "Ж": "Zh", "З": "Z", "И": "I", "Й": "Y", "К": "K",
+    "Л": "L", "М": "M", "Н": "N", "О": "O", "П": "P", "Р": "R",
+    "С": "S", "Т": "T", "У": "U", "Ф": "F", "Х": "Kh", "Ц": "Ts",
+    "Ч": "Ch", "Ш": "Sh", "Щ": "Shch", "Ъ": "", "Ы": "Y", "Ь": "",
+    "Э": "E", "Ю": "Yu", "Я": "Ya",
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e",
+    "ё": "e", "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k",
+    "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r",
+    "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts",
+    "ч": "ch", "ш": "sh", "щ": "shch", "ъ": "", "ы": "y", "ь": "",
+    "э": "e", "ю": "yu", "я": "ya",
+}
+
 
 @dataclass
 class CompileResult:
@@ -67,52 +84,60 @@ def compile_latex(
     result = CompileResult(success=False)
     work_dir = tex_path.parent
     tex_name = tex_path.name
+    bib_stem = tex_name.rsplit(".", 1)[0]
+
+    # Pre-flight: sanitize .bib file (escape bare & in field values)
+    # Find bib filename from \bibliography{...} in the tex source
+    _tex_src = tex_path.read_text(encoding="utf-8", errors="replace")
+    _bib_match = re.search(r"\\bibliography\{([^}]+)\}", _tex_src)
+    _bib_name = _bib_match.group(1) if _bib_match else bib_stem
+    _sanitize_bib_file(work_dir / f"{_bib_name}.bib")
+
+    # BUG-197: Pre-flight — strip invisible/problematic Unicode from .tex.
+    # Characters like U+202F (NARROW NO-BREAK SPACE) cause pdflatex to emit
+    # broken UTF-8 in error messages, which crashes subprocess text decoding
+    # and prevents the bibtex + multi-pass pipeline from completing.
+    _sanitize_tex_unicode(tex_path)
 
     for attempt in range(1, max_attempts + 1):
         result.attempts = attempt
-        try:
-            proc = subprocess.run(
-                [
-                    "pdflatex",
-                    "-interaction=nonstopmode",
-                    "-halt-on-error",
-                    tex_name,
-                ],
-                cwd=work_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            result.errors.append(f"pdflatex timed out after {timeout}s")
-            break
-        except FileNotFoundError:
-            result.errors.append("pdflatex not found")
+
+        # --- Full 3-pass compilation: pdflatex → bibtex → pdflatex × 2 ---
+        # Pass 1: generate .aux (needed by bibtex). Use nonstopmode (NOT
+        # halt-on-error) so .aux is written even when there are non-fatal
+        # errors like missing figures or overfull hboxes.
+        log_text, pass1_ok = _run_pdflatex(work_dir, tex_name, timeout)
+        if log_text is None:
+            result.errors.append(f"pdflatex failed on pass 1 (attempt {attempt})")
             break
 
-        log_text = proc.stdout + "\n" + proc.stderr
+        # BibTeX: always run after pass 1 — it only needs .aux + .bib.
+        # Previously gated behind pass1 success, which meant citations were
+        # always [?] when the first pass had non-fatal errors.
+        _run_bibtex(work_dir, bib_stem, timeout=60)
+
+        # Passes 2-3: resolve cross-references and bibliography
+        for _pass in (2, 3):
+            pass_log, _ = _run_pdflatex(work_dir, tex_name, timeout)
+            if pass_log is not None:
+                log_text = pass_log  # keep final pass log for error analysis
+
+        # Parse the final log for errors/warnings
         errors, warnings = _parse_log(log_text)
-        result.errors = errors
         result.warnings = warnings
         result.log_excerpt = log_text[-2000:] if len(log_text) > 2000 else log_text
 
-        if proc.returncode == 0:
+        # Check for fatal errors only — non-fatal ones (overfull hbox,
+        # missing figure in draft) don't prevent a valid PDF.
+        fatal = [e for e in errors if _is_fatal_error(e)]
+        result.errors = errors
+
+        if not fatal:
             result.success = True
-            # Run bibtex + two more pdflatex passes for bibliography & cross-refs
-            bib_stem = tex_name.rsplit(".", 1)[0]
-            _run_bibtex(work_dir, bib_stem, timeout=60)
-            for _pass in range(2):
-                subprocess.run(
-                    ["pdflatex", "-interaction=nonstopmode", tex_name],
-                    cwd=work_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
             logger.info("IMP-18: LaTeX compiled successfully on attempt %d", attempt)
             break
 
-        # Try to auto-fix errors
+        # Try to auto-fix fatal errors
         tex_text = tex_path.read_text(encoding="utf-8")
         fixed_text, fixes = fix_common_latex_errors(tex_text, errors)
         if fixes:
@@ -129,7 +154,7 @@ def compile_latex(
             logger.warning(
                 "IMP-18: Compilation failed on attempt %d with %d unfixable errors",
                 attempt,
-                len(errors),
+                len(fatal),
             )
             break
 
@@ -157,9 +182,26 @@ def fix_common_latex_errors(
         )
         fixes.append("Fixed escaped braces in tabular column specs")
 
+    # Fix escaped & inside tabular data rows: \& → & (column separator).
+    # The converter's _escape_latex escapes & globally; inside tabular
+    # environments the & must remain unescaped as the column separator.
+    if "\\begin{tabular}" in fixed and "\\&" in fixed:
+        fixed, n_tab_amp = _fix_escaped_ampersand_in_tabular(fixed)
+        if n_tab_amp:
+            fixes.append(f"Un-escaped \\& in {n_tab_amp} tabular data row(s)")
+
+    # Fix escaped \} at end of \caption{...}: \caption{text.\}} → \caption{text.}
+    if re.search(r"\\caption\{.*?\\\}", fixed):
+        fixed = re.sub(
+            r"(\\caption\{[^}]*?)\\\}",
+            r"\1}",
+            fixed,
+        )
+        fixes.append("Fixed escaped \\} in \\caption arguments")
+
     # Collapse multiple consecutive \clearpage into one
     if re.search(r"(\\clearpage\s*){2,}", fixed):
-        fixed = re.sub(r"(\\clearpage\s*){2,}", "\\clearpage\n", fixed)
+        fixed = re.sub(r"(\\clearpage\s*){2,}", "\\\\clearpage\n", fixed)
         fixes.append("Collapsed multiple \\clearpage commands")
 
     # Remove \textbf{Figure N.} paragraphs that follow \end{figure}
@@ -174,6 +216,40 @@ def fix_common_latex_errors(
             fixed,
         )
         fixes.append("Removed duplicate bold Figure captions after \\end{figure}")
+
+    # BUG-189: Fix Python-style pseudocode inside algorithmic environments.
+    # LLM generates `# comment` (LaTeX macro param char) and `var_name`
+    # (unescaped underscore) inside \STATE commands — causes cascading errors.
+    _algo_pat = re.compile(
+        r"(\\begin\{algorithmic\}.*?\\end\{algorithmic\})", re.DOTALL
+    )
+    def _fix_algo_block(m: re.Match) -> str:
+        block = m.group(0)
+        lines = block.split("\n")
+        out: list[str] = []
+        for line in lines:
+            if line.strip().startswith(("\\begin{", "\\end{")):
+                out.append(line)
+                continue
+            # Replace # (Python comment) with \COMMENT{...}
+            if "#" in line and "\\#" not in line:
+                line = re.sub(r"#\s*(.*)$", r"\\COMMENT{\1}", line)
+            # Escape bare underscores not already in math mode
+            # Don't touch \STATE, \IF, \FOR, etc. commands
+            parts = re.split(r"(\\\w+\{[^}]*\}|\$[^$]+\$)", line)
+            fixed_parts = []
+            for part in parts:
+                if part.startswith("\\") or part.startswith("$"):
+                    fixed_parts.append(part)
+                else:
+                    fixed_parts.append(re.sub(r'(?<!\\)_', r'\\_', part))
+            line = "".join(fixed_parts)
+            out.append(line)
+        return "\n".join(out)
+
+    if _algo_pat.search(fixed):
+        fixed = _algo_pat.sub(_fix_algo_block, fixed)
+        fixes.append("Fixed Python-style pseudocode in algorithmic environment")
 
     for err in errors:
         err_lower = err.lower()
@@ -196,11 +272,46 @@ def fix_common_latex_errors(
                     )
                     fixes.append(f"Removed undefined \\{cmd}")
 
-        # Missing $ inserted — likely unescaped underscore or caret
+        # Missing $ inserted — likely double-escaped underscore \\_
         if "missing $ inserted" in err_lower:
-            # Find bare underscores outside of math mode and escape them
-            # This is a conservative fix — only fixes _text_ patterns
-            pass  # Already handled by converter's _convert_inline
+            # BUG-182: Collapse double-escaped underscores \\_ to \_
+            if "\\\\_" in fixed:
+                fixed = fixed.replace("\\\\_", "\\_")
+                fixes.append("Collapsed double-escaped underscores")
+            # Also fix bare underscores outside math mode
+            # (conservative — only in obvious identifier patterns)
+            fixed = re.sub(
+                r"(?<!\\)(?<!\$)_(?=[A-Za-z])", r"\\_", fixed
+            )
+            if fixed != tex_text:
+                fixes.append("Escaped bare underscores outside math")
+
+        # \tilde outside math mode — classify as non-fatal, PDF still generates
+
+        # Encoding error for \k (Polish ogonek) → remove
+        if "\\k unavailable" in err_lower or "command \\k" in err_lower:
+            fixed = re.sub(r"\\k\{([^}]*)\}", r"\1", fixed)
+            fixed = re.sub(r"\\k\b", "", fixed)
+            fixes.append("Removed unsupported \\k command")
+
+        # BUG-197: Unicode character "not set up for use with LaTeX"
+        # Extract the hex codepoint and replace all instances in the tex.
+        # The error line is "! LaTeX Error: Unicode character X (U+XXXX)".
+        if "unicode character" in err_lower and "(u+" in err_lower:
+            cp_match = re.search(r"\(U\+([0-9A-Fa-f]{4,})\)", err)
+            if cp_match:
+                cp = int(cp_match.group(1), 16)
+                char = chr(cp)
+                if char in fixed:
+                    # Whitespace-like → ASCII space; others → remove
+                    import unicodedata
+                    cat = unicodedata.category(char)
+                    replacement = " " if cat.startswith("Z") else ""
+                    fixed = fixed.replace(char, replacement)
+                    fixes.append(
+                        f"Replaced Unicode U+{cp_match.group(1)} "
+                        f"({'space' if replacement == ' ' else 'removed'})"
+                    )
 
         # File not found
         if "file" in err_lower and "not found" in err_lower:
@@ -414,6 +525,18 @@ def remove_missing_figures(tex_text: str, stage_dir: Path) -> tuple[str, list[st
             img_rel = img_match.group(1)
             img_path = stage_dir / img_rel
             if not img_path.exists():
+                # Try prefix-matching: fig_main_results.png → fig_main_results_comparison.png
+                parent = img_path.parent
+                stem = img_path.stem  # e.g. "fig_main_results"
+                if parent.exists():
+                    candidates = sorted(parent.glob(f"{stem}*.png"))
+                    if len(candidates) == 1:
+                        new_rel = str(candidates[0].relative_to(stage_dir))
+                        logger.info(
+                            "Auto-mapped missing figure: %s → %s",
+                            img_rel, new_rel,
+                        )
+                        return block.replace(img_rel, new_rel)
                 logger.warning(
                     "Removing figure block with missing image: %s",
                     img_rel,
@@ -428,21 +551,318 @@ def remove_missing_figures(tex_text: str, stage_dir: Path) -> tuple[str, list[st
         tex_text,
         flags=re.DOTALL,
     )
+
+    # Clean up orphan \ref{fig:X} that point to removed/nonexistent figures.
+    # These render as "??" in the PDF.
+    if removed:
+        remaining_labels = set(re.findall(r"\\label\{(fig:[^}]+)\}", fixed))
+        all_fig_refs = set(re.findall(r"\\ref\{(fig:[^}]+)\}", fixed))
+        orphan = all_fig_refs - remaining_labels
+        for oref in orphan:
+            # Replace "Figure \ref{fig:X}" or "Fig. \ref{fig:X}" with empty
+            fixed = re.sub(
+                rf"(?:Figure|Fig\.?)\s*~?\\ref\{{{re.escape(oref)}\}}",
+                "(figure omitted)",
+                fixed,
+            )
+            # Replace standalone \ref{fig:X}
+            fixed = fixed.replace(f"\\ref{{{oref}}}", "(ref omitted)")
+
     return fixed, removed
 
 
+def _sanitize_tex_unicode(tex_path: Path) -> None:
+    """Strip problematic Unicode characters from .tex source.
+
+    BUG-197: Characters like U+202F (NARROW NO-BREAK SPACE), U+2009 (THIN
+    SPACE), U+00A0 (NO-BREAK SPACE), and other non-ASCII whitespace cause
+    pdflatex to emit broken UTF-8 in error messages, which crashes Python's
+    ``subprocess.run(text=True)`` and prevents the bibtex + multi-pass
+    pipeline from completing.  These characters appear when LLMs copy-paste
+    text from web sources or academic papers.
+
+    The safe replacement is a normal ASCII space for whitespace-like chars,
+    and empty string for invisible control chars.
+    """
+    if not tex_path.exists():
+        return
+    try:
+        text = tex_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return
+
+    # Whitespace-like Unicode → ASCII space
+    _UNICODE_SPACES = (
+        "\u00a0",  # NO-BREAK SPACE
+        "\u202f",  # NARROW NO-BREAK SPACE (BUG-197 trigger)
+        "\u2009",  # THIN SPACE
+        "\u2007",  # FIGURE SPACE
+        "\u2008",  # PUNCTUATION SPACE
+        "\u200a",  # HAIR SPACE
+        "\u205f",  # MEDIUM MATHEMATICAL SPACE
+        "\u3000",  # IDEOGRAPHIC SPACE
+    )
+    # Invisible control characters → remove
+    _INVISIBLE_CHARS = (
+        "\u200e",  # LEFT-TO-RIGHT MARK
+        "\u200f",  # RIGHT-TO-LEFT MARK
+        "\ufeff",  # BOM / ZERO-WIDTH NO-BREAK SPACE
+        "\u200b",  # ZERO-WIDTH SPACE
+        "\u200c",  # ZERO-WIDTH NON-JOINER
+        "\u200d",  # ZERO-WIDTH JOINER
+        "\u00ad",  # SOFT HYPHEN
+        "\u2060",  # WORD JOINER
+        "\u2028",  # LINE SEPARATOR
+        "\u2029",  # PARAGRAPH SEPARATOR
+    )
+
+    changed = False
+    for ch in _UNICODE_SPACES:
+        if ch in text:
+            text = text.replace(ch, " ")
+            changed = True
+    for ch in _INVISIBLE_CHARS:
+        if ch in text:
+            text = text.replace(ch, "")
+            changed = True
+
+    # BUG-201: Transliterate any Cyrillic that leaked into .tex (from bib
+    # entries inlined by bibtex, or from LLM-generated text).
+    _has_cyrillic = any("\u0400" <= ch <= "\u04ff" for ch in text)
+    if _has_cyrillic:
+        for cyr, lat in _CYRILLIC_TO_LATIN_MAP.items():
+            if cyr in text:
+                text = text.replace(cyr, lat)
+        changed = True
+
+    if changed:
+        tex_path.write_text(text, encoding="utf-8")
+        logger.info("BUG-197: Sanitized problematic Unicode in %s", tex_path.name)
+
+
+def _sanitize_bib_file(bib_path: Path) -> None:
+    """Sanitize .bib files: escape bare ``&`` and strip invisible Unicode.
+
+    BibTeX treats ``&`` as a special character; journal names like
+    "Science & Technology" must use ``\\&``.
+
+    BUG-180: Invisible Unicode characters (U+200E LEFT-TO-RIGHT MARK,
+    U+200F RIGHT-TO-LEFT MARK, U+FEFF BOM, U+200B ZERO-WIDTH SPACE,
+    U+200C/U+200D joiners, U+00AD soft hyphen) can appear in
+    copy-pasted author names and break pdflatex.
+    """
+    if not bib_path.exists():
+        return
+    try:
+        text = bib_path.read_text(encoding="utf-8")
+    except Exception:
+        return
+
+    # BUG-180: Strip invisible Unicode characters
+    _INVISIBLE_CHARS = (
+        "\u200e",  # LEFT-TO-RIGHT MARK
+        "\u200f",  # RIGHT-TO-LEFT MARK
+        "\ufeff",  # BOM / ZERO-WIDTH NO-BREAK SPACE
+        "\u200b",  # ZERO-WIDTH SPACE
+        "\u200c",  # ZERO-WIDTH NON-JOINER
+        "\u200d",  # ZERO-WIDTH JOINER
+        "\u00ad",  # SOFT HYPHEN
+        "\u2060",  # WORD JOINER
+        "\u2028",  # LINE SEPARATOR
+        "\u2029",  # PARAGRAPH SEPARATOR
+    )
+    for ch in _INVISIBLE_CHARS:
+        if ch in text:
+            text = text.replace(ch, "")
+
+    # BUG-201: Transliterate Cyrillic characters to Latin equivalents.
+    # Russian author names (e.g. "А. И. Колесников") from Semantic Scholar
+    # cause "! LaTeX Error: Unicode character" when pdflatex runs without T2A
+    # font encoding.  Transliterating preserves name readability.
+    _orig_text = text
+    for cyr, lat in _CYRILLIC_TO_LATIN_MAP.items():
+        if cyr in text:
+            text = text.replace(cyr, lat)
+
+    # BUG-217: Strip literal escape sequences (\n, \r, \t) in bib field values.
+    # These appear when API responses embed Python-style escapes into titles.
+    # A literal `\n` is never a valid BibTeX/LaTeX command and causes
+    # "Undefined control sequence" errors during compilation.
+    text = re.sub(r"\\n(?=\s)", " ", text)
+    text = re.sub(r"\\r(?=\s)", "", text)
+    text = re.sub(r"\\t(?=\s)", " ", text)
+
+    lines = text.split("\n")
+    changed = text != _orig_text
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Only fix field-value lines (e.g.  journal = {Science & Technology},)
+        # Skip @type{ lines, key lines, and URL/DOI fields (BUG-DA8-12)
+        if "=" in stripped and "{" in stripped and "&" in stripped and "\\&" not in stripped:
+            _field_name = stripped.split("=", 1)[0].strip().lower()
+            if _field_name in ("url", "doi", "howpublished", "eprint"):
+                continue  # Don't escape & in URLs
+            lines[i] = line.replace("&", "\\&")
+            changed = True
+
+    new_text = "\n".join(lines)
+    if new_text != text or changed:
+        bib_path.write_text(new_text, encoding="utf-8")
+        logger.info("Sanitized bib file %s", bib_path.name)
+
+
+def _fix_escaped_ampersand_in_tabular(tex: str) -> tuple[str, int]:
+    """Replace ``\\&`` with ``&`` inside tabular environments.
+
+    Only touches data rows (between \\toprule/\\midrule/\\bottomrule)
+    to avoid corrupting ``\\&`` in regular text.  Returns the fixed text
+    and the count of rows fixed.
+    """
+    count = 0
+
+    def _fix_tabular(m: re.Match[str]) -> str:
+        nonlocal count
+        block = m.group(0)
+        if "\\&" not in block:
+            return block
+        # Only un-escape \& on lines that look like data rows (contain \\)
+        lines = block.split("\n")
+        for i, line in enumerate(lines):
+            if "\\&" in line and "\\\\" in line:
+                lines[i] = line.replace("\\&", "&")
+                count += 1
+        return "\n".join(lines)
+
+    tex = re.sub(
+        r"\\begin\{tabular\}.*?\\end\{tabular\}",
+        _fix_tabular,
+        tex,
+        flags=re.DOTALL,
+    )
+    return tex, count
+
+
+def _run_pdflatex(
+    work_dir: Path,
+    tex_name: str,
+    timeout: int = 120,
+) -> tuple[str | None, bool]:
+    """Run a single pdflatex pass with ``-interaction=nonstopmode``.
+
+    Returns ``(log_text, success)``.  *log_text* is ``None`` only on
+    hard failures (timeout, binary missing).
+
+    BUG-197: Uses bytes mode with manual UTF-8 decoding (errors="replace")
+    instead of ``text=True``.  pdflatex stdout can contain broken UTF-8
+    sequences (e.g. from U+202F NARROW NO-BREAK SPACE error messages),
+    which cause ``UnicodeDecodeError`` with ``text=True`` and kill the
+    entire compilation pipeline — bibtex never runs, all citations [?].
+    """
+    try:
+        proc = subprocess.run(
+            ["pdflatex", "-interaction=nonstopmode", tex_name],
+            cwd=work_dir,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("pdflatex timed out after %ds", timeout)
+        return None, False
+    except FileNotFoundError:
+        return None, False
+    stdout = proc.stdout.decode("utf-8", errors="replace")
+    stderr = proc.stderr.decode("utf-8", errors="replace")
+    log_text = stdout + "\n" + stderr
+    return log_text, proc.returncode == 0
+
+
+# Fatal error patterns — these prevent a valid PDF from being generated.
+# Non-fatal issues (overfull hbox, missing figure, float warnings) still
+# produce a usable PDF and should NOT trigger the auto-fix retry loop.
+_FATAL_ERROR_PATTERNS = [
+    "runaway argument",
+    "emergency stop",
+    "fatal error",
+    "undefined control sequence",
+    "missing $ inserted",
+    "extra alignment tab",
+    "misplaced alignment tab",
+    "missing \\begin{document}",
+    "file `" ,  # file not found (sty, cls)
+    "file not found",
+]
+
+
+def _is_fatal_error(err: str) -> bool:
+    """Return True if *err* represents a fatal LaTeX error."""
+    err_lower = err.lower()
+    # "!" prefix errors are almost always fatal
+    if err.startswith("!"):
+        # Non-fatal "!" errors — PDF is still generated
+        if "overfull" in err_lower or "underfull" in err_lower:
+            return False
+        if "float(s) lost" in err_lower:
+            return False
+        if "too many unprocessed floats" in err_lower:
+            return False
+        # amsmath commands outside math mode — PDF still generates
+        if "allowed only in math mode" in err_lower:
+            return False
+        # Encoding errors for special characters — PDF still generates
+        if "unavailable in encoding" in err_lower:
+            return False
+        # BUG-197: Unicode character errors (e.g. U+202F NARROW NO-BREAK
+        # SPACE "not set up for use with LaTeX") — pdflatex skips the
+        # character and generates a valid PDF.  Treating these as fatal
+        # prevents the retry loop from succeeding and blocks bibtex.
+        # The error line is "! LaTeX Error: Unicode character X (U+XXXX)"
+        # — the "not set up" text is on a continuation line.
+        if "unicode character" in err_lower:
+            return False
+        return True
+    for pat in _FATAL_ERROR_PATTERNS:
+        if pat in err_lower:
+            return True
+    return False
+
+
 def _run_bibtex(work_dir: Path, stem: str, timeout: int = 60) -> bool:
-    """Run bibtex if the binary exists. Returns True on success."""
+    """Run bibtex if the binary exists.  Returns True on success.
+
+    BUG-197: Uses bytes mode with manual UTF-8 decoding (errors="replace")
+    to avoid ``UnicodeDecodeError`` from non-ASCII bib content.  Logs
+    failures so that silent bibtex issues are diagnosable.
+    """
     if not shutil.which("bibtex"):
+        logger.warning("bibtex not found on PATH — citations will be [?]")
         return False
     try:
         proc = subprocess.run(
             ["bibtex", stem],
             cwd=work_dir,
             capture_output=True,
-            text=True,
             timeout=timeout,
         )
-        return proc.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        stdout = proc.stdout.decode("utf-8", errors="replace")
+        stderr = proc.stderr.decode("utf-8", errors="replace")
+        if proc.returncode != 0:
+            logger.warning(
+                "bibtex returned %d: %s",
+                proc.returncode,
+                (stdout + stderr).strip()[:500],
+            )
+            return False
+        # Log bibtex output at debug level for diagnostics
+        if stdout.strip():
+            logger.debug("bibtex output: %s", stdout.strip()[:300])
+        # Verify .bbl was actually generated
+        bbl_path = work_dir / f"{stem}.bbl"
+        if not bbl_path.exists():
+            logger.warning("bibtex ran but %s.bbl was not generated", stem)
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning("bibtex timed out after %ds", timeout)
+        return False
+    except FileNotFoundError:
         return False

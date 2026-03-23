@@ -318,3 +318,170 @@ class TestRealArtifacts:
         best_metrics = summary.get("best_run", {}).get("metrics", {})
         if not best_metrics:
             assert len(reg.values) == 0
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — from_run_dir (merges multiple sources)
+# ---------------------------------------------------------------------------
+
+
+class TestFromRunDir:
+    def _write_summary(self, path: Path, data: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def test_from_run_dir_merges_multiple_stage14(self, tmp_path: Path) -> None:
+        """Two stage-14 dirs with different values → both present."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        # Stage-14 with CondA
+        self._write_summary(
+            run_dir / "stage-14" / "experiment_summary.json",
+            {
+                "best_run": {"metrics": {"CondA/0/metric": 80.0}},
+                "condition_summaries": {"CondA": {"metrics": {"metric": 80.0}}},
+                "metrics_summary": {},
+            },
+        )
+        # Stage-14-v2 with CondB
+        self._write_summary(
+            run_dir / "stage-14-v2" / "experiment_summary.json",
+            {
+                "best_run": {"metrics": {"CondB/0/metric": 90.0}},
+                "condition_summaries": {"CondB": {"metrics": {"metric": 90.0}}},
+                "metrics_summary": {},
+            },
+        )
+        reg = VerifiedRegistry.from_run_dir(run_dir)
+        assert "CondA" in reg.condition_names
+        assert "CondB" in reg.condition_names
+        assert reg.is_verified(80.0)
+        assert reg.is_verified(90.0)
+
+    def test_from_run_dir_includes_best(self, tmp_path: Path) -> None:
+        """experiment_summary_best.json values merged."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        # Only best summary at root level
+        self._write_summary(
+            run_dir / "experiment_summary_best.json",
+            {
+                "best_run": {"metrics": {"primary_metric": 0.95}},
+                "condition_summaries": {"Proposed": {"metrics": {"acc": 0.95}}},
+                "metrics_summary": {"acc": {"mean": 0.95, "min": 0.95, "max": 0.95}},
+            },
+        )
+        reg = VerifiedRegistry.from_run_dir(run_dir)
+        assert reg.is_verified(0.95)
+        assert reg.is_verified(95.0)  # percentage variant
+        assert "Proposed" in reg.condition_names
+
+    def test_from_run_dir_empty_dir(self, tmp_path: Path) -> None:
+        """Empty run dir → empty registry, no crash."""
+        run_dir = tmp_path / "empty_run"
+        run_dir.mkdir()
+        reg = VerifiedRegistry.from_run_dir(run_dir)
+        assert len(reg.values) == 0
+        assert len(reg.condition_names) == 0
+
+    # -----------------------------------------------------------------------
+    # BUG-222: best_only mode — REFINE bypass prevention
+    # -----------------------------------------------------------------------
+
+    def test_best_only_uses_experiment_summary_best(self, tmp_path: Path) -> None:
+        """best_only=True should use ONLY experiment_summary_best.json."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        # v1 (best): FeatureKD 74.52%
+        self._write_summary(
+            run_dir / "experiment_summary_best.json",
+            {
+                "best_run": {"metrics": {"FeatureKD/0/metric": 0.7452}},
+                "condition_summaries": {"FeatureKD": {"metrics": {"metric": 0.7452}}},
+                "metrics_summary": {"metric": {"mean": 0.7452}},
+            },
+        )
+        # v3 (regressed): FeatureKD 69.30%
+        self._write_summary(
+            run_dir / "stage-14" / "experiment_summary.json",
+            {
+                "best_run": {"metrics": {"FeatureKD/0/metric": 0.6930}},
+                "condition_summaries": {"FeatureKD": {"metrics": {"metric": 0.6930}}},
+                "metrics_summary": {"metric": {"mean": 0.6930}},
+            },
+        )
+
+        reg = VerifiedRegistry.from_run_dir(run_dir, best_only=True)
+        # Should ONLY have v1 (best) data
+        assert reg.is_verified(0.7452)
+        assert reg.is_verified(74.52)  # percentage variant
+        # Should NOT have v3 (regressed) data
+        assert not reg.is_verified(0.6930)
+        assert not reg.is_verified(69.30)
+
+    def test_best_only_excludes_refinement_log(self, tmp_path: Path) -> None:
+        """best_only=True should NOT merge refinement_log.json sandbox data."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        # Best summary
+        self._write_summary(
+            run_dir / "experiment_summary_best.json",
+            {
+                "best_run": {"metrics": {"primary_metric": 0.7452}},
+                "condition_summaries": {"FeatureKD": {"metrics": {"metric": 0.7452}}},
+                "metrics_summary": {"metric": {"mean": 0.7452}},
+            },
+        )
+        # Refinement log with sandbox metrics from regressed iteration
+        rl_dir = run_dir / "stage-13"
+        rl_dir.mkdir(parents=True)
+        (rl_dir / "refinement_log.json").write_text(json.dumps({
+            "iterations": [
+                {"sandbox": {"metrics": {"primary_metric": 0.6930, "best_metric": 0.6930}}}
+            ]
+        }), encoding="utf-8")
+
+        reg = VerifiedRegistry.from_run_dir(run_dir, best_only=True)
+        assert reg.is_verified(0.7452)
+        assert not reg.is_verified(0.6930), "Refinement log sandbox values should NOT be in best_only registry"
+
+    def test_best_only_falls_back_to_stage14(self, tmp_path: Path) -> None:
+        """best_only=True without best.json falls back to stage-14/ (non-versioned)."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        self._write_summary(
+            run_dir / "stage-14" / "experiment_summary.json",
+            {
+                "best_run": {"metrics": {"metric": 0.85}},
+                "condition_summaries": {"Baseline": {"metrics": {"metric": 0.85}}},
+                "metrics_summary": {"metric": {"mean": 0.85}},
+            },
+        )
+        reg = VerifiedRegistry.from_run_dir(run_dir, best_only=True)
+        assert reg.is_verified(0.85)
+        assert "Baseline" in reg.condition_names
+
+    def test_default_mode_still_merges_all(self, tmp_path: Path) -> None:
+        """Default (best_only=False) preserves backward-compat merging."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        self._write_summary(
+            run_dir / "experiment_summary_best.json",
+            {
+                "best_run": {"metrics": {"FeatureKD/0/metric": 0.7452}},
+                "condition_summaries": {"FeatureKD": {"metrics": {"metric": 0.7452}}},
+                "metrics_summary": {},
+            },
+        )
+        self._write_summary(
+            run_dir / "stage-14" / "experiment_summary.json",
+            {
+                "best_run": {"metrics": {"FeatureKD/0/metric": 0.6930}},
+                "condition_summaries": {"FeatureKD": {"metrics": {"metric": 0.6930}}},
+                "metrics_summary": {},
+            },
+        )
+        reg = VerifiedRegistry.from_run_dir(run_dir, best_only=False)
+        # Both should be present in non-best_only mode
+        assert reg.is_verified(0.7452)
+        assert reg.is_verified(0.6930)

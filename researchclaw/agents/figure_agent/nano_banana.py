@@ -124,13 +124,14 @@ class NanoBananaAgent(BaseAgent):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         if not image_figures:
-            return AgentStepResult(
+            # BUG-DA8-10: Use _make_result() to properly track LLM counters
+            return self._make_result(
                 success=True,
                 data={"generated": [], "count": 0},
             )
 
         if not self._api_key:
-            return AgentStepResult(
+            return self._make_result(
                 success=False,
                 error="No Gemini API key configured for Nano Banana",
                 data={"generated": [], "count": 0},
@@ -202,7 +203,7 @@ class NanoBananaAgent(BaseAgent):
 
         success_count = sum(1 for g in generated if g.get("success"))
 
-        return AgentStepResult(
+        return self._make_result(
             success=success_count > 0,
             data={
                 "generated": generated,

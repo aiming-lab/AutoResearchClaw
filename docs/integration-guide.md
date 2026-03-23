@@ -172,6 +172,17 @@ experiment:
     python_path: ".venv/bin/python3"   # Python binary for sandbox execution
     gpu_required: false
     max_memory_mb: 4096
+  code_agent:                        # CodeAgent v2 (multi-phase code generation)
+    enabled: true                    # Architecture planning + sequential file gen + hard validation
+  benchmark_agent:                   # Automated dataset & baseline selection
+    enabled: true                    # 4-agent pipeline: Surveyor→Selector→Acquirer→Validator
+  figure_agent:                      # Academic figure generation
+    enabled: true                    # 5-agent pipeline: Planner→CodeGen→Renderer→Critic→Integrator
+  repair:                            # Anti-fabrication experiment repair
+    enabled: true                    # Diagnose and fix failed experiments before paper writing
+    max_cycles: 3                    # Repair retry loops
+  opencode:                          # OpenCode Beast Mode (see README for details)
+    enabled: true
 ```
 
 ### Export Settings
@@ -228,6 +239,8 @@ researchclaw run --config config.yaml --topic "Transformer attention for time se
 
 | Command | What It Does |
 |---------|-------------|
+| `researchclaw setup` | Interactive first-time setup (installs OpenCode Beast Mode, checks Docker/LaTeX) |
+| `researchclaw init` | Interactive config creation (choose LLM provider, creates `config.arc.yaml`) |
 | `researchclaw run` | Run the full 23-stage pipeline |
 | `researchclaw validate` | Check your config file for errors |
 | `researchclaw doctor` | Diagnose environment issues (Python, dependencies, API connectivity) |
@@ -242,9 +255,10 @@ researchclaw run --config config.yaml --topic "Transformer attention for time se
 | `--output path` | Output directory (default: `artifacts/<run-id>/`) |
 | `--auto-approve` | Skip manual approval at gate stages (5, 9, 20) |
 | `--from-stage STAGE_NAME` | Start from a specific stage (e.g., `PAPER_OUTLINE`) |
-| `--resume` | Resume from the last checkpoint |
+| `--resume` | Resume from the last checkpoint (auto-detects the most recent run matching your topic) |
 | `--skip-preflight` | Skip LLM connectivity check before starting |
 | `--skip-noncritical-stage` | Skip non-critical stages on failure instead of aborting |
+| `--no-graceful-degradation` | Fail pipeline on quality gate failure instead of degrading gracefully |
 
 ### Examples
 
@@ -690,7 +704,7 @@ In controlled A/B experiments (same topic, same LLM, same configuration):
 
 - **Default: OFF.** Without `metaclaw_bridge.enabled: true`, the pipeline is completely unchanged.
 - **No new required dependencies.** MetaClaw is optional.
-- **All 1,284 existing tests pass** with the integration code.
+- **All 1,823 existing tests pass** with the integration code.
 
 ---
 
@@ -865,4 +879,4 @@ A: Not recommended — the pipeline builds on prior stages' outputs. Start a new
 
 ---
 
-*Last updated: March 2026 · AutoResearchClaw v0.3.0*
+*Last updated: March 2026 · AutoResearchClaw v0.3.1+*

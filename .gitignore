@@ -83,6 +83,9 @@ cli_pause
 
 config_*.yaml
 
+# Frontend (local dev only)
+frontend/
+
 # Test outputs and run logs (local only)
 test_outputs*/
 records/

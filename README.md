@@ -18,7 +18,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
-  <a href="#testing"><img src="https://img.shields.io/badge/Tests-1634%20passed-brightgreen?logo=pytest&logoColor=white" alt="1633 Tests Passed"></a>
+  <a href="#testing"><img src="https://img.shields.io/badge/Tests-1823%20passed-brightgreen?logo=pytest&logoColor=white" alt="1823 Tests Passed"></a>
   <a href="https://github.com/aiming-lab/AutoResearchClaw"><img src="https://img.shields.io/badge/GitHub-AutoResearchClaw-181717?logo=github" alt="GitHub"></a>
   <a href="#openclaw-integration"><img src="https://img.shields.io/badge/OpenClaw-Compatible-ff4444?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==" alt="OpenClaw Compatible"></a>
   <a href="https://discord.gg/u4ksqW5P"><img src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
@@ -62,6 +62,7 @@
 ---
 
 ## 🔥 News
+- **[03/22/2026]** [v0.3.2](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.2) — **Cross-Platform Support + Major Stability** — AutoResearchClaw now runs on any ACP-compatible agent backend (Claude Code, Codex CLI, Copilot CLI, Gemini CLI, Kimi CLI) and supports messaging platforms (Discord, Telegram, Lark, WeChat) via OpenClaw bridge. New CLI-agent code generation backend delegates Stages 10 & 13 to external CLI agents with budget control and timeout management. Also includes anti-fabrication system (VerifiedRegistry + experiment diagnosis & repair loop), 100+ bug fixes, modular executor refactoring, `--resume` auto-detection, LLM retry hardening, and community-reported fixes. 
 - **[03/18/2026]** [v0.3.1](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.1) — **OpenCode Beast Mode + Community Contributions** — New "Beast Mode" routes complex code generation to [OpenCode](https://github.com/anomalyco/opencode) with automatic complexity scoring and graceful fallback. Added Novita AI provider support, thread-safety hardening, improved LLM output parsing robustness, and 20+ bug fixes from community PRs and internal audit.
 - **[03/17/2026]** [v0.3.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.0) — **MetaClaw Integration** — AutoResearchClaw now supports [MetaClaw](https://github.com/aiming-lab/MetaClaw) cross-run learning: pipeline failures → structured lessons → reusable skills, injected into all 23 stages. **+18.3%** robustness in controlled experiments. Opt-in (`metaclaw_bridge.enabled: true`), fully backward-compatible. See [Integration Guide](#-metaclaw-integration).
 - **[03/16/2026]** [v0.2.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.2.0) — Three multi-agent subsystems (CodeAgent, BenchmarkAgent, FigureAgent), hardened Docker sandbox with network-policy-aware execution, 4-round paper quality audit (AI-slop detection, 7-dim review scoring, NeurIPS checklist), and 15+ bug fixes from production runs.
@@ -97,6 +98,8 @@ Drop a research topic — get back a full academic paper with real literature fr
 </table>
 
 The pipeline runs **end-to-end without human intervention**. When experiments fail, it self-heals. When hypotheses don't hold, it pivots. When citations are fake, it kills them.
+
+🌍 **Run it anywhere.** AutoResearchClaw isn't locked to a single platform. Use it standalone via CLI, plug it into [OpenClaw](https://github.com/openclaw/openclaw), or wire it up through any ACP-compatible agent — 🤖 Claude Code, 💻 Codex CLI, 🐙 Copilot CLI, ♊ Gemini CLI, 🌙 Kimi CLI, you name it. And because OpenClaw bridges to messaging platforms, you can kick off a full research run from 💬 Discord, ✈️ Telegram, 🐦 Lark (飞书), 💚 WeChat, or wherever your team already hangs out. One topic in, one paper out — no matter where you type it.
 
 ---
 
@@ -312,6 +315,7 @@ Phase D: Experiment Design         Phase H: Finalization
 | **🧪 Sandbox Experiments** | AST-validated code, immutable harness, NaN/Inf fast-fail, self-healing repair, iterative refinement (up to 10 rounds), partial result capture |
 | **📝 Conference-Grade Writing** | NeurIPS/ICML/ICLR templates, section-by-section drafting (5,000-6,500 words), anti-fabrication guard, revision length guard, anti-disclaimer enforcement |
 | **📐 Template Switching** | `neurips_2025`, `iclr_2026`, `icml_2026` — Markdown → LaTeX with math, tables, figures, cross-refs, `\cite{}` |
+| **🛡️ Anti-Fabrication** | VerifiedRegistry enforces ground-truth experiment data in papers. Auto-diagnoses failed experiments and repairs them before writing. Unverified numbers sanitized. |
 | **🚦 Quality Gates** | 3 human-in-the-loop gates (Stages 5, 9, 20) with rollback. Skip with `--auto-approve`. |
 
 ---
@@ -383,7 +387,7 @@ In controlled A/B experiments (same topic, same LLM, same configuration):
 
 - **Default: OFF.** If `metaclaw_bridge` is absent or `enabled: false`, the pipeline behaves exactly as before.
 - **No new dependencies.** MetaClaw is optional — the core pipeline works without it.
-- **All 1,634 existing tests pass** with the integration code present.
+- **All 1,823 existing tests pass** with the integration code present.
 
 ---
 
@@ -455,6 +459,42 @@ experiment:
     timeout_sec: 600                 # Max seconds for OpenCode generation
     max_retries: 1                   # Retry count on failure
     workspace_cleanup: true          # Remove temp workspace after collection
+  code_agent:                        # CodeAgent v2 — multi-phase code generation
+    enabled: true                    # Use CodeAgent instead of legacy single-prompt codegen
+    architecture_planning: true      # Generate deep implementation blueprint before coding
+    sequential_generation: true      # Generate files one-by-one following dependency DAG
+    hard_validation: true            # AST-based validation gates (blocks identical ablations, hardcoded metrics)
+    hard_validation_max_repairs: 2   # Max repair attempts when validation fails
+    exec_fix_max_iterations: 3       # Execution-in-the-loop fix attempts
+    exec_fix_timeout_sec: 60         # Timeout per exec-fix attempt
+  benchmark_agent:                   # BenchmarkAgent — automated dataset & baseline selection
+    enabled: true                    # Enable 4-agent benchmark pipeline (Surveyor→Selector→Acquirer→Validator)
+    enable_hf_search: true           # Search HuggingFace Datasets
+    enable_web_search: true          # Search Google Scholar for benchmarks
+    tier_limit: 2                    # Dataset tier filtering (1=small/cached, 2=medium, 3=large)
+    min_benchmarks: 1                # Minimum datasets required
+    min_baselines: 2                 # Minimum baseline methods required
+  figure_agent:                      # FigureAgent — academic figure generation
+    enabled: true                    # Enable 5-agent figure pipeline (Planner→CodeGen→Renderer→Critic→Integrator)
+    min_figures: 3                   # Minimum figures to generate
+    max_figures: 8                   # Maximum figures
+    max_iterations: 3                # Critic-driven refinement iterations
+    dpi: 300                         # Output resolution
+    strict_mode: false               # Fail pipeline if figure generation fails
+  repair:                            # Anti-fabrication experiment repair
+    enabled: true                    # Auto-diagnose and repair failed experiments
+    max_cycles: 3                    # Repair retry loops
+    min_completion_rate: 0.5         # >=50% conditions must complete to proceed
+    min_conditions: 2                # At least 2 conditions for valid experiment
+    use_opencode: true               # Route repairs through OpenCode Beast Mode
+
+# === Web Search (Optional) ===
+web_search:
+  enabled: true                      # Enable web-augmented literature search
+  tavily_api_key_env: "TAVILY_API_KEY"  # Tavily API key env var (optional)
+  enable_scholar: true               # Google Scholar search
+  enable_pdf_extraction: true        # Extract text from PDFs
+  max_web_results: 10                # Max web results per query
 
 # === Export ===
 export:
@@ -493,6 +533,11 @@ metaclaw_bridge:
     enabled: true                  # Auto-convert lessons to skills
     min_severity: "warning"        # Minimum severity to convert
     max_skills_per_run: 3          # Max new skills per pipeline run
+  prm:                             # Process Reward Model quality gate (optional)
+    enabled: false                 # Use LLM-as-judge to score stage outputs
+    model: "gpt-5.4"              # PRM judge model
+    votes: 3                       # Majority vote count
+    gate_stages: [5, 9, 15, 20]   # Stages to apply PRM gates
 
 # === OpenClaw Bridge ===
 openclaw_bridge:

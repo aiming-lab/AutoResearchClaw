@@ -250,6 +250,83 @@ class TestRealArtifacts:
         # Should be technical_report or preliminary_study at best
         assert qa.mode in (PaperMode.TECHNICAL_REPORT, PaperMode.PRELIMINARY_STUDY)
 
+class TestDatasetNotFoundError:
+    """BUG-203: HuggingFace DatasetNotFoundError should be caught."""
+
+    def test_detects_hf_dataset_not_found(self):
+        stderr = (
+            "Traceback (most recent call last):\n"
+            "  File \"/workspace/setup.py\", line 11, in main\n"
+            "datasets.exceptions.DatasetNotFoundError: "
+            "Dataset 'cifar10_corrupted' doesn't exist on the Hub or cannot be accessed.\n"
+        )
+        diag = diagnose_experiment(
+            experiment_summary={"condition_summaries": {}, "best_run": {"metrics": {}}},
+            stderr=stderr,
+        )
+        ds_issues = [d for d in diag.deficiencies if d.type == DeficiencyType.DATASET_UNAVAILABLE]
+        assert len(ds_issues) >= 1
+        assert "HuggingFace" in ds_issues[0].description
+        # Should NOT also appear as a generic CODE_CRASH
+        crashes = [d for d in diag.deficiencies if d.type == DeficiencyType.CODE_CRASH]
+        assert not any("DatasetNotFoundError" in c.description for c in crashes)
+
+    def test_suggested_fix_mentions_precached(self):
+        stderr = (
+            "DatasetNotFoundError: Dataset 'imagenet_v2' "
+            "doesn't exist on the Hub or cannot be accessed.\n"
+        )
+        diag = diagnose_experiment(
+            experiment_summary={"condition_summaries": {}, "best_run": {"metrics": {}}},
+            stderr=stderr,
+        )
+        ds_issues = [d for d in diag.deficiencies if d.type == DeficiencyType.DATASET_UNAVAILABLE]
+        assert any("/opt/datasets" in d.suggested_fix for d in ds_issues)
+
+
+class TestNearRandomAccuracy:
+    """BUG-204: Detect near-random accuracy in experiment results."""
+
+    def test_detects_near_random_cifar10(self):
+        """8.91% accuracy on CIFAR-10 should be flagged."""
+        diag = diagnose_experiment(
+            experiment_summary={
+                "condition_summaries": {"cond_a": {"metrics": {"top1_accuracy": 8.91}}},
+                "metrics_summary": {"top1_accuracy": {"min": 8.42, "max": 8.91, "mean": 8.67}},
+                "best_run": {"metrics": {}},
+            },
+        )
+        hp_issues = [d for d in diag.deficiencies if d.type == DeficiencyType.HYPERPARAMETER_ISSUE]
+        assert any("random chance" in d.description for d in hp_issues)
+
+    def test_normal_accuracy_not_flagged(self):
+        """73% accuracy should NOT be flagged."""
+        diag = diagnose_experiment(
+            experiment_summary={
+                "condition_summaries": {"baseline": {"metrics": {"accuracy": 73.07}}},
+                "metrics_summary": {"accuracy": {"min": 68.0, "max": 73.07, "mean": 70.5}},
+                "best_run": {"metrics": {}},
+            },
+        )
+        hp_issues = [d for d in diag.deficiencies if d.type == DeficiencyType.HYPERPARAMETER_ISSUE]
+        assert not any("random chance" in d.description for d in hp_issues)
+
+    def test_zero_accuracy_not_flagged(self):
+        """0% accuracy (no data) should NOT be flagged by this check."""
+        diag = diagnose_experiment(
+            experiment_summary={
+                "condition_summaries": {},
+                "metrics_summary": {},
+                "best_run": {"metrics": {}},
+            },
+        )
+        hp_issues = [d for d in diag.deficiencies if d.type == DeficiencyType.HYPERPARAMETER_ISSUE]
+        assert not any("random chance" in d.description for d in hp_issues)
+
+
+class TestRealArtifactsContinued(TestRealArtifacts):
+    """Continuation of real artifact tests (after TestDatasetNotFoundError)."""
+
     def test_run_acbdfa_diagnosis(self):
         """Run acbdfa — 2 architectures, S4D nearly random."""
         summary, ref_log = self._load("acbdfa")

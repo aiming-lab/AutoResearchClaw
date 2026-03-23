@@ -942,6 +942,160 @@ def check_api_correctness(code: str, fname: str = "main.py") -> list[str]:
     return warnings
 
 
+def check_undefined_calls(code: str, fname: str = "main.py") -> list[str]:
+    """Detect calls to undefined functions/names in experiment code.
+
+    Catches the pattern where a function is called but never defined or imported,
+    which would cause NameError at runtime.
+    """
+    warnings: list[str] = []
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return warnings
+
+    # Common builtins that are always available
+    builtins = {
+        "print", "len", "range", "enumerate", "zip", "map", "filter", "sorted",
+        "list", "dict", "set", "tuple", "str", "int", "float", "bool", "bytes",
+        "type", "isinstance", "issubclass", "hasattr", "getattr", "setattr",
+        "delattr", "callable", "iter", "next", "reversed", "slice", "super",
+        "property", "staticmethod", "classmethod", "abs", "all", "any", "bin",
+        "chr", "ord", "hex", "oct", "pow", "round", "sum", "min", "max", "open",
+        "input", "repr", "hash", "id", "dir", "vars", "globals", "locals",
+        "format", "ascii", "object", "Exception", "ValueError", "TypeError",
+        "KeyError", "IndexError", "AttributeError", "RuntimeError", "StopIteration",
+        "NotImplementedError", "AssertionError", "ImportError", "FileNotFoundError",
+        "OSError", "IOError", "ZeroDivisionError", "OverflowError", "MemoryError",
+        "RecursionError", "SystemExit", "KeyboardInterrupt", "GeneratorExit",
+        "BaseException", "Warning", "DeprecationWarning", "UserWarning",
+        "FutureWarning", "PendingDeprecationWarning", "SyntaxWarning",
+        "RuntimeWarning", "ResourceWarning", "BytesWarning", "UnicodeWarning",
+        "breakpoint", "memoryview", "bytearray", "frozenset", "complex",
+        "divmod", "eval", "exec", "compile", "__import__", "help", "exit", "quit",
+    }
+
+    # Collect all defined names in the module
+    defined_names: set[str] = set()
+
+    for node in ast.walk(tree):
+        # Function definitions
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defined_names.add(node.name)
+        # Class definitions
+        elif isinstance(node, ast.ClassDef):
+            defined_names.add(node.name)
+        # Imports
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname if alias.asname else alias.name.split(".")[0]
+                defined_names.add(name)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                name = alias.asname if alias.asname else alias.name
+                if name != "*":
+                    defined_names.add(name)
+        # Assignments (including comprehensions)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    defined_names.add(target.id)
+                elif isinstance(target, ast.Tuple):
+                    for elt in target.elts:
+                        if isinstance(elt, ast.Name):
+                            defined_names.add(elt.id)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                defined_names.add(node.target.id)
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name):
+                defined_names.add(node.target.id)
+        # For loop targets
+        elif isinstance(node, ast.For):
+            if isinstance(node.target, ast.Name):
+                defined_names.add(node.target.id)
+            elif isinstance(node.target, ast.Tuple):
+                for elt in node.target.elts:
+                    if isinstance(elt, ast.Name):
+                        defined_names.add(elt.id)
+        # With statement targets
+        elif isinstance(node, ast.With):
+            for item in node.items:
+                if item.optional_vars and isinstance(item.optional_vars, ast.Name):
+                    defined_names.add(item.optional_vars.id)
+        # Exception handlers
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                defined_names.add(node.name)
+        # Named expressions (walrus operator)
+        elif isinstance(node, ast.NamedExpr):
+            if isinstance(node.target, ast.Name):
+                defined_names.add(node.target.id)
+
+    # Also collect function parameters
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for arg in node.args.args:
+                defined_names.add(arg.arg)
+            for arg in node.args.posonlyargs:
+                defined_names.add(arg.arg)
+            for arg in node.args.kwonlyargs:
+                defined_names.add(arg.arg)
+            if node.args.vararg:
+                defined_names.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                defined_names.add(node.args.kwarg.arg)
+
+    # Now find all function calls to bare names (not attributes like obj.method())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            # Only check bare name calls, not attribute calls (obj.method())
+            if isinstance(node.func, ast.Name):
+                call_name = node.func.id
+                if (
+                    call_name not in defined_names
+                    and call_name not in builtins
+                ):
+                    warnings.append(
+                        f"[{fname}:{node.lineno}] Call to undefined function "
+                        f"'{call_name}()' — this will raise NameError at runtime. "
+                        f"Either define the function or remove the call."
+                    )
+
+    return warnings
+
+
+def check_filename_collisions(files: dict[str, str]) -> list[str]:
+    """BUG-202: Detect local .py filenames that shadow pip/stdlib packages.
+
+    The LLM commonly generates ``config.py``, ``models.py``, etc. which get
+    shadowed by pip-installed packages (e.g. ``pip install config``).  The
+    result is an import crash at runtime.
+    """
+    # Filenames (without .py) that are known to collide with pip/stdlib packages.
+    _SHADOW_RISK: set[str] = {
+        # pip packages frequently installed as transitive deps
+        "config", "test", "tests", "types", "typing_extensions",
+        # stdlib modules the LLM might accidentally shadow
+        "io", "logging", "json", "time", "random", "copy", "math",
+        "os", "sys", "collections", "functools", "abc", "re",
+        "statistics", "signal", "pickle", "itertools",
+        "string", "tokenize", "token", "email", "calendar",
+        "numbers", "operator", "queue", "code", "profile",
+    }
+    warnings: list[str] = []
+    for fname in files:
+        stem = fname.removesuffix(".py") if fname.endswith(".py") else None
+        if stem and stem in _SHADOW_RISK:
+            warnings.append(
+                f"[{fname}] Filename shadows stdlib/pip package '{stem}'. "
+                f"Rename to e.g. '{stem}_config.py' or 'experiment_{stem}.py' "
+                f"to avoid import collisions at runtime."
+            )
+    return warnings
+
+
 def deep_validate_files(
     files: dict[str, str],
 ) -> list[str]:
@@ -951,6 +1105,7 @@ def deep_validate_files(
     """
     warnings: list[str] = []
     warnings.extend(check_class_quality(files))
+    warnings.extend(check_filename_collisions(files))
     for fname, code in files.items():
         if not fname.endswith(".py"):
             continue

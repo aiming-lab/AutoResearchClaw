@@ -159,6 +159,15 @@ class ColabDriveSandbox:
         entry_point: str = "main.py",
         timeout_sec: int = 300,
     ) -> SandboxResult:
+        # BUG-DA8-07: Validate entry_point (path traversal, etc.) like other backends
+        from researchclaw.experiment.sandbox import validate_entry_point
+        err = validate_entry_point(entry_point)
+        if err:
+            return SandboxResult(
+                returncode=-1, stdout="", stderr=err,
+                elapsed_sec=0.0, metrics={},
+            )
+
         self._run_counter += 1
         task_id = f"rc-{uuid.uuid4().hex[:8]}"
 
@@ -182,6 +191,14 @@ class ColabDriveSandbox:
             return SandboxResult(
                 returncode=-1, stdout="",
                 stderr=f"Entry point {entry_point} not found",
+                elapsed_sec=0.0, metrics={},
+            )
+        # BUG-DA8-07: Check resolved path doesn't escape staging dir
+        from researchclaw.experiment.sandbox import validate_entry_point_resolved
+        err2 = validate_entry_point_resolved(staging, entry_point)
+        if err2:
+            return SandboxResult(
+                returncode=-1, stdout="", stderr=err2,
                 elapsed_sec=0.0, metrics={},
             )
 

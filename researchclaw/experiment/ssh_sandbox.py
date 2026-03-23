@@ -287,6 +287,10 @@ class SshRemoteSandbox:
             "docker", "run", "--rm",
             "-v", f"{shlex.quote(remote_dir)}:/workspace",
             "-w", "/workspace",
+            # BUG-DA8-14: Mirror local Docker sandbox security hardening
+            "-e", "HOME=/workspace/.home",
+            "-e", "TORCH_HOME=/workspace/.home/.cache/torch",
+            "-e", "MPLCONFIGDIR=/tmp/matplotlib",
             f"--memory={cfg.docker_memory_limit_mb}m",
             f"--shm-size={cfg.docker_shm_size_mb}m",
         ]

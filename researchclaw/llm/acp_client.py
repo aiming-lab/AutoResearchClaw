@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import weakref
 from dataclasses import dataclass
@@ -203,7 +204,8 @@ class ACPClient:
             [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
              self.config.agent, "sessions", "ensure",
              "--name", self.config.session_name],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30,
         )
         if result.returncode != 0:
             # Fall back to 'new'
@@ -211,7 +213,8 @@ class ACPClient:
                 [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "sessions", "new",
                  "--name", self.config.session_name],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30,
             )
             if result.returncode != 0:
                 raise RuntimeError(
@@ -220,8 +223,17 @@ class ACPClient:
         self._session_ready = True
         logger.info("ACP session '%s' ready (%s)", self.config.session_name, self.config.agent)
 
-    # Linux MAX_ARG_STRLEN is 128KB; stay well under to leave room for env
-    _MAX_CLI_PROMPT_BYTES = 100_000
+    # Linux MAX_ARG_STRLEN is 128 KB; Windows CreateProcess limit is ~32 KB.
+    _MAX_CLI_PROMPT_BYTES = 30_000 if sys.platform == "win32" else 100_000
+
+    # Localized error snippets for "command line too long" (may be in any OS language)
+    _CMD_TOO_LONG_HINTS = (
+        "too long",       # English Windows
+        "trop long",      # French Windows
+        "zu lang",        # German Windows
+        "demasiado larg", # Spanish Windows
+        "e2big",          # POSIX
+    )
 
     # Error patterns that indicate a dead/stale session (retryable)
     _RECONNECT_ERRORS = (
@@ -260,7 +272,33 @@ class ACPClient:
                 if use_file:
                     return self._send_prompt_via_file(acpx, prompt)
                 return self._send_prompt_cli(acpx, prompt)
+            except OSError as os_exc:
+                # OS-level failure (e.g., Windows CreateProcess arg limit).
+                # Fall back to temp-file transport automatically.
+                if not use_file:
+                    logger.warning(
+                        "CLI subprocess raised OSError, "
+                        "falling back to temp file: %s",
+                        os_exc,
+                    )
+                    use_file = True
+                    return self._send_prompt_via_file(acpx, prompt)
+                raise RuntimeError(
+                    f"ACP prompt failed: {os_exc}"
+                ) from os_exc
             except RuntimeError as exc:
+                # Detect localized "command line too long" from subprocess stderr
+                exc_lower = str(exc).lower()
+                if not use_file and any(
+                    h in exc_lower for h in self._CMD_TOO_LONG_HINTS
+                ):
+                    logger.warning(
+                        "CLI prompt too long for OS, "
+                        "falling back to temp file: %s",
+                        exc,
+                    )
+                    use_file = True
+                    return self._send_prompt_via_file(acpx, prompt)
                 if not any(pat in str(exc) for pat in self._RECONNECT_ERRORS):
                     raise
                 last_exc = exc
@@ -290,8 +328,8 @@ class ACPClient:
                 [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "-s", self.config.session_name,
                  prompt],
-                capture_output=True, text=True,
-                timeout=self.config.timeout_sec,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=self.config.timeout_sec,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
@@ -299,7 +337,7 @@ class ACPClient:
             ) from exc
 
         if result.returncode != 0:
-            stderr = result.stderr.strip()
+            stderr = (result.stderr or "").strip()
             raise RuntimeError(f"ACP prompt failed (exit {result.returncode}): {stderr}")
 
         return self._extract_response(result.stdout)
@@ -307,7 +345,7 @@ class ACPClient:
     def _send_prompt_via_file(self, acpx: str, prompt: str) -> str:
         """Write prompt to a temp file, ask the agent to read and respond."""
         fd, prompt_path = tempfile.mkstemp(
-            suffix=".md", prefix="rc_prompt_", dir="/tmp"
+            suffix=".md", prefix="rc_prompt_",
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -325,8 +363,8 @@ class ACPClient:
                     [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
                      self.config.agent, "-s", self.config.session_name,
                      short_prompt],
-                    capture_output=True, text=True,
-                    timeout=self.config.timeout_sec,
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=self.config.timeout_sec,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError(
@@ -334,7 +372,7 @@ class ACPClient:
                 ) from exc
 
             if result.returncode != 0:
-                stderr = result.stderr.strip()
+                stderr = (result.stderr or "").strip()
                 raise RuntimeError(
                     f"ACP prompt failed (exit {result.returncode}): {stderr}"
                 )
@@ -347,13 +385,15 @@ class ACPClient:
                 pass
 
     @staticmethod
-    def _extract_response(raw_output: str) -> str:
+    def _extract_response(raw_output: str | None) -> str:
         """Extract the agent's actual response from acpx output.
 
         Strips acpx metadata lines ([client], [acpx], [tool], [done])
         and their continuation lines (indented or sub-field lines like
         ``input:``, ``output:``, ``files:``, ``kind:``).
         """
+        if not raw_output:
+            return ""
         lines: list[str] = []
         in_tool_block = False
         for line in raw_output.splitlines():

@@ -213,6 +213,40 @@ def test_read_prior_artifact_returns_none_when_not_found(run_dir: Path) -> None:
     assert rc_executor._read_prior_artifact(run_dir, "missing.md") is None
 
 
+def test_read_best_analysis_prefers_best_file(run_dir: Path) -> None:
+    """BUG-225: _read_best_analysis prefers analysis_best.md at run root."""
+    from researchclaw.pipeline._helpers import _read_best_analysis
+
+    # Create degenerate analysis in stage-14 and best at run root
+    s14 = run_dir / "stage-14"
+    s14.mkdir(parents=True)
+    (s14 / "analysis.md").write_text("Degenerate analysis", encoding="utf-8")
+    (run_dir / "analysis_best.md").write_text("Best analysis", encoding="utf-8")
+
+    result = _read_best_analysis(run_dir)
+    assert result == "Best analysis"
+
+
+def test_read_best_analysis_falls_back_to_prior_artifact(run_dir: Path) -> None:
+    """BUG-225: Falls back to _read_prior_artifact when no analysis_best.md."""
+    from researchclaw.pipeline._helpers import _read_best_analysis
+
+    s14 = run_dir / "stage-14"
+    s14.mkdir(parents=True)
+    (s14 / "analysis.md").write_text("Only analysis", encoding="utf-8")
+
+    result = _read_best_analysis(run_dir)
+    assert result == "Only analysis"
+
+
+def test_read_best_analysis_returns_empty_when_none(run_dir: Path) -> None:
+    """BUG-225: Returns empty string when no analysis exists at all."""
+    from researchclaw.pipeline._helpers import _read_best_analysis
+
+    result = _read_best_analysis(run_dir)
+    assert result == ""
+
+
 def test_write_stage_meta_writes_expected_json(run_dir: Path) -> None:
     stage_dir = run_dir / "stage-01"
     stage_dir.mkdir()
@@ -2420,8 +2454,10 @@ class TestExperimentHarness:
 
         sandbox.run_project(project, timeout_sec=5)
 
-        # Check that harness was injected
-        harness_path = tmp_path / "sandbox" / "_project" / "experiment_harness.py"
+        # Check that harness was injected (BUG-DA8-06: dir is now _project_{N})
+        project_dirs = list((tmp_path / "sandbox").glob("_project_*"))
+        assert project_dirs, "No _project_N directory found"
+        harness_path = project_dirs[0] / "experiment_harness.py"
         assert harness_path.exists()
         content = harness_path.read_text(encoding="utf-8")
         assert "ExperimentHarness" in content
@@ -2442,8 +2478,10 @@ class TestExperimentHarness:
 
         sandbox.run_project(project, timeout_sec=5)
 
-        # The real harness should be there, not the fake one
-        harness_path = tmp_path / "sandbox" / "_project" / "experiment_harness.py"
+        # The real harness should be there, not the fake one (BUG-DA8-06)
+        project_dirs = list((tmp_path / "sandbox").glob("_project_*"))
+        assert project_dirs
+        harness_path = project_dirs[0] / "experiment_harness.py"
         content = harness_path.read_text(encoding="utf-8")
         assert "ExperimentHarness" in content
         assert "FAKE HARNESS" not in content

@@ -18,6 +18,9 @@ domains:
   # ── Computer Vision ─────────────────────────────────────────────
 
   image_classification:
+    required_baselines:
+      - ResNet-50
+      - ViT-B/16
     keywords:
       - image classification
       - visual recognition
@@ -103,6 +106,8 @@ domains:
         pip: []
 
   knowledge_distillation:
+    required_baselines:
+      - KD (Hinton)
     keywords:
       - knowledge distillation
       - model compression
@@ -154,6 +159,9 @@ domains:
         pip: []
 
   continual_learning:
+    required_baselines:
+      - EWC
+      - Fine-tuning (lower bound)
     keywords:
       - continual learning
       - lifelong learning
@@ -332,6 +340,9 @@ domains:
   # ── Reinforcement Learning ──────────────────────────────────────
 
   reinforcement_learning:
+    required_baselines:
+      - PPO
+      - Random Policy
     keywords:
       - reinforcement learning
       - reward shaping
@@ -522,6 +533,8 @@ domains:
   # ── Generative Models ──────────────────────────────────────────
 
   generative_models:
+    required_baselines:
+      - VAE
     keywords:
       - generative model
       - gan

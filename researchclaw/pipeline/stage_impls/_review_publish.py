@@ -27,6 +27,7 @@ from researchclaw.pipeline._helpers import (
     _generate_framework_diagram_prompt,
     _generate_neurips_checklist,
     _get_evolution_overlay,
+    _read_best_analysis,
     _read_prior_artifact,
     _safe_json_loads,
     _topic_constraint_block,  # noqa: F401
@@ -378,9 +379,44 @@ def _execute_quality_gate(
     revised = _read_prior_artifact(run_dir, "paper_revised.md") or ""
     report: dict[str, Any] | None = None
 
-    # BUG-25: Load experiment summary for cross-checking
-    _exp_summary_text = _read_prior_artifact(run_dir, "experiment_summary.json") or ""
-    _exp_summary = _safe_json_loads(_exp_summary_text, {}) if _exp_summary_text else {}
+    # BUG-25 + BUG-180: Load the RICHEST experiment summary for cross-checking.
+    # _read_prior_artifact returns the first match in reverse-sorted order,
+    # which may be a repair stage with 0 conditions.  Instead, scan all
+    # stage-14* experiment summaries and pick the one with the most data.
+    _exp_summary: dict[str, Any] = {}
+    _exp_summary_text = ""
+    _best_richness = -1
+    for _es_path in sorted(run_dir.glob("stage-14*/experiment_summary.json")):
+        try:
+            _es_text = _es_path.read_text(encoding="utf-8")
+            _es_data = _safe_json_loads(_es_text, {})
+            if not isinstance(_es_data, dict):
+                continue
+            _richness = len(_es_data.get("condition_summaries", {}))
+            if _richness > _best_richness:
+                _best_richness = _richness
+                _exp_summary = _es_data
+                _exp_summary_text = _es_text
+        except OSError:
+            continue
+    # Also check experiment_summary_best.json at run root
+    _root_best = run_dir / "experiment_summary_best.json"
+    if _root_best.is_file():
+        try:
+            _rb_text = _root_best.read_text(encoding="utf-8")
+            _rb_data = _safe_json_loads(_rb_text, {})
+            if isinstance(_rb_data, dict):
+                _rb_rich = len(_rb_data.get("condition_summaries", {}))
+                if _rb_rich > _best_richness:
+                    _exp_summary = _rb_data
+                    _exp_summary_text = _rb_text
+        except OSError:
+            pass
+    # Fallback to _read_prior_artifact if nothing found above
+    if not _exp_summary:
+        _exp_summary_text = _read_prior_artifact(run_dir, "experiment_summary.json") or ""
+        _exp_summary = _safe_json_loads(_exp_summary_text, {}) if _exp_summary_text else {}
+
     _exp_failed = False
     if isinstance(_exp_summary, dict):
         _best_run = _exp_summary.get("best_run", {})
@@ -392,6 +428,9 @@ def _execute_quality_gate(
         # Also check if metrics_summary is empty
         if not _exp_summary.get("metrics_summary"):
             _exp_failed = True
+        # BUG-180: If we found real condition data, don't mark as failed
+        if _best_richness > 0:
+            _exp_failed = False
 
     if llm is not None:
         _pm = prompts or PromptManager()
@@ -408,6 +447,11 @@ def _execute_quality_gate(
                     "metrics_summary",
                 ) if _exp_summary.get(k) is not None
             }
+            # BUG-180: Include condition count from condition_summaries
+            _cond_summ = _exp_summary.get("condition_summaries", {})
+            if isinstance(_cond_summ, dict) and _cond_summ:
+                _exp_status_keys["completed_conditions"] = len(_cond_summ)
+                _exp_status_keys["condition_names"] = list(_cond_summ.keys())[:20]
             if _best_run := _exp_summary.get("best_run"):
                 _exp_status_keys["best_run_status"] = (
                     _best_run.get("status") if isinstance(_best_run, dict) else str(_best_run)
@@ -519,7 +563,7 @@ def _execute_quality_gate(
             pass
     try:
         from researchclaw.pipeline.verified_registry import VerifiedRegistry as _VR20
-        _vr20 = _VR20.from_experiment(_exp_summary, refinement_log=_rl20) if isinstance(_exp_summary, dict) else None
+        _vr20 = _VR20.from_run_dir(run_dir, metric_direction=config.experiment.metric_direction, best_only=True) if isinstance(_exp_summary, dict) else None
         if _vr20:
             _fabrication_info["verified_values_count"] = len(_vr20.values)
             _fabrication_info["verified_conditions"] = sorted(_vr20.condition_names)
@@ -593,7 +637,7 @@ def _execute_knowledge_archive(
     prompts: PromptManager | None = None,
 ) -> StageResult:
     revised = _read_prior_artifact(run_dir, "paper_revised.md") or ""
-    analysis = _read_prior_artifact(run_dir, "analysis.md") or ""
+    analysis = _read_best_analysis(run_dir)
     decision = _read_prior_artifact(run_dir, "decision.md") or ""
     preamble = _build_context_preamble(config, run_dir, include_goal=True)
     if llm is not None:
@@ -675,13 +719,34 @@ def _sanitize_fabricated_data(
     import re as _re_san
 
     # --- 1. Build verified values set from experiment_summary.json ---
+    # BUG-222: After REFINE cycles, merging ALL stage-14* data creates a
+    # permissive registry that validates fabricated numbers from regressed
+    # iterations.  Use ONLY the promoted best data as ground truth.
+    # experiment_summary_best.json is written by _promote_best_stage14() and
+    # contains the single best iteration's data.
     verified_values: set[float] = set()
-    exp_path = run_dir / "stage-14" / "experiment_summary.json"
-    if not exp_path.exists():
-        # Try other common locations
-        for candidate in sorted(run_dir.glob("stage-14*/experiment_summary.json")):
-            exp_path = candidate
-            break
+
+    def _richness(path: Path) -> int:
+        """Score an experiment_summary.json by how many conditions it has."""
+        try:
+            d = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return -1
+        if not isinstance(d, dict):
+            return -1
+        conds = d.get("condition_summaries", {})
+        metrics = d.get("metrics_summary", {})
+        return len(conds) + len(metrics)
+
+    # BUG-222: Prefer experiment_summary_best.json (promoted best iteration).
+    # Only fall back to "richest stage-14*" scanning if best.json is missing
+    # (single-iteration runs without REFINE).
+    _root_best = run_dir / "experiment_summary_best.json"
+    if _root_best.exists() and _richness(_root_best) > 0:
+        exp_path = _root_best
+    else:
+        _candidates = list(run_dir.glob("stage-14*/experiment_summary.json"))
+        exp_path = max(_candidates, key=_richness) if _candidates else run_dir / "stage-14" / "experiment_summary.json"
 
     if exp_path.exists():
         try:
@@ -710,6 +775,14 @@ def _sanitize_fabricated_data(
         ):
             if key in exp_data:
                 _collect_numbers(exp_data[key])
+
+    # BUG-222: Removed BUG-206 refinement_log scanning.  The original BUG-206
+    # rationale was "Stage 17 injects sandbox metrics, so the sanitizer must
+    # recognise them".  But that created a loophole: after REFINE regression,
+    # the LLM would cite regressed iteration numbers and the sanitizer would
+    # pass them because they were in the refinement log.  Now that Stage 17
+    # also uses only the promoted best data (BUG-222), there is no need to
+    # whitelist all sandbox metrics here.
 
     if not verified_values:
         report: dict[str, Any] = {
@@ -740,6 +813,23 @@ def _sanitize_fabricated_data(
         return False
 
     # --- 2. Find and sanitize markdown tables ---
+    # BUG-175: Always-allowed set — common constants, hyperparameters, and
+    # structural values that should never be sanitized (matches paper_verifier.py).
+    _SANITIZER_ALWAYS_ALLOWED: set[float] = {
+        0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0,
+        0.5, 0.01, 0.001, 0.0001, 0.1, 0.05, 0.95, 0.99,
+        2024.0, 2025.0, 2026.0, 2027.0,
+        8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0,
+        224.0, 299.0, 384.0,  # Common image sizes
+        # BUG-192: Common hyperparameter values
+        0.0003, 3e-4, 0.0005, 5e-4, 0.002, 2e-3,  # learning rates
+        0.2, 0.3, 0.25, 0.7, 0.6, 0.8,  # clip epsilon, dropout, gradient clip, GCE q, common HP
+        0.9, 0.999, 0.9999,  # Adam betas, momentum
+        0.02, 0.03,  # weight init std
+        1e-5, 1e-6, 1e-8,  # epsilon, weight decay
+        300.0, 400.0, 500.0,  # epochs
+        4096.0, 8192.0,  # larger batch sizes / hidden dims
+    }
     # Match markdown table blocks (header + separator + data rows)
     table_pat = _re_san.compile(
         r"((?:^[ \t]*\|.+\|[ \t]*\n)+"  # one or more pipe-delimited lines
@@ -747,17 +837,51 @@ def _sanitize_fabricated_data(
         _re_san.MULTILINE,
     )
     # Match numbers in table cells (integers, decimals, percentages, scientific)
+    # BUG-175: Also exclude hyphen in lookaround to protect method names like
+    # "Cos-200", "StepLR-100" from partial number extraction.
+    # BUG-206: Include Unicode hyphens (U+2010 hyphen, U+2011 non-breaking
+    # hyphen, U+2013 en-dash) — LLMs frequently emit these instead of ASCII
+    # hyphens in model names like "ResNet‑34".
+    # BUG-206: Unicode hyphens placed before escaped ASCII hyphen (\\-)
+    # to avoid creating unintended character ranges in the class.
+    _HYPH = "\u2010\u2011\u2013\\-"  # U+2010 + U+2011 + U+2013 + ASCII hyphen
     num_pat = _re_san.compile(
-        r"(?<![a-zA-Z_])"  # not preceded by letter/underscore
+        f"(?<![a-zA-Z_{_HYPH}])"  # not preceded by letter/underscore/any-hyphen
         r"(-?\d+\.?\d*(?:[eE][+-]?\d+)?)"
         r"(%?)"  # optional percent
-        r"(?![a-zA-Z_])"  # not followed by letter/underscore
+        f"(?![a-zA-Z_{_HYPH}])"  # not followed by letter/underscore/any-hyphen
     )
 
     numbers_replaced = 0
     numbers_kept = 0
     tables_processed = 0
     replaced_values: list[str] = []
+
+    # Shared helper — verifies a single number match, replaces if unverified.
+    # Used by both markdown-table and LaTeX-tabular sanitizers.
+    def _replace_num(m: _re_san.Match[str]) -> str:
+        nonlocal numbers_replaced, numbers_kept
+        num_str = m.group(1)
+        pct = m.group(2)
+        try:
+            val = float(num_str)
+        except ValueError:
+            return m.group(0)
+        # BUG-175: Always allow common constants / hyperparameters
+        if val in _SANITIZER_ALWAYS_ALLOWED:
+            numbers_kept += 1
+            return m.group(0)
+        # BUG-175: Small integer exemption — counts, indices,
+        # epoch numbers, etc. (≤ 20 auto-pass)
+        if val == int(val) and abs(val) <= 20:
+            numbers_kept += 1
+            return m.group(0)
+        if _is_verified(val):
+            numbers_kept += 1
+            return m.group(0)
+        numbers_replaced += 1
+        replaced_values.append(num_str + pct)
+        return "---"
 
     def _sanitize_table(match: _re_san.Match[str]) -> str:
         nonlocal numbers_replaced, numbers_kept, tables_processed
@@ -773,6 +897,64 @@ def _sanitize_fabricated_data(
         if not has_separator:
             return table_text
 
+        # BUG-192: Detect hyperparameter/config tables and SKIP sanitization.
+        # These tables contain design choices, not experimental results.
+        _HP_TABLE_KW = {
+            "hyperparameter", "hyper-parameter", "configuration", "config",
+            "setting", "parameter", "learning rate", "lr", "batch size",
+            "optimizer", "architecture", "schedule", "warmup", "decay",
+            "dropout", "weight decay", "momentum", "epsilon", "clip",
+        }
+        # BUG-224: Statistical analysis tables contain derived values
+        # (t-statistics, p-values, effect sizes) that are computed from
+        # the experiment data but never appear in experiment_summary.json.
+        # These tables should NOT be sanitized.
+        _STAT_TABLE_KW = {
+            "t-statistic", "t-stat", "t statistic", "p-value", "p value",
+            "paired", "cohen", "effect size", "wilcoxon", "mann-whitney",
+            "statistical", "significance", "confidence interval",
+        }
+        _RESULT_TABLE_KW = {
+            "accuracy", "acc", "loss", "f1", "auroc", "auc", "precision",
+            "recall", "bleu", "rouge", "reward", "return", "rmse", "mae",
+            "mse", "error", "score", "metric", "performance", "improvement",
+            "top-1", "top1", "top-5", "top5",
+        }
+        _header_lower = lines[0].lower() if lines else ""
+        _is_hp_table = any(kw in _header_lower for kw in _HP_TABLE_KW)
+        _is_result_table = any(kw in _header_lower for kw in _RESULT_TABLE_KW)
+        # BUG-224: Statistical analysis tables (t-tests, p-values) contain
+        # derived values that are never in experiment_summary.json.
+        _is_stat_table = any(kw in _header_lower for kw in _STAT_TABLE_KW)
+        if _is_hp_table and not _is_result_table:
+            return table_text  # Skip sanitization for HP/config tables
+        if _is_stat_table:
+            return table_text  # Skip sanitization for statistical test tables
+
+        # BUG-184: Per-column HP detection — classify each column header
+        # as HP-type (skip sanitization) or result-type (sanitize).
+        # This handles mixed tables like "| Method | LR | Acc | F1 |"
+        # where LR should be preserved but Acc/F1 are verified.
+        _HP_COL_KW = {
+            "lr", "learning rate", "batch", "epoch", "optimizer",
+            "schedule", "warmup", "decay", "dropout", "momentum",
+            "clip", "epsilon", "eps", "beta", "alpha", "gamma",
+            "lambda", "weight decay", "wd", "temperature", "temp",
+            "hidden", "dim", "layers", "heads", "steps", "iterations",
+            "seed", "patience", "#param", "params", "size", "depth",
+            "width", "channels", "kernel", "stride", "padding",
+            # BUG-224: Statistical test columns (derived, not in experiment data)
+            "t-stat", "t stat", "p-value", "p value", "p-val",
+            "cohen", "effect", "ci lower", "ci upper", "difference",
+        }
+        _hp_cols: set[int] = set()  # column indices that are HP columns
+        if lines:
+            _hdr_cells = lines[0].split("|")
+            for _ci, _hc in enumerate(_hdr_cells):
+                _hc_low = _hc.strip().lower()
+                if any(kw in _hc_low for kw in _HP_COL_KW):
+                    _hp_cols.add(_ci)
+
         tables_processed += 1
         sanitized_lines: list[str] = []
         for i, line in enumerate(lines):
@@ -785,36 +967,441 @@ def _sanitize_fabricated_data(
                 sanitized_lines.append(line)
                 continue
 
-            def _replace_num(m: _re_san.Match[str]) -> str:
-                nonlocal numbers_replaced, numbers_kept
-                num_str = m.group(1)
-                pct = m.group(2)
-                try:
-                    val = float(num_str)
-                except ValueError:
-                    return m.group(0)
-                if _is_verified(val):
-                    numbers_kept += 1
-                    return m.group(0)
-                numbers_replaced += 1
-                replaced_values.append(num_str + pct)
-                return "---"
+            # BUG-175: Split by pipe and only sanitize cells after
+            # the first data column (which typically contains method
+            # names, condition labels, etc.)
+            cells = line.split("|")
+            sanitized_cells: list[str] = []
 
-            sanitized_lines.append(num_pat.sub(_replace_num, line))
+            for ci, cell in enumerate(cells):
+                # Skip first non-empty cell (method/label column),
+                # empty edge cells, and BUG-184 HP-classified columns
+                if ci <= 1 or not cell.strip() or ci in _hp_cols:
+                    sanitized_cells.append(cell)
+                else:
+                    sanitized_cells.append(
+                        num_pat.sub(_replace_num, cell)
+                    )
+            sanitized_lines.append("|".join(sanitized_cells))
         return "\n".join(sanitized_lines)
 
     sanitized = table_pat.sub(_sanitize_table, paper)
 
+    # --- BUG-211: LaTeX tabular sanitization ---
+    # LLMs sometimes write results in LaTeX \begin{tabular} format inside
+    # the markdown paper (often within ```latex fences).  The markdown
+    # table regex above misses these entirely, allowing fabricated numbers
+    # to pass through unchecked.
+    latex_tab_pat = _re_san.compile(
+        r"(\\begin\{tabular\}.*?\\end\{tabular\})",
+        _re_san.DOTALL,
+    )
+
+    # Keywords for HP-table vs result-table classification (reuse from above)
+    _LTX_HP_KW = {
+        "hyperparameter", "hyper-parameter", "configuration", "config",
+        "setting", "learning rate", "lr", "batch size", "optimizer",
+    }
+    _LTX_RESULT_KW = {
+        "accuracy", "acc", "loss", "f1", "auroc", "auc", "precision",
+        "recall", "reward", "score", "metric", "performance", "result",
+    }
+    # BUG-224: Statistical analysis LaTeX tables — derived values
+    _LTX_STAT_KW = {
+        "t-statistic", "t-stat", "t statistic", "p-value", "p value",
+        "paired", "cohen", "effect size", "statistical", "significance",
+    }
+
+    def _sanitize_latex_table(match: _re_san.Match[str]) -> str:
+        nonlocal tables_processed
+        block = match.group(0)
+
+        # Heuristic: look at the first ~300 chars (column spec + header row)
+        # to decide HP vs result table.  Also check preceding \caption if
+        # the match is part of a \begin{table} environment — we can look
+        # backwards a bit in the full text for the caption.
+        _start = match.start()
+        _context = sanitized[max(0, _start - 300):_start + 300].lower()
+        _is_hp = any(kw in _context for kw in _LTX_HP_KW)
+        _is_res = any(kw in _context for kw in _LTX_RESULT_KW)
+        # BUG-224: Statistical test tables — derived values not in experiment data
+        _is_stat = any(kw in _context for kw in _LTX_STAT_KW)
+        if _is_hp and not _is_res:
+            return block  # HP/config table — skip
+        if _is_stat:
+            return block  # Statistical analysis table — skip
+
+        tables_processed += 1
+
+        # Split into rows by \\ (LaTeX row separator).
+        # We split on \\ but keep the delimiter so we can reconstruct.
+        parts = _re_san.split(r"(\\\\)", block)
+        result_parts: list[str] = []
+        _seen_midrule = False
+
+        for part in parts:
+            # Preserve row separators as-is
+            if part == "\\\\":
+                result_parts.append(part)
+                continue
+
+            _stripped = part.strip()
+            # Rule lines — no numbers to sanitize
+            if _re_san.search(
+                r"\\(hline|toprule|midrule|bottomrule|cline|cmidrule)",
+                _stripped,
+            ):
+                if "midrule" in _stripped or "hline" in _stripped:
+                    _seen_midrule = True
+                result_parts.append(part)
+                continue
+
+            # Column spec line (contains \begin{tabular}{...})
+            if r"\begin{tabular}" in part:
+                result_parts.append(part)
+                continue
+
+            # End line
+            if r"\end{tabular}" in part:
+                result_parts.append(part)
+                continue
+
+            # Header row: rows before the first \midrule/\hline
+            if not _seen_midrule:
+                result_parts.append(part)
+                continue
+
+            # Data row — split by & and sanitize cells after the first
+            cells = part.split("&")
+            sanitized_cells: list[str] = []
+            for ci, cell in enumerate(cells):
+                if ci == 0:
+                    # First cell is method/condition name — preserve
+                    sanitized_cells.append(cell)
+                else:
+                    sanitized_cells.append(num_pat.sub(_replace_num, cell))
+            result_parts.append("&".join(sanitized_cells))
+
+        return "".join(result_parts)
+
+    sanitized = latex_tab_pat.sub(_sanitize_latex_table, sanitized)
+
+    # --- Improvement F: Prose-level anti-fabrication ---
+    # Scan Results/Experiments sections for inline numeric claims like
+    # "achieved 94.2% accuracy" or "obtained an AUROC of 0.87".
+    # Replace unverified numbers with "[value removed]".
+    prose_numbers_replaced = 0
+    _prose_pattern = _re_san.compile(
+        r"(?:achiev|obtain|reach|attain|yield|report|record|produc|demonstrat|show|observ)"
+        r"(?:ed|es|ing|s)?\s+"
+        r"(?:an?\s+)?(?:\w+\s+)?(?:of\s+)?"
+        r"(\d+\.?\d*)\s*"
+        r"(%|\\%)?",
+        _re_san.IGNORECASE,
+    )
+    # Only process lines in Results/Experiments sections
+    _in_results_section = False
+    _results_headers = _re_san.compile(
+        r"^#{1,3}\s*(Results|Experiments|Experimental|Evaluation|Ablation)",
+        _re_san.IGNORECASE,
+    )
+    _any_header = _re_san.compile(r"^#{1,3}\s+")
+    _sanitized_lines = []
+    for _line in sanitized.split("\n"):
+        if _results_headers.match(_line):
+            _in_results_section = True
+        elif _any_header.match(_line) and _in_results_section:
+            # Check if we're leaving Results for a different top-level section
+            _header_text = _line.lstrip("#").strip().lower()
+            if _header_text and not any(kw in _header_text for kw in
+                    ("result", "experiment", "ablation", "evaluation", "comparison")):
+                _in_results_section = False
+        if _in_results_section and "|" not in _line:  # skip table rows
+            def _replace_prose_num(m: _re_san.Match[str]) -> str:
+                nonlocal prose_numbers_replaced
+                num_str = m.group(1)
+                try:
+                    val = float(num_str)
+                except ValueError:
+                    return m.group(0)
+                # Skip common constants / small integers
+                if val in _SANITIZER_ALWAYS_ALLOWED:
+                    return m.group(0)
+                if val == int(val) and abs(val) <= 20:
+                    return m.group(0)
+                if _is_verified(val):
+                    return m.group(0)
+                prose_numbers_replaced += 1
+                return m.group(0).replace(num_str + (m.group(2) or ""), "[value removed]")
+            _line = _prose_pattern.sub(_replace_prose_num, _line)
+        _sanitized_lines.append(_line)
+    sanitized = "\n".join(_sanitized_lines)
+
     report = {
-        "sanitized": numbers_replaced > 0,
+        "sanitized": numbers_replaced > 0 or prose_numbers_replaced > 0,
         "tables_processed": tables_processed,
         "numbers_replaced": numbers_replaced,
         "numbers_kept": numbers_kept,
+        "prose_numbers_replaced": prose_numbers_replaced,
         "verified_values_count": len(verified_values),
         "replaced_samples": replaced_values[:20],
         "generated": _utcnow_iso(),
     }
     return sanitized, report
+
+
+# ---------------------------------------------------------------------------
+# BUG-176: Missing citation resolution
+# BUG-194: Validate search results to avoid replacing correct entries with
+#           garbage.  Previous code searched by cite-key fragments (e.g.
+#           "he 2016 deep") which returned completely unrelated papers.
+#           Fix: (1) consult seminal_papers.yaml first, (2) require title-
+#           similarity validation for API results, (3) build better queries.
+# ---------------------------------------------------------------------------
+
+# Minimum title-similarity between search result and expected title/query
+# for a result to be accepted.  Prevents "Jokowi and the New Developmentalism"
+# from replacing "Deep Residual Learning for Image Recognition".
+_CITATION_RESOLVE_MIN_SIMILARITY = 0.30
+
+
+def _load_seminal_papers_by_key() -> dict[str, dict]:
+    """Load seminal_papers.yaml and index by cite_key.
+
+    Returns dict like::
+
+        {"he2016deep": {"title": "Deep Residual Learning...", "authors": "He et al.", ...}, ...}
+
+    Returns empty dict on any failure (missing file, bad YAML, etc.).
+    """
+    try:
+        from researchclaw.data import _load_all as _load_seminal_all
+        all_papers = _load_seminal_all()
+        return {p["cite_key"]: p for p in all_papers if "cite_key" in p}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _seminal_to_bibtex(paper: dict, cite_key: str) -> str:
+    """Convert a seminal_papers.yaml entry dict to a BibTeX string."""
+    title = paper.get("title", "Unknown")
+    authors = paper.get("authors", "Unknown")
+    year = paper.get("year", "")
+    venue = paper.get("venue", "")
+
+    # Decide entry type
+    venue_lower = (venue or "").lower()
+    is_conf = any(kw in venue_lower for kw in (
+        "neurips", "nips", "icml", "iclr", "cvpr", "eccv", "iccv",
+        "aaai", "acl", "emnlp", "naacl", "sigir", "kdd", "www",
+        "ijcai", "conference", "proc", "workshop",
+    ))
+    if is_conf:
+        return (
+            f"@inproceedings{{{cite_key},\n"
+            f"  title = {{{title}}},\n"
+            f"  author = {{{authors}}},\n"
+            f"  year = {{{year}}},\n"
+            f"  booktitle = {{{venue}}},\n"
+            f"}}"
+        )
+    return (
+        f"@article{{{cite_key},\n"
+        f"  title = {{{title}}},\n"
+        f"  author = {{{authors}}},\n"
+        f"  year = {{{year}}},\n"
+        f"  journal = {{{venue}}},\n"
+        f"}}"
+    )
+
+
+def _resolve_missing_citations(
+    missing_keys: set[str],
+    existing_bib: str,
+) -> tuple[set[str], list[str]]:
+    """Try to find BibTeX entries for citation keys not in references.bib.
+
+    Parses each cite_key (e.g. ``hendrycks2017baseline``) into an author name
+    and year, then searches academic APIs.  Returns ``(resolved_keys,
+    new_bib_entries)`` where each entry is a complete BibTeX string.
+
+    BUG-194 fix: Three-layer resolution strategy:
+      1. **Seminal lookup** — check seminal_papers.yaml (zero API calls, exact match)
+      2. **API search with validation** — search Semantic Scholar / arXiv, but ONLY
+         accept results whose title has ≥ 30% word overlap with query terms.
+         Previously any year-matching result was blindly accepted, causing
+         foundational papers to be replaced with garbage.
+      3. **Skip** — if no confident match, leave the citation unresolved rather
+         than inject a wrong paper.
+
+    Gracefully returns empty results on any network failure.
+    """
+    import re as _re176
+    import time as _time176
+
+    resolved: set[str] = set()
+    new_entries: list[str] = []
+
+    def _parse_cite_key(key: str) -> tuple[str, str, str]:
+        """Extract (author, year, keyword_hint) from a citation key.
+
+        Common patterns:
+          ``he2016deep``       → ("he", "2016", "deep")
+          ``vaswani2017attention`` → ("vaswani", "2017", "attention")
+          ``goodfellow2014generative`` → ("goodfellow", "2014", "generative")
+        """
+        m = _re176.match(r"([a-zA-Z]+?)(\d{4})(.*)", key)
+        if m:
+            return m.group(1), m.group(2), m.group(3)
+        return key, "", ""
+
+    def _title_word_overlap(title: str, query_words: list[str]) -> float:
+        """Word-overlap score between a paper title and query keywords.
+
+        Returns fraction of query words found in the title (0.0–1.0).
+        Used to validate that a search result is actually relevant.
+        """
+        if not query_words:
+            return 0.0
+        title_lower = set(
+            _re176.sub(r"[^a-z0-9\s]", "", title.lower()).split()
+        ) - {""}
+        if not title_lower:
+            return 0.0
+        matched = sum(1 for w in query_words if w.lower() in title_lower)
+        return matched / len(query_words)
+
+    # --- Layer 1: Seminal papers lookup (no API calls) ---
+    seminal_by_key = _load_seminal_papers_by_key()
+
+    for key in sorted(missing_keys):
+        if key in seminal_by_key and key not in existing_bib:
+            sp = seminal_by_key[key]
+            bib_entry = _seminal_to_bibtex(sp, key)
+            new_entries.append(bib_entry)
+            resolved.add(key)
+            logger.info(
+                "BUG-194: Resolved %r via seminal_papers.yaml → %r (%s)",
+                key, sp.get("title", "")[:60], sp.get("year", ""),
+            )
+
+    # Remaining keys that weren't in the seminal database AND aren't already
+    # present in the existing bib (no point re-resolving keys we already have).
+    remaining = sorted(
+        k for k in (missing_keys - resolved) if k not in existing_bib
+    )
+    if not remaining:
+        return resolved, new_entries
+
+    # --- Layer 2: API search with title-similarity validation ---
+    try:
+        from researchclaw.literature.search import search_papers
+    except ImportError:
+        logger.debug("BUG-176: literature.search not available, skipping resolution")
+        return resolved, new_entries
+
+    for key in remaining:
+        author, year, hint = _parse_cite_key(key)
+        if not author or not year:
+            continue
+
+        # BUG-194: Build a better search query.
+        # Instead of "he 2016 deep", use "he deep residual learning 2016" or
+        # at minimum, split camelCase hints into separate words.
+        # Split hint on word boundaries (camelCase or underscore).
+        hint_words = _re176.findall(r"[a-zA-Z]+", hint) if hint else []
+        # The query words used for validation
+        query_words = [author] + hint_words
+
+        # Build search query: author + hint words + year (year helps but isn't
+        # the primary discriminator anymore)
+        query_parts = [author] + hint_words + [year]
+        query = " ".join(query_parts)
+
+        try:
+            results = search_papers(query, limit=5, deduplicate=True)
+        except Exception as exc:
+            logger.debug("BUG-176: Search failed for %r: %s", key, exc)
+            continue
+
+        if not results:
+            logger.debug(
+                "BUG-194: No search results for %r (query=%r), skipping",
+                key, query,
+            )
+            continue
+
+        # BUG-194: Find best match by title-word-overlap AND year match.
+        # Previously the code just took the first year-matching result.
+        best = None
+        best_score = -1.0
+        for paper in results:
+            overlap = _title_word_overlap(paper.title, query_words)
+            year_bonus = 0.2 if str(paper.year) == year else 0.0
+            # Also give bonus for author name appearing in paper.authors
+            author_bonus = 0.0
+            if any(author.lower() in a.name.lower() for a in paper.authors):
+                author_bonus = 0.2
+            score = overlap + year_bonus + author_bonus
+            if score > best_score:
+                best_score = score
+                best = paper
+
+        if best is None:
+            continue
+
+        # BUG-194: Validate the result — require minimum similarity.
+        # This is the KEY fix: previously ANY result was accepted blindly.
+        overlap = _title_word_overlap(best.title, query_words)
+        if overlap < _CITATION_RESOLVE_MIN_SIMILARITY:
+            logger.info(
+                "BUG-194: Rejecting search result for %r — title %r has "
+                "too-low overlap (%.2f < %.2f) with query words %r",
+                key, best.title[:60], overlap,
+                _CITATION_RESOLVE_MIN_SIMILARITY, query_words,
+            )
+            continue
+
+        # Year must also match (or be within 1 year — sometimes conferences
+        # vs arXiv preprint have different years)
+        if year and best.year:
+            year_diff = abs(int(year) - int(best.year))
+            if year_diff > 1:
+                logger.info(
+                    "BUG-194: Rejecting search result for %r — year mismatch "
+                    "(%s vs %s, diff=%d)",
+                    key, year, best.year, year_diff,
+                )
+                continue
+
+        # Generate BibTeX with the ORIGINAL cite_key (so \cite{key} works)
+        bib_entry = best.to_bibtex()
+        # Replace the auto-generated cite_key with the one used in the paper
+        orig_key_match = _re176.match(r"@(\w+)\{([^,]+),", bib_entry)
+        if orig_key_match:
+            bib_entry = bib_entry.replace(
+                f"@{orig_key_match.group(1)}{{{orig_key_match.group(2)},",
+                f"@{orig_key_match.group(1)}{{{key},",
+                1,
+            )
+
+        # Verify entry doesn't duplicate an existing key
+        if key not in existing_bib:
+            new_entries.append(bib_entry)
+            resolved.add(key)
+            logger.info(
+                "BUG-194: Resolved %r via API → %r (%s, overlap=%.2f)",
+                key, best.title[:60], best.year, overlap,
+            )
+        else:
+            logger.debug(
+                "BUG-194: Key %r already in bib, skipping API result", key,
+            )
+
+        # Rate limit: 0.5s between API calls
+        _time176.sleep(0.5)
+
+    return resolved, new_entries
 
 
 # ---------------------------------------------------------------------------
@@ -951,17 +1538,32 @@ def _execute_export_publish(
     # IMP-19 Layer 2: Ensure at least figures are referenced in the paper
     import re as _re_fig
     chart_files = []
-    for _chart_src_dir in [stage_dir / "charts", run_dir / "stage-14" / "charts"]:
+    # BUG-215: Also search stage-14* versioned dirs (stage-14_v1, etc.)
+    # in case stage-14/ was renamed and never recreated.
+    _chart_search_dirs = [stage_dir / "charts", run_dir / "stage-14" / "charts"]
+    for _s14_charts in sorted(run_dir.glob("stage-14*/charts"), reverse=True):
+        if _s14_charts not in _chart_search_dirs:
+            _chart_search_dirs.append(_s14_charts)
+    for _chart_src_dir in _chart_search_dirs:
         if _chart_src_dir.is_dir():
             chart_files.extend(sorted(_chart_src_dir.glob("*.png")))
-    if chart_files and "![" not in final_paper:
+    # BUG-190: Also inject charts not already referenced in the paper.
+    # The old condition only fired when NO figures were present. Now we
+    # filter to only unreferenced charts, so partially-illustrated papers
+    # also get the remaining charts injected.
+    _already_referenced = set()
+    for _cf in chart_files:
+        if _cf.name in final_paper:
+            _already_referenced.add(_cf.name)
+    chart_files = [cf for cf in chart_files if cf.name not in _already_referenced]
+    if chart_files:
         # Distribute figures to relevant sections based on filename keywords
         _fig_placement: dict[str, list[str]] = {
             "method": [],       # architecture, method, model, pipeline diagrams
             "result": [],       # experiment, comparison, ablation charts
             "intro": [],        # concept, overview, illustration
         }
-        _fig_counter = 0
+        _fig_counter = len(_already_referenced)  # start numbering after existing figs
         for cf in chart_files[:6]:
             _fig_counter += 1
             stem_lower = cf.stem.lower()
@@ -976,14 +1578,18 @@ def _execute_export_publish(
             else:
                 _fig_placement["result"].append(fig_md)  # default to results
 
-        # Insert figures at relevant section boundaries
+        # Insert figures at relevant section boundaries.
+        # BUG-200: Match both H1 (#) and H2 (##) headings — LLMs generate
+        # either level depending on the writing_structure prompt.
         _section_markers = {
-            "method": ["## Method", "## Methodology", "## Approach", "## Framework",
+            "method": ["# Method", "## Method", "# Methodology", "## Methodology",
+                        "# Approach", "## Approach", "# Framework", "## Framework",
                         "## 3. Method", "## 3 Method"],
-            "result": ["## Results", "## Experiments", "## Evaluation",
+            "result": ["# Results", "## Results", "# Experiments", "## Experiments",
+                        "# Evaluation", "## Evaluation",
                         "## 5. Results", "## 4. Experiments", "## 5 Results"],
-            "intro": ["## Related Work", "## Background", "## 2. Related",
-                       "## 2 Related Work"],
+            "intro": ["# Related Work", "## Related Work", "# Background",
+                       "## Background", "## 2. Related", "## 2 Related Work"],
         }
         _total_inserted = 0
         for category, figs in _fig_placement.items():
@@ -1000,14 +1606,25 @@ def _execute_export_publish(
                     break
             if not inserted:
                 # Fallback: insert before Conclusion/Limitations/Discussion
-                for fallback in ["## Conclusion", "## Limitations", "## Discussion"]:
+                for fallback in ["# Conclusion", "## Conclusion",
+                                 "# Limitations", "## Limitations",
+                                 "# Discussion", "## Discussion"]:
                     if fallback in final_paper:
                         final_paper = final_paper.replace(fallback, fig_block + fallback, 1)
                         inserted = True
                         _total_inserted += len(figs)
                         break
             if not inserted:
-                final_paper += fig_block
+                # BUG-200: Last resort — insert before closing fence marker
+                # rather than appending after it (which puts content outside
+                # the markdown fence and gets dropped by converter).
+                _fence_end = final_paper.rfind("\n```")
+                if _fence_end > 0:
+                    final_paper = (
+                        final_paper[:_fence_end] + fig_block + final_paper[_fence_end:]
+                    )
+                else:
+                    final_paper += fig_block
                 _total_inserted += len(figs)
 
         logger.info(
@@ -1130,8 +1747,10 @@ def _execute_export_publish(
             """
             mapping: dict[str, str] = {}
             # Parse each bib entry for author + year
+            # BUG-DA8-17: Allow newline OR whitespace before closing brace
+            # Use \n} or just } at start-of-line to avoid greedy cross-entry match
             entry_pat = _re.compile(
-                r"@\w+\{([^,]+),\s*(.*?)\n\}", _re.DOTALL
+                r"@\w+\{([^,]+),\s*(.*?)(?:\n\}|^[ \t]*\})", _re.DOTALL | _re.MULTILINE
             )
             for m in entry_pat.finditer(bib):
                 key = m.group(1).strip()
@@ -1231,7 +1850,23 @@ def _execute_export_publish(
                 )
 
         # R10-Fix4: Citation cross-validation
-        cited_keys_in_paper = set(_re.findall(r"\[([a-zA-Z]+\d{4}[a-zA-Z0-9_-]*)\]", final_paper))
+        # BUG-187: Also parse multi-key brackets like [key1, key2, key3].
+        # The old regex only matched single-key brackets [key2020word].
+        _cite_key_pat = r"[a-zA-Z]+\d{4}[a-zA-Z0-9_-]*"
+        cited_keys_in_paper: set[str] = set()
+        # Single-key brackets
+        for m in _re.finditer(rf"\[({_cite_key_pat})\]", final_paper):
+            cited_keys_in_paper.add(m.group(1))
+        # Multi-key brackets [key1, key2] or [key1; key2]
+        for m in _re.finditer(r"\[([^\]]{10,300})\]", final_paper):
+            inner = m.group(1)
+            # Only parse if it looks like citation keys (has year-like digits)
+            parts = _re.split(r"[,;]\s*", inner)
+            if all(_re.fullmatch(_cite_key_pat, p.strip()) for p in parts if p.strip()):
+                for p in parts:
+                    if p.strip():
+                        cited_keys_in_paper.add(p.strip())
+
         if valid_keys and cited_keys_in_paper:
             invalid_keys = cited_keys_in_paper - valid_keys
             if invalid_keys:
@@ -1240,19 +1875,58 @@ def _execute_export_publish(
                     len(invalid_keys),
                     ", ".join(sorted(invalid_keys)[:20]),
                 )
-                # IMP-29: Silently remove invalid citations instead of
-                # leaving ugly [?key:NOT_IN_BIB] markers in the output.
-                for bad_key in invalid_keys:
-                    final_paper = final_paper.replace(f"[{bad_key}]", "")
-                # Clean up whitespace artifacts from removed citations
-                import re as _re_imp29
-                final_paper = _re_imp29.sub(r"  +", " ", final_paper)
-                final_paper = _re_imp29.sub(r" ([.,;:)])", r"\1", final_paper)
+                # BUG-176: Try to resolve missing citations before removing them.
+                # Parse cite_key → search query, look up via academic APIs,
+                # and add found entries to references.bib.
+                resolved_keys: set[str] = set()
+                new_bib_entries: list[str] = []
+                if len(invalid_keys) <= 30:  # Sanity: don't flood APIs
+                    resolved_keys, new_bib_entries = _resolve_missing_citations(
+                        invalid_keys, bib_text
+                    )
+                    if resolved_keys:
+                        valid_keys.update(resolved_keys)
+                        bib_text += "\n" + "\n\n".join(new_bib_entries) + "\n"
+                        logger.info(
+                            "Stage 22: Resolved %d/%d missing citations via API lookup",
+                            len(resolved_keys), len(invalid_keys),
+                        )
+
+                still_invalid = invalid_keys - resolved_keys
+                if still_invalid:
+                    # IMP-29: Remove remaining unresolvable citations from
+                    # BOTH single-key and multi-key brackets.
+                    import re as _re_imp29
+                    for bad_key in still_invalid:
+                        # Remove single-key brackets
+                        final_paper = final_paper.replace(f"[{bad_key}]", "")
+                        # Remove from multi-key brackets: [good, BAD, good] → [good, good]
+                        def _remove_from_multi(m: _re.Match) -> str:
+                            inner = m.group(1)
+                            parts = [p.strip() for p in _re.split(r"[,;]\s*", inner)]
+                            filtered = [p for p in parts if p != bad_key]
+                            if not filtered:
+                                return ""
+                            return "[" + ", ".join(filtered) + "]"
+                        final_paper = _re_imp29.sub(
+                            r"\[([^\]]*\b" + _re.escape(bad_key) + r"\b[^\]]*)\]",
+                            _remove_from_multi,
+                            final_paper,
+                        )
+                    # Clean up whitespace artifacts from removed citations
+                    final_paper = _re_imp29.sub(r"  +", " ", final_paper)
+                    final_paper = _re_imp29.sub(r" ([.,;:)])", r"\1", final_paper)
                 (stage_dir / "paper_final.md").write_text(final_paper, encoding="utf-8")
-                (stage_dir / "invalid_citations.json").write_text(
-                    json.dumps(sorted(invalid_keys), indent=2), encoding="utf-8"
-                )
-                artifacts.append("invalid_citations.json")
+                if still_invalid:
+                    (stage_dir / "invalid_citations.json").write_text(
+                        json.dumps(sorted(still_invalid), indent=2), encoding="utf-8"
+                    )
+                    artifacts.append("invalid_citations.json")
+                if resolved_keys:
+                    (stage_dir / "resolved_citations.json").write_text(
+                        json.dumps(sorted(resolved_keys), indent=2), encoding="utf-8"
+                    )
+                    artifacts.append("resolved_citations.json")
 
         final_paper_latex = final_paper  # default: no citation conversion
         if valid_keys:
@@ -1350,10 +2024,11 @@ def _execute_export_publish(
             )
             if "NeurIPS Paper Checklist" not in tex_source:
                 tex_source = tex_source.rstrip() + "\n\n" + _checklist
+        _t = _extract_paper_title(tex_source)
         tex_content = markdown_to_latex(
             tex_source,
             tpl,
-            title=_extract_paper_title(tex_source),
+            title=_t if _t != "Untitled Paper" else "",
             authors=config.export.authors,
             bib_file=config.export.bib_file,
             bib_entries=_ay_map or None,
@@ -1366,63 +2041,57 @@ def _execute_export_publish(
             len(tex_content),
         )
         # --- Phase 1 anti-fabrication: verify paper against VerifiedRegistry ---
+        _vresult = None  # BUG-DA8-04: Initialize before try to avoid fragile dir() check
         try:
             from researchclaw.pipeline.paper_verifier import verify_paper as _verify_paper
-            _exp_sum_text = _read_prior_artifact(run_dir, "experiment_summary.json")
-            if _exp_sum_text:
-                _exp_sum_for_vr = _safe_json_loads(_exp_sum_text, {})
-                if isinstance(_exp_sum_for_vr, dict) and _exp_sum_for_vr:
-                    from researchclaw.pipeline.verified_registry import (
-                        VerifiedRegistry as _VR22,
-                    )
-                    # BUG-108: Pass refinement_log for complete verification
-                    _rl22_candidates = sorted(run_dir.glob("stage-13*/refinement_log.json"), reverse=True)
-                    _rl22_path = _rl22_candidates[0] if _rl22_candidates else None
-                    _rl22: dict | None = None
-                    if _rl22_path and _rl22_path.is_file():
-                        try:
-                            _rl22 = json.loads(_rl22_path.read_text(encoding="utf-8"))
-                        except (json.JSONDecodeError, OSError):
-                            pass
-                    _vr22 = _VR22.from_experiment(_exp_sum_for_vr, refinement_log=_rl22)
-                    _vresult = _verify_paper(tex_content, _vr22)
-                    (stage_dir / "paper_verification.json").write_text(
-                        json.dumps({
-                            "passed": _vresult.passed,
-                            "severity": _vresult.severity,
-                            "total_checked": _vresult.total_numbers_checked,
-                            "total_verified": _vresult.total_numbers_verified,
-                            "strict_violations": _vresult.strict_violations,
-                            "lenient_violations": _vresult.lenient_violations,
-                            "fabrication_rate": round(_vresult.fabrication_rate, 4),
-                            "unverified_numbers": [
-                                {"value": u.value, "line": u.line_number,
-                                 "section": u.section, "in_table": u.in_table}
-                                for u in _vresult.unverified_numbers[:20]
-                            ],
-                            "fabricated_conditions": [
-                                {"name": fc.name, "line": fc.line_number}
-                                for fc in _vresult.fabricated_conditions
-                            ],
-                            "config_warnings": getattr(_vresult, "config_warnings", []),
-                            "summary": _vresult.summary,
-                        }, indent=2),
-                        encoding="utf-8",
-                    )
-                    logger.info(
-                        "Stage 22: Paper verification — %s (%d checked, %d verified, "
-                        "%d strict violations, fabrication_rate=%.1f%%)",
-                        _vresult.severity,
-                        _vresult.total_numbers_checked,
-                        _vresult.total_numbers_verified,
-                        _vresult.strict_violations,
-                        _vresult.fabrication_rate * 100,
-                    )
+            # BUG-222: Use best_only=True to validate against promoted best data only
+            from researchclaw.pipeline.verified_registry import (
+                VerifiedRegistry as _VR22,
+            )
+            _vr22 = _VR22.from_run_dir(
+                run_dir,
+                metric_direction=config.experiment.metric_direction,
+                best_only=True,
+            )
+            if _vr22.values:
+                _vresult = _verify_paper(tex_content, _vr22)
+                (stage_dir / "paper_verification.json").write_text(
+                    json.dumps({
+                        "passed": _vresult.passed,
+                        "severity": _vresult.severity,
+                        "total_checked": _vresult.total_numbers_checked,
+                        "total_verified": _vresult.total_numbers_verified,
+                        "strict_violations": _vresult.strict_violations,
+                        "lenient_violations": _vresult.lenient_violations,
+                        "fabrication_rate": round(_vresult.fabrication_rate, 4),
+                        "unverified_numbers": [
+                            {"value": u.value, "line": u.line_number,
+                             "section": u.section, "in_table": u.in_table}
+                            for u in _vresult.unverified_numbers[:20]
+                        ],
+                        "fabricated_conditions": [
+                            {"name": fc.name, "line": fc.line_number}
+                            for fc in _vresult.fabricated_conditions
+                        ],
+                        "config_warnings": getattr(_vresult, "config_warnings", []),
+                        "summary": _vresult.summary,
+                    }, indent=2),
+                    encoding="utf-8",
+                )
+                logger.info(
+                    "Stage 22: Paper verification — %s (%d checked, %d verified, "
+                    "%d strict violations, fabrication_rate=%.1f%%)",
+                    _vresult.severity,
+                    _vresult.total_numbers_checked,
+                    _vresult.total_numbers_verified,
+                    _vresult.strict_violations,
+                    _vresult.fabrication_rate * 100,
+                )
         except Exception as _pv_exc:
             logger.debug("Stage 22: Paper verification skipped: %s", _pv_exc)
 
         # BUG-23 P1: Enforce REJECT verdict — sanitize unverified numbers
-        if "_vresult" in dir() and hasattr(_vresult, "severity") and _vresult.severity == "REJECT":
+        if _vresult is not None and getattr(_vresult, "severity", None) == "REJECT":
             logger.warning(
                 "Stage 22: Paper REJECTED by verifier (fabrication_rate=%.1f%%, "
                 "%d strict violations). Sanitizing unverified numbers.",
@@ -1430,7 +2099,18 @@ def _execute_export_publish(
                 _vresult.strict_violations,
             )
             # Replace unverified numbers in strict sections/tables with "---"
+            import re as _re_san2
+
+            # BUG-R49-02: Section names that sound like results but are
+            # actually protocol/setup sections should NOT trigger strict
+            # sanitization.  Exempt sections containing "dataset", "setup",
+            # "protocol", "hyperparameter", or "implementation".
+            _STRICT_EXEMPT_KW = {"dataset", "setup", "protocol",
+                                 "hyperparameter", "implementation",
+                                 "hardware", "infrastructure"}
+
             _sanitized_tex = tex_content
+            _san2_count = 0
             for _uv in sorted(_vresult.unverified_numbers, key=lambda u: -u.line_number):
                 # Only sanitize strict-section / in-table numbers
                 _uv_section_lower = (_uv.section or "").lower()
@@ -1439,30 +2119,58 @@ def _execute_export_publish(
                     for s in ("results", "experiment", "evaluation",
                               "ablation", "comparison", "analysis")
                 )
+                # BUG-R49-02: Exempt protocol/setup sections from strict mode
+                if _uv_is_strict and any(
+                    kw in _uv_section_lower for kw in _STRICT_EXEMPT_KW
+                ):
+                    _uv_is_strict = False
                 if _uv_is_strict or _uv.in_table:
                     _lines = _sanitized_tex.split("\n")
                     if 0 < _uv.line_number <= len(_lines):
                         _orig_line = _lines[_uv.line_number - 1]
-                        _val_str = str(_uv.value)
-                        # Try common representations
+                        # BUG-R49-01: Use word-boundary regex instead of
+                        # naive substring matching to avoid replacing numbers
+                        # inside identifiers (e.g. "18" in "ResNet18").
+                        # BUG-206: Include ASCII hyphen and Unicode hyphens
+                        # (U+2010 hyphen, U+2011 non-breaking hyphen,
+                        # U+2013 en-dash) so that model variant numbers
+                        # like "34" in "ResNet-34" or "ResNet‑34" are not
+                        # mistaken for unverified experimental values.
+                        # BUG-210: Include period (.) so that fractional
+                        # parts of decimals in condition names like
+                        # "ema_decay_0.9" are not treated as standalone
+                        # numbers (prevents "0.9" → "0.---").
+                        _BOUNDARY = "A-Za-z0-9_\u2010\u2011\u2013\\-."
                         for _rep in (
                             f"{_uv.value:.4f}".rstrip("0").rstrip("."),
                             f"{_uv.value:.3f}",
                             f"{_uv.value:.2f}",
                             f"{_uv.value:.1f}",
                             f"{_uv.value:g}",
-                            _val_str,
+                            str(_uv.value),
                         ):
-                            if _rep in _orig_line:
-                                _lines[_uv.line_number - 1] = _orig_line.replace(
-                                    _rep, "---", 1,
+                            # Word boundary: number must NOT be adjacent to
+                            # alphanumeric, underscore, or hyphen on either side.
+                            _pat = (
+                                rf"(?<![{_BOUNDARY}])"
+                                + _re_san2.escape(_rep)
+                                + rf"(?![{_BOUNDARY}])"
+                            )
+                            if _re_san2.search(_pat, _orig_line):
+                                _lines[_uv.line_number - 1] = _re_san2.sub(
+                                    _pat, "---", _orig_line, count=1,
                                 )
+                                _san2_count += 1
                                 break
                         _sanitized_tex = "\n".join(_lines)
             if _sanitized_tex != tex_content:
                 tex_content = _sanitized_tex
                 (stage_dir / "paper.tex").write_text(tex_content, encoding="utf-8")
-                logger.info("Stage 22: Sanitized paper.tex — replaced unverified numbers with '---'")
+                logger.info(
+                    "Stage 22: Sanitized paper.tex — replaced %d unverified "
+                    "numbers with '---'",
+                    _san2_count,
+                )
 
         # Copy bundled style files alongside paper.tex
         for sf in tpl.get_style_files():
@@ -1615,7 +2323,7 @@ def _execute_export_publish(
         except Exception as _compile_exc:  # noqa: BLE001
             logger.debug("Stage 22: Compile verification skipped: %s", _compile_exc)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("LaTeX generation skipped: %s", exc)
+        logger.error("LaTeX generation failed: %s", exc, exc_info=True)
 
     # (Charts, BUG-99 path fix, and remove_missing_figures are now handled
     #  BEFORE compile_latex() — see "Pre-compilation" block above.)
@@ -2020,6 +2728,8 @@ def _execute_citation_verify(
         verified_bib = bib_text
 
     # IMP-1: Also prune uncited entries from verified bib
+    # BUG-182: Also scan LaTeX paper.tex (not just Markdown) for \cite{} keys.
+    # The Markdown version may use [key] notation while LaTeX uses \cite{key}.
     if paper_text.strip():
         _vbib_keys = set(re.findall(r"@\w+\{([^,]+),", verified_bib))
         _cited_in_paper: set[str] = set()
@@ -2030,6 +2740,17 @@ def _execute_citation_verify(
             _cited_in_paper.update(
                 k.strip() for k in _cm.group(1).split(",")
             )
+        # BUG-182: Also read stage-22/paper.tex for \cite{} keys
+        _latex_paper = stage_dir.parent / "stage-22" / "paper.tex"
+        if _latex_paper.exists():
+            try:
+                _latex_text = _latex_paper.read_text(encoding="utf-8")
+                for _cm in re.finditer(r"\\cite[pt]?\{([^}]+)\}", _latex_text):
+                    _cited_in_paper.update(
+                        k.strip() for k in _cm.group(1).split(",")
+                    )
+            except OSError:
+                pass
         _uncited_vbib = _vbib_keys - _cited_in_paper
         if _uncited_vbib:
             verified_bib = _remove_bibtex_entries(verified_bib, _uncited_vbib)

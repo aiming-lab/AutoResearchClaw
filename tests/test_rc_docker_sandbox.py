@@ -413,3 +413,69 @@ def test_run_project_rejects_absolute_path(mock_run: MagicMock, tmp_path: Path):
     assert result.returncode == -1
     assert "relative" in result.stderr.lower() or "absolute" in result.stderr.lower()
     mock_run.assert_not_called()
+
+
+# ── Container cleanup behavior ────────────────────────────────────────
+
+
+@patch.object(DockerSandbox, "_remove_container")
+@patch("subprocess.run")
+def test_cleanup_on_normal_exit(mock_run: MagicMock, mock_remove: MagicMock, tmp_path: Path):
+    """_remove_container is called on normal successful exit."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["docker", "run"], returncode=0, stdout="metric: 1.0\n", stderr="",
+    )
+    cfg = DockerSandboxConfig(network_policy="none")
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    result = sandbox.run("print('ok')", timeout_sec=60)
+
+    assert result.returncode == 0
+    mock_remove.assert_called_once()
+
+
+@patch.object(DockerSandbox, "_remove_container")
+@patch.object(DockerSandbox, "_kill_container")
+@patch("subprocess.run")
+def test_cleanup_on_timeout(
+    mock_run: MagicMock, mock_kill: MagicMock, mock_remove: MagicMock, tmp_path: Path,
+):
+    """Both _kill_container and _remove_container are called on timeout."""
+    mock_run.side_effect = subprocess.TimeoutExpired(cmd="docker run", timeout=10)
+    cfg = DockerSandboxConfig(network_policy="none")
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    result = sandbox.run("import time; time.sleep(999)", timeout_sec=10)
+
+    assert result.timed_out is True
+    mock_kill.assert_called_once()
+    mock_remove.assert_called_once()
+
+
+@patch.object(DockerSandbox, "_remove_container")
+@patch("subprocess.run")
+def test_cleanup_on_exception(mock_run: MagicMock, mock_remove: MagicMock, tmp_path: Path):
+    """_remove_container is called even when subprocess.run raises an unexpected exception."""
+    mock_run.side_effect = OSError("Docker daemon not responding")
+    cfg = DockerSandboxConfig(network_policy="none")
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    result = sandbox.run("print('hi')", timeout_sec=60)
+
+    assert result.returncode == -1
+    assert "Docker execution error" in result.stderr
+    mock_remove.assert_called_once()
+
+
+@patch.object(DockerSandbox, "_remove_container")
+@patch.object(DockerSandbox, "_kill_container")
+@patch("subprocess.run")
+def test_keep_containers_skips_removal(
+    mock_run: MagicMock, mock_kill: MagicMock, mock_remove: MagicMock, tmp_path: Path,
+):
+    """When keep_containers=True, _remove_container is never called."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["docker", "run"], returncode=0, stdout="", stderr="",
+    )
+    cfg = DockerSandboxConfig(network_policy="none", keep_containers=True)
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    sandbox.run("print('ok')", timeout_sec=60)
+
+    mock_remove.assert_not_called()

@@ -128,14 +128,15 @@ STAGE_SKILL_MAP: dict[str, dict[str, Any]] = {
     },
 }
 
-# Mapping from AutoResearchClaw lesson categories to MetaClaw skill categories.
+# Mapping from AutoResearchClaw lesson categories to skill categories.
+# Uses the new taxonomy: writing, domain, experiment, tooling.
 LESSON_CATEGORY_TO_SKILL_CATEGORY: dict[str, str] = {
-    "system": "automation",
-    "experiment": "coding",
-    "writing": "communication",
-    "analysis": "data_analysis",
-    "literature": "research",
-    "pipeline": "automation",
+    "system": "tooling",
+    "experiment": "experiment",
+    "writing": "writing",
+    "analysis": "experiment",
+    "literature": "experiment",
+    "pipeline": "tooling",
 }
 
 

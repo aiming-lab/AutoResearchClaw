@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,34 @@ from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.prompts import PromptManager
 
 logger = logging.getLogger(__name__)
+
+# Improvement G: Continuous-action environments that are incompatible with DQN
+_CONTINUOUS_ENVS = {
+    "pendulum", "halfcheetah", "hopper", "walker2d", "ant", "humanoid",
+    "swimmer", "reacher", "invertedpendulum", "inverteddoublependulum",
+    "mountaincarcontinuous", "lunarlander-continuous",
+}
+
+
+def _check_rl_compatibility(code: str) -> list[str]:
+    """Detect DQN + continuous-action environment mismatches.
+
+    Returns a list of error strings if incompatible combinations are found.
+    """
+    errors: list[str] = []
+    code_lower = code.lower()
+    has_dqn = "dqn" in code_lower
+    if not has_dqn:
+        return errors
+
+    for env_name in _CONTINUOUS_ENVS:
+        if env_name in code_lower:
+            errors.append(
+                f"RL COMPATIBILITY ERROR: DQN is used with continuous-action "
+                f"environment '{env_name}'. DQN only works with DISCRETE action "
+                f"spaces. Use SAC, TD3, or PPO instead."
+            )
+    return errors
 
 
 def _execute_code_generation(
@@ -659,6 +688,17 @@ def _execute_code_generation(
                 fname, max_repair, validation.summary(),
             )
 
+    # Improvement G: RL algorithm-environment compatibility check
+    for fname, code in list(files.items()):
+        if not fname.endswith(".py"):
+            continue
+        _rl_errors = _check_rl_compatibility(code)
+        if _rl_errors:
+            for _rl_err in _rl_errors:
+                logger.error("Stage 10: %s (in %s)", _rl_err, fname)
+                validation_log.append(f"RL_COMPAT: {fname}: {_rl_err}")
+            all_valid = False
+
     # BUG-14: Block on critical validation failures (syntax/import errors)
     if not all_valid:
         _has_critical = False
@@ -687,6 +727,39 @@ def _execute_code_generation(
                 artifacts=("validation_report.md",),
                 evidence_refs=(),
             )
+
+    # --- BUG-184: Cross-import validation — warn if a .py file imports a
+    # local module that doesn't exist in the files dict.  This catches the
+    # case where Beast Mode/CodeAgent produced an intermediate file that
+    # got lost during repair iterations.
+    _known_modules = {
+        f.replace(".py", "") for f in files if f.endswith(".py")
+    }
+    _stdlib_and_common = {
+        "os", "sys", "json", "math", "time", "copy", "re", "random",
+        "pathlib", "argparse", "logging", "collections", "functools",
+        "itertools", "abc", "typing", "dataclasses", "enum", "io",
+        "csv", "pickle", "glob", "shutil", "subprocess", "datetime",
+        "numpy", "np", "torch", "torchvision", "gymnasium", "gym",
+        "sklearn", "scipy", "pandas", "matplotlib", "PIL", "tqdm",
+        "einops", "timm", "transformers", "datasets", "peft",
+        "stable_baselines3",
+    }
+    for fname, code in list(files.items()):
+        if not fname.endswith(".py"):
+            continue
+        for _m in re.findall(
+            r"^(?:from|import)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+            code, re.MULTILINE,
+        ):
+            if (_m not in _known_modules
+                    and _m not in _stdlib_and_common
+                    and not _m.startswith("_")):
+                logger.warning(
+                    "BUG-184: %s imports '%s' which is not in generated "
+                    "files — experiment may crash on import",
+                    fname, _m,
+                )
 
     # --- Write experiment directory ---
     exp_dir = stage_dir / "experiment"
@@ -755,7 +828,8 @@ def _execute_code_generation(
                            "Import-usage mismatch", "NameError",
                            "was removed", "ptp()",
                            "copy-paste", "identical method signatures",
-                           "identical AST", "NOT a real ablation")
+                           "identical AST", "NOT a real ablation",
+                           "shadows stdlib/pip")
     )]
     if critical_deep and llm is not None:
         logger.info(
@@ -789,7 +863,10 @@ def _execute_code_generation(
             f"the ablation to genuinely remove/reduce a component (e.g., zero out "
             f"attention weights, halve hidden dimensions, remove a loss term)\n"
             f"- KD: teacher must be frozen, add projection layers if teacher_dim != "
-            f"student_dim, use temperature T=4 for soft targets\n\n"
+            f"student_dim, use temperature T=4 for soft targets\n"
+            f"- FILENAME COLLISIONS: If a file like config.py shadows a pip/stdlib "
+            f"package, rename it (e.g., config.py → experiment_config.py) and update "
+            f"ALL imports referencing it\n\n"
             f"Current code:\n{all_code_ctx}\n"
         )
         try:
@@ -814,7 +891,8 @@ def _execute_code_generation(
                         "Import-usage mismatch", "NameError",
                         "was removed", "ptp()",
                         "copy-paste", "identical method signatures",
-                        "identical AST", "NOT a real ablation"
+                        "identical AST", "NOT a real ablation",
+                        "shadows stdlib/pip",
                     ))
                 ])
                 logger.info(
@@ -950,28 +1028,97 @@ def _execute_code_generation(
             logger.debug("Code review failed: %s", exc)
 
     # --- FIX-3: Topic-experiment alignment check ---
+    # BUG-171: Previous 8000-char truncation caused false-positive misalignment
+    # for multi-file experiments (30-90K chars). LLM saw "[truncated]" and
+    # concluded code was incomplete. Fix: build a structured summary that
+    # includes file inventory + full main.py + per-file function/class headers.
     alignment_ok = True
     alignment_note = ""
     if llm is not None:
-        # Concatenate all code for alignment check
-        all_code_for_check = "\n\n".join(
-            f"# --- {fname} ---\n{code}" for fname, code in files.items()
+        # Build structured code summary for alignment check
+        _file_inventory = []
+        for _fn, _cd in files.items():
+            _lines = _cd.count("\n") + 1
+            _file_inventory.append(f"  {_fn}: {_lines} lines, {len(_cd)} chars")
+        _inventory_block = "FILES GENERATED:\n" + "\n".join(_file_inventory)
+
+        # BUG-179: Beast Mode may use a different entry point (e.g.
+        # run_experiment.py).  Detect the actual entry point by scanning
+        # for ``if __name__ == "__main__"`` in all files, preferring main.py.
+        _entry_file = "main.py"
+        if "main.py" not in files or not files.get("main.py", "").strip():
+            for _fn, _cd in files.items():
+                if 'if __name__' in _cd and '__main__' in _cd:
+                    _entry_file = _fn
+                    break
+        elif files.get("main.py", ""):
+            # main.py exists but may be a stub — if another file has the
+            # real orchestration (more lines + __main__ guard), prefer it
+            _main_lines = files["main.py"].count("\n")
+            for _fn, _cd in files.items():
+                if _fn == "main.py":
+                    continue
+                if ('if __name__' in _cd and '__main__' in _cd
+                        and _cd.count("\n") > _main_lines * 1.5):
+                    _entry_file = _fn
+                    break
+
+        _main_code = files.get(_entry_file, files.get("main.py", ""))
+        _main_block = f"# --- {_entry_file} (FULL — entry point) ---\n{_main_code}"
+        # Cap main.py at 12000 chars to stay within token budget
+        if len(_main_block) > 12000:
+            _main_block = _main_block[:12000] + "\n... [main.py truncated at 12000 chars]"
+
+        # For other files, include imports + function/class signatures
+        _other_summaries = []
+        for _fn, _cd in files.items():
+            if _fn == _entry_file:
+                continue
+            _sig_lines = []
+            for _line in _cd.split("\n"):
+                _stripped = _line.strip()
+                if (_stripped.startswith("def ") or _stripped.startswith("class ")
+                        or _stripped.startswith("async def ")
+                        # BUG-209: Include import lines — they reveal which
+                        # techniques/libraries are used (e.g. CosineAnnealingLR)
+                        or _stripped.startswith("import ")
+                        or _stripped.startswith("from ")):
+                    _sig_lines.append(_line)
+            if _sig_lines:
+                _other_summaries.append(
+                    f"# --- {_fn} (imports + signatures) ---\n"
+                    + "\n".join(_sig_lines)
+                )
+            else:
+                # Small file — include first 800 chars
+                _preview = _cd[:800]
+                if len(_cd) > 800:
+                    _preview += f"\n... [{len(_cd) - 800} more chars]"
+                _other_summaries.append(f"# --- {_fn} (preview) ---\n{_preview}")
+        _other_block = "\n\n".join(_other_summaries)
+        # Cap other summaries
+        if len(_other_block) > 6000:
+            _other_block = _other_block[:6000] + "\n... [other files truncated]"
+
+        all_code_for_check = (
+            f"{_inventory_block}\n\n{_main_block}\n\n{_other_block}"
         )
-        # Truncate to avoid token overflow
-        if len(all_code_for_check) > 8000:
-            all_code_for_check = all_code_for_check[:8000] + "\n... [truncated]"
         align_prompt = (
             f"Research topic: {config.research.topic}\n\n"
             f"Experiment code:\n```python\n{all_code_for_check}\n```\n\n"
             "TASK: Evaluate whether this experiment code actually tests the "
             "stated research topic. Answer with JSON:\n"
             '{"aligned": true/false, "reason": "...", "suggestions": "..."}\n\n'
+            "IMPORTANT: The code spans MULTIPLE files. The file inventory above "
+            "shows ALL generated files. Only main.py is shown in full; other "
+            "files show function/class signatures. Do NOT mark as misaligned "
+            "just because helper files are summarized — they contain full "
+            "implementations.\n\n"
             "Check specifically:\n"
-            "- Does the code implement models/methods relevant to the topic?\n"
-            "- If the topic mentions LLMs/transformers/language models, does "
-            "the code use or simulate them (not just small MLPs)?\n"
-            "- If the topic mentions a specific technique (e.g. curriculum "
-            "learning, RLHF), does the code actually implement it?\n"
+            "- Does main.py orchestrate an experiment matching the topic?\n"
+            "- Do the helper file signatures indicate relevant models/methods?\n"
+            "- If the topic mentions a specific technique, is there evidence of "
+            "its implementation (function names, class names, imports)?\n"
             "- Are the experimental conditions meaningfully different from each other?\n"
         )
         try:
@@ -1032,18 +1179,37 @@ def _execute_code_generation(
                     files = regen_files
                     for fname, code in files.items():
                         (exp_dir / fname).write_text(code, encoding="utf-8")
-                    # Re-check alignment on regenerated code
-                    recheck_code = "\n\n".join(
-                        f"# --- {fn} ---\n{cd}" for fn, cd in files.items()
+                    # Re-check alignment on regenerated code (BUG-171 fix)
+                    _rc_inv = []
+                    for _fn, _cd in files.items():
+                        _rc_inv.append(f"  {_fn}: {_cd.count(chr(10))+1} lines")
+                    _rc_main = files.get("main.py", "")
+                    if len(_rc_main) > 12000:
+                        _rc_main = _rc_main[:12000] + "\n... [truncated]"
+                    _rc_sigs = []
+                    for _fn, _cd in files.items():
+                        if _fn == "main.py":
+                            continue
+                        # BUG-209: Include imports alongside signatures
+                        _slines = [l for l in _cd.split("\n")
+                                   if l.strip().startswith((
+                                       "def ", "class ", "async def ",
+                                       "import ", "from ",
+                                   ))]
+                        if _slines:
+                            _rc_sigs.append(f"# {_fn} imports+signatures:\n" + "\n".join(_slines))
+                    recheck_code = (
+                        "FILES:\n" + "\n".join(_rc_inv) + "\n\n"
+                        f"# main.py (FULL):\n{_rc_main}\n\n"
+                        + "\n".join(_rc_sigs)
                     )
-                    if len(recheck_code) > 8000:
-                        recheck_code = recheck_code[:8000] + "\n... [truncated]"
                     recheck_resp = llm.chat(
                         [{"role": "user", "content": (
                             f"Research topic: {config.research.topic}\n\n"
                             f"Experiment code:\n```python\n{recheck_code}\n```\n\n"
                             "TASK: Evaluate whether this experiment code actually tests "
-                            "the stated research topic. Answer with JSON:\n"
+                            "the stated research topic. Only main.py is shown in full; "
+                            "other files show signatures only. Answer with JSON:\n"
                             '{"aligned": true/false, "reason": "...", "suggestions": "..."}\n'
                         )}],
                         system="You are a scientific code reviewer checking topic-experiment alignment.",

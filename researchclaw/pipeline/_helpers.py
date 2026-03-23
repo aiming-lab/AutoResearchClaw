@@ -304,6 +304,19 @@ def _ensure_sandbox_deps(code: str, python_path: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _read_best_analysis(run_dir: Path) -> str:
+    """BUG-225: Read analysis.md from the best Stage 14 iteration.
+
+    Prefers ``analysis_best.md`` at run root (written by
+    ``_promote_best_stage14``) over ``_read_prior_artifact("analysis.md")``
+    which may pick a degenerate non-versioned stage-14 directory.
+    """
+    best = run_dir / "analysis_best.md"
+    if best.exists():
+        return best.read_text(encoding="utf-8")
+    return _read_prior_artifact(run_dir, "analysis.md") or ""
+
+
 def _read_prior_artifact(run_dir: Path, filename: str) -> str | None:
     # R14-2: Sort so non-versioned dirs (stage-13) come before versioned (stage-13_v1).
     # Within the same stage number, prefer the latest (non-versioned) copy.
@@ -593,17 +606,35 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _parse_metrics_from_stdout(stdout: str) -> dict[str, Any]:
-    """Parse ``name: value`` metric lines from experiment stdout.
+    """Parse metric lines from experiment stdout.
 
-    Handles formats like ``UCB (Stochastic) cumulative_regret: 361.9233``
-    and simple ``loss: 0.0042``.  Returns a flat dict of metric_name → value.
+    Handles multiple formats:
+    - ``name: value`` (e.g. ``loss: 0.0042``)
+    - ``UCB (Stochastic) cumulative_regret: 361.9233``
+    - ``condition=name metric=value`` (per-condition output)
+    - ``condition=name/metric_name metric=value``
 
-    Filters out log/status lines (e.g. "Running experiments for support set
-    size: 1") using :func:`is_metric_name`.
+    Returns a flat dict of metric_name -> value.
+    Filters out log/status lines using :func:`is_metric_name`.
     """
+    # BUG-173: regex for condition=name metric=value format
+    _CONDITION_RE = re.compile(
+        r"^condition=(\S+)\s+metric=([0-9eE.+-]+)\s*$"
+    )
     metrics: dict[str, Any] = {}
     for line in stdout.splitlines():
         line = line.strip()
+        # --- Format 2: condition=xxx metric=yyy ---
+        m = _CONDITION_RE.match(line)
+        if m:
+            cond_name = m.group(1)
+            try:
+                fval = float(m.group(2))
+                metrics[cond_name] = fval
+            except (ValueError, TypeError):
+                pass
+            continue
+        # --- Format 1: name: value ---
         if ":" not in line:
             continue
         # Split on the LAST colon to handle names with colons
@@ -918,7 +949,7 @@ def _build_context_preamble(
         if plan:
             parts.append(f"\n### Experiment Plan\n{plan[:2000]}")
     if include_analysis:
-        analysis = _read_prior_artifact(run_dir, "analysis.md")
+        analysis = _read_best_analysis(run_dir)
         if analysis:
             parts.append(f"\n### Result Analysis\n{analysis[:2500]}")
     if include_decision:
@@ -1192,20 +1223,48 @@ def _extract_paper_title(md_text: str) -> str:
     Prioritises H1 headings that appear *before* the abstract section and
     look like real titles (>= 4 words, starts with uppercase).  This avoids
     picking up pseudocode comments or algorithm step labels.
+
+    Also handles the common LLM pattern where a ``# Title`` heading is
+    followed by the actual title as a plain text line (possibly bold):
+
+        # Title
+
+        NORM-PPO: Observation Normalization and Reward Scaling Effects
     """
     import re as _re
 
+    # Strip outer markdown fence (LLMs sometimes wrap entire paper)
+    _text = md_text
+    _fence_m = _re.match(r"^\s*```(?:markdown|md|latex|tex)?\s*\n", _text)
+    if _fence_m:
+        _text = _text[_fence_m.end():]
+        # Also strip trailing fence
+        _text = _re.sub(r"\n\s*```\s*$", "", _text)
+
     # Limit search to content before Abstract heading
     abstract_pos = _re.search(
-        r"^#{1,2}\s+(Abstract|ABSTRACT)", md_text, _re.MULTILINE
+        r"^#{1,2}\s+(Abstract|ABSTRACT)", _text, _re.MULTILINE
     )
-    search_region = md_text[: abstract_pos.start()] if abstract_pos else md_text[:3000]
+    search_region = _text[: abstract_pos.start()] if abstract_pos else _text[:3000]
 
     _SKIP = {"title", "abstract", "references", "appendix"}
     candidates: list[str] = []
+    _saw_title_heading = False
 
-    for line in search_region.splitlines():
-        line = line.strip()
+    lines = search_region.splitlines()
+    for i, raw_line in enumerate(lines):
+        line = raw_line.strip()
+
+        # BUG-171: When we see a "# Title" or "## Title" heading, the actual
+        # title is often on the next non-empty line as plain text or bold text.
+        if _saw_title_heading and line:
+            # Strip bold markers: **Title Text** → Title Text
+            candidate = _re.sub(r"\*\*(.+?)\*\*", r"\1", line).strip()
+            # Make sure it's not another heading or a skip heading
+            if not line.startswith("#") and candidate:
+                candidates.insert(0, candidate)  # highest priority
+            _saw_title_heading = False
+
         # Match H1 or H2 headings
         hm = _re.match(r"^(#{1,2})\s+(.+)$", line)
         if hm:
@@ -1216,8 +1275,13 @@ def _extract_paper_title(md_text: str) -> str:
                 heading = heading[6:].strip()
                 heading_lower = heading.lower()
             if heading_lower in _SKIP:
+                # Mark that we saw a "# Title" heading — next non-empty line
+                # is likely the actual title text
+                if heading_lower == "title":
+                    _saw_title_heading = True
                 continue
             candidates.append(heading)
+            continue
         # Bold title line (e.g. **My Paper Title**)
         m = _re.match(r"\*\*(.+?)\*\*$", line)
         if m and len(m.group(1).split()) >= 3:

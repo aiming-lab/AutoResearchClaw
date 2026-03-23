@@ -27,7 +27,12 @@ class _DummyResponse:
 
 class TestRateLimitRetry:
     def test_s2_429_retries_and_succeeds(self) -> None:
-        from researchclaw.literature.semantic_scholar import search_semantic_scholar
+        from researchclaw.literature.semantic_scholar import (
+            _reset_circuit_breaker,
+            search_semantic_scholar,
+        )
+
+        _reset_circuit_breaker()  # ensure clean CB state from prior tests
 
         call_count = 0
 
@@ -73,9 +78,11 @@ class TestRateLimitRetry:
     def test_s2_persistent_429_exhausts_retries_and_returns_empty(self) -> None:
         from researchclaw.literature.semantic_scholar import (
             _MAX_RETRIES,
+            _reset_circuit_breaker,
             search_semantic_scholar,
         )
 
+        _reset_circuit_breaker()  # ensure clean CB state from prior tests
         call_count = 0
 
         def mock_urlopen(req, **kwargs):

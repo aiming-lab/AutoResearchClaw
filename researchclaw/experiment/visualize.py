@@ -648,7 +648,14 @@ def generate_all_charts(
         generated.append(path)
 
     # 2. Load experiment summary for condition-based charts
+    # BUG-215: Also search stage-14* versioned dirs when stage-14/ is missing.
     summary_path = run_dir / "stage-14" / "experiment_summary.json"
+    if not summary_path.exists():
+        for _s14 in sorted(run_dir.glob("stage-14*"), reverse=True):
+            _alt = _s14 / "experiment_summary.json"
+            if _alt.exists():
+                summary_path = _alt
+                break
     if summary_path.exists():
         try:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))

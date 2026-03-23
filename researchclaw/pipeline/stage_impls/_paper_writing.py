@@ -25,6 +25,7 @@ from researchclaw.pipeline._helpers import (
     _generate_framework_diagram_prompt,
     _generate_neurips_checklist,
     _get_evolution_overlay,
+    _read_best_analysis,
     _read_prior_artifact,
     _safe_json_loads,
     _topic_constraint_block,
@@ -45,7 +46,7 @@ def _execute_paper_outline(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
-    analysis = _read_prior_artifact(run_dir, "analysis.md") or ""
+    analysis = _read_best_analysis(run_dir)
     decision = _read_prior_artifact(run_dir, "decision.md") or ""
     preamble = _build_context_preamble(
         config,
@@ -188,22 +189,46 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
     # to avoid confusing the paper writer with conflicting sources.
     _refine_lines: list[str] = []
     _refine_run_count = 0
-    # Scan ALL refinement logs across versions, pick the richest
+    # Scan ALL refinement logs across versions, pick by quality (primary
+    # metric) then richness (metric count).  BUG-207: Previous logic picked
+    # the sandbox entry with the most metric keys regardless of whether it
+    # represented a regression (e.g. sandbox_after_fix with 1.29% accuracy
+    # winning over sandbox with 78.93% because it had 6 more keys).
     _best_refine_metrics: dict[str, Any] = {}
     _best_refine_stdout = ""
+    _best_refine_primary: float | None = None
     for _rl_path in sorted(run_dir.glob("stage-13*/refinement_log.json")):
         try:
             _rlog = json.loads(_rl_path.read_text(encoding="utf-8"))
-            _best_ver = _rlog.get("best_version", "")
             for _it in _rlog.get("iterations", []):
                 for _sbx_key in ("sandbox", "sandbox_after_fix"):
                     _sbx = _it.get(_sbx_key, {})
                     if not isinstance(_sbx, dict):
                         continue
                     _sbx_metrics = _sbx.get("metrics", {})
-                    if isinstance(_sbx_metrics, dict) and len(_sbx_metrics) > len(_best_refine_metrics):
+                    if not isinstance(_sbx_metrics, dict) or not _sbx_metrics:
+                        continue
+                    # Extract primary metric value for quality comparison
+                    _sbx_primary: float | None = None
+                    for _pm_key in ("primary_metric", "best_metric"):
+                        if _pm_key in _sbx_metrics:
+                            try:
+                                _sbx_primary = float(_sbx_metrics[_pm_key])
+                            except (ValueError, TypeError):
+                                pass
+                            break
+                    # Prefer higher primary metric; fall back to count
+                    _dominated = False
+                    if _best_refine_primary is not None and _sbx_primary is not None:
+                        if _sbx_primary > _best_refine_primary:
+                            _dominated = True  # new is better
+                        elif _sbx_primary < _best_refine_primary * 0.5:
+                            continue  # skip: regression (>50% worse)
+                    # Accept if quality-dominant or richer-with-no-regression
+                    if _dominated or len(_sbx_metrics) > len(_best_refine_metrics):
                         _best_refine_metrics = _sbx_metrics
                         _best_refine_stdout = _sbx.get("stdout", "")
+                        _best_refine_primary = _sbx_primary
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -1006,11 +1031,14 @@ def _review_compiled_pdf(
 
 def _check_ablation_effectiveness(
     exp_summary: dict[str, Any],
-    threshold: float = 0.05,
+    threshold: float = 0.02,
 ) -> list[str]:
     """P7: Check if ablation results are within *threshold* of baseline.
 
     Returns a list of warning strings for ineffective ablations.
+    Threshold tightened from 5% to 2% (Improvement C) — ablations with
+    < 2% relative difference AND < 1pp absolute difference are flagged
+    as TRIVIAL.
     """
     warnings: list[str] = []
     cond_summaries = exp_summary.get("condition_summaries", {})
@@ -1071,13 +1099,32 @@ def _check_ablation_effectiveness(
                 rel_diff = abs(abl_val - baseline_mean) / abs(baseline_mean)
             else:
                 rel_diff = abs(abl_val - baseline_mean)
-            if rel_diff < threshold:
+            abs_diff = abs(abl_val - baseline_mean)
+            # Improvement C: Tighter check — both relative < threshold
+            # AND absolute < 1pp → TRIVIAL
+            if rel_diff < threshold and abs_diff < 1.0:
+                warnings.append(
+                    f"TRIVIAL: Ablation '{name}' {mk}={abl_val:.4f} is within "
+                    f"{rel_diff:.1%} (abs {abs_diff:.4f}pp) of baseline "
+                    f"'{baseline_name}' {mk}={baseline_mean:.4f} — "
+                    f"ablation is ineffective"
+                )
+            elif rel_diff < threshold:
                 warnings.append(
                     f"Ablation '{name}' {mk}={abl_val:.4f} is within "
                     f"{rel_diff:.1%} of baseline '{baseline_name}' "
                     f"{mk}={baseline_mean:.4f} — ablation may be ineffective"
                 )
             break  # Only check the first _mean metric per condition
+
+    # Improvement C: Prepend CRITICAL summary if >50% trivial
+    trivial_count = sum(1 for w in warnings if w.startswith("TRIVIAL:"))
+    if trivial_count > 0 and len(warnings) > 0 and trivial_count / len(warnings) > 0.5:
+        warnings.insert(0, (
+            f"CRITICAL: {trivial_count}/{len(warnings)} ablations are trivially "
+            f"similar to baseline (<{threshold:.0%} relative, <1pp absolute). "
+            f"The ablation design is likely broken — components are not effectively removed."
+        ))
 
     return warnings
 
@@ -1176,32 +1223,50 @@ def _execute_paper_draft(
         include_experiment_data=True,  # WS-5.1: inject real experiment data
     )
 
-    # R21-1: Read BEST experiment_summary across all stage-14 versions.
-    # Refinement can regress — the final (non-versioned) stage-14 may have
-    # worse data than an earlier version. Pick the richest one.
+    # BUG-222: Read PROMOTED BEST experiment_summary for the paper prompt.
+    # Previous code (R21-1) picked the "richest" experiment_summary across
+    # all stage-14* dirs.  After REFINE regression, a later iteration with
+    # more conditions but worse quality could win, feeding the LLM regressed
+    # data.  Now: prefer experiment_summary_best.json (written by
+    # _promote_best_stage14()), fall back to richest stage-14* for
+    # non-REFINE runs.
     exp_summary_text = None
-    _best_metric_count = 0
-    for _s14_dir in sorted(run_dir.glob("stage-14*")):
-        _candidate = _s14_dir / "experiment_summary.json"
-        if _candidate.is_file():
-            _text = _candidate.read_text(encoding="utf-8")
+    _best_path = run_dir / "experiment_summary_best.json"
+    if _best_path.is_file():
+        try:
+            _text = _best_path.read_text(encoding="utf-8")
             _parsed = _safe_json_loads(_text, {})
-            if isinstance(_parsed, dict):
-                _mcount = _parsed.get("total_metric_keys", 0) or len(
-                    _parsed.get("metrics_summary", {})
-                )
-                _paired_count = len(_parsed.get("paired_comparisons", []))
-                _score = _mcount + _paired_count * 10  # Prefer paired data
-                if _score > _best_metric_count:
-                    _best_metric_count = _score
-                    exp_summary_text = _text
-                    logger.info(
-                        "R21-1: Selected %s (metric_keys=%d, paired=%d, score=%d)",
-                        _s14_dir.name, _mcount, _paired_count, _score,
-                    )
-    # Fallback to standard artifact read
+            if isinstance(_parsed, dict) and (
+                _parsed.get("condition_summaries") or _parsed.get("metrics_summary")
+            ):
+                exp_summary_text = _text
+                logger.info("BUG-222: Using promoted experiment_summary_best.json")
+        except OSError:
+            pass
     if exp_summary_text is None:
-        exp_summary_text = _read_prior_artifact(run_dir, "experiment_summary.json")
+        # Fallback: pick richest stage-14* (pre-BUG-222 behavior)
+        _best_metric_count = 0
+        for _s14_dir in sorted(run_dir.glob("stage-14*")):
+            _candidate = _s14_dir / "experiment_summary.json"
+            if _candidate.is_file():
+                _text = _candidate.read_text(encoding="utf-8")
+                _parsed = _safe_json_loads(_text, {})
+                if isinstance(_parsed, dict):
+                    _mcount = _parsed.get("total_metric_keys", 0) or len(
+                        _parsed.get("metrics_summary", {})
+                    )
+                    _paired_count = len(_parsed.get("paired_comparisons", []))
+                    _cond_count = len(_parsed.get("condition_summaries", {}))
+                    _score = _mcount + _paired_count * 10 + _cond_count * 5
+                    if _score > _best_metric_count:
+                        _best_metric_count = _score
+                        exp_summary_text = _text
+                        logger.info(
+                            "R21-1 fallback: Selected %s (score=%d)",
+                            _s14_dir.name, _score,
+                        )
+        if exp_summary_text is None:
+            exp_summary_text = _read_prior_artifact(run_dir, "experiment_summary.json")
     exp_metrics_instruction = ""
     has_real_metrics = False
     _verified_registry = None  # Phase 1: anti-fabrication verified data registry
@@ -1220,8 +1285,12 @@ def _execute_paper_draft(
         if isinstance(exp_summary, dict):
             try:
                 from researchclaw.pipeline.verified_registry import VerifiedRegistry
-                _verified_registry = VerifiedRegistry.from_experiment(
-                    exp_summary, refinement_log=_refinement_log_for_vr,
+                # BUG-222: Use best_only=True to ensure paper tables reflect
+                # only the promoted best iteration, not regressed data
+                _verified_registry = VerifiedRegistry.from_run_dir(
+                    run_dir,
+                    metric_direction=config.experiment.metric_direction,
+                    best_only=True,
                 )
                 logger.info(
                     "Stage 17: VerifiedRegistry — %d verified values, %d conditions",
@@ -1270,6 +1339,20 @@ def _execute_paper_draft(
                     "- Do NOT describe results as 'single run' or 'preliminary'.\n"
                 )
                 exp_metrics_instruction += scale_block
+
+            # Improvement B: Inject seed insufficiency warnings
+            _seed_warns = exp_summary_parsed.get("seed_insufficiency_warnings", [])
+            if _seed_warns:
+                _sw_block = (
+                    "\n\n## SEED INSUFFICIENCY WARNINGS\n"
+                    "Some conditions were run with fewer than 3 seeds. "
+                    "Results for these conditions MUST be footnoted as preliminary.\n"
+                    "All tables MUST show mean ± std format. Single-run values "
+                    "MUST be footnoted with '†single seed — interpret with caution'.\n"
+                )
+                for _sw in _seed_warns:
+                    _sw_block += f"- {_sw}\n"
+                exp_metrics_instruction += _sw_block
 
             # R19-6 + R33: Inject condition summaries with CIs
             cond_summaries = exp_summary_parsed.get("condition_summaries", {})
@@ -1544,7 +1627,7 @@ def _execute_paper_draft(
 
     # R11-5: Experiment quality minimum threshold before paper writing
     # Parse analysis.md for quality rating and condition completeness
-    analysis_text = _read_prior_artifact(run_dir, "analysis.md") or ""
+    analysis_text = _read_best_analysis(run_dir)
     _quality_warnings: list[str] = []
 
     # Check 1: Was the analysis quality rating very low?
@@ -1673,7 +1756,10 @@ def _execute_paper_draft(
     # FigureAgent renders 0 charts the list persists, and calling .get() on it
     # raises AttributeError.
     _fa_descriptions = ""
-    for _s14_dir in sorted(run_dir.glob("stage-14*")):
+    # BUG-178: Iterate in reverse order so we read the LATEST stage-14
+    # iteration's figure plan, matching Stage 22 which copies charts
+    # from the newest iteration.
+    for _s14_dir in sorted(run_dir.glob("stage-14*"), reverse=True):
         # Prefer the final plan (dict with figure_descriptions) if it exists
         for _fp_name in ("figure_plan_final.json", "figure_plan.json"):
             _fp_path = _s14_dir / _fp_name
@@ -1708,13 +1794,16 @@ def _execute_paper_draft(
         exp_metrics_instruction += "\n\n" + _fa_descriptions
         logger.info("Stage 17: Injected FigureAgent figure descriptions into paper draft prompt")
     else:
-        # Fallback: scan for chart files
+        # Fallback: scan for chart files from the LATEST stage-14 iteration
+        # BUG-178: Must use reverse order to match Stage 22 chart copy behavior
         _chart_files: list[str] = []
-        for _s14_dir in sorted(run_dir.glob("stage-14*")):
+        for _s14_dir in sorted(run_dir.glob("stage-14*"), reverse=True):
             _charts_path = _s14_dir / "charts"
             if _charts_path.is_dir():
-                for _cf in sorted(_charts_path.glob("*.png")):
-                    _chart_files.append(_cf.name)
+                _found = sorted(_charts_path.glob("*.png"))
+                if _found:
+                    _chart_files = [f.name for f in _found]
+                    break  # Use only the latest iteration's charts
         if _chart_files:
             _chart_block = (
                 "\n\n## AVAILABLE FIGURES (embed in the paper)\n"

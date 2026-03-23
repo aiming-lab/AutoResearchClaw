@@ -21,11 +21,19 @@ logger = logging.getLogger(__name__)
 
 # Numbers that are always allowed (years, common constants, etc.)
 _ALWAYS_ALLOWED: set[float] = {
-    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 50.0, 100.0,
-    0.5, 0.01, 0.001, 0.1, 0.05, 0.95, 0.99,
+    0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0,
+    0.5, 0.01, 0.001, 0.0001, 0.1, 0.05, 0.95, 0.99,
     2024.0, 2025.0, 2026.0, 2027.0,
-    32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,  # Common batch sizes / hidden dims
+    8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0,
     224.0, 299.0, 384.0,  # Common image sizes
+    # BUG-192: Common hyperparameter values
+    0.0003, 3e-4, 0.0005, 5e-4, 0.002, 2e-3,  # learning rates
+    0.2, 0.3, 0.25, 0.7, 0.6, 0.8,  # clip epsilon, dropout, gradient clip, GCE q, common HP
+    0.9, 0.999, 0.9999,  # Adam betas, momentum
+    0.02, 0.03,  # weight init std
+    1e-5, 1e-6, 1e-8,  # epsilon, weight decay
+    300.0, 400.0, 500.0,  # epochs
+    4096.0, 8192.0,  # larger batch sizes / hidden dims
 }
 
 # Regex for extracting decimal numbers (including negative, scientific notation)
@@ -60,6 +68,8 @@ _SKIP_PATTERNS = [
     re.compile(r"\\href\{[^}]*\}\{[^}]*\}"),
     re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{[^}]*\}"),
     re.compile(r"\\resizebox\{[^}]*\}\{[^}]*\}"),
+    re.compile(r"\\begin\{algorithmic\}.*?\\end\{algorithmic\}", re.DOTALL),
+    re.compile(r"\\begin\{algorithm\}.*?\\end\{algorithm\}", re.DOTALL),
 ]
 
 # Strict sections — unverified numbers cause REJECT
@@ -181,7 +191,10 @@ def verify_paper(
         section = _section_at_line(sections, line_idx)
         section_lower = section.lower() if section else ""
 
-        in_table = any(start <= line_idx <= end for start, end in table_ranges)
+        in_table = any(
+            start <= line_idx <= end and is_results
+            for start, end, is_results in table_ranges
+        )
 
         for m in _NUMBER_RE.finditer(line):
             num_str = m.group(1)
@@ -301,19 +314,44 @@ def _section_at_line(sections: list[tuple[int, str]], line_idx: int) -> str | No
     return current
 
 
+_STRICT_EXEMPT_KEYWORDS: set[str] = {
+    "dataset", "setup", "protocol", "hyperparameter", "implementation",
+    "hardware", "infrastructure", "notation", "preliminaries",
+}
+
+
 def _is_strict_section(section_lower: str, strict_set: set[str]) -> bool:
-    """Check if a section name matches any strict section pattern."""
+    """Check if a section name matches any strict section pattern.
+
+    BUG-R49-02: Sections like "Datasets and Evaluation Protocol" contain
+    the keyword "evaluation" but describe protocol parameters, not results.
+    Such sections are exempted when they also contain a setup/protocol keyword.
+    """
     if not section_lower:
         return False
     for strict_name in strict_set:
         if strict_name in section_lower:
+            # Check for exemption: if the section also contains a
+            # setup/protocol keyword, it's not a results section.
+            if any(kw in section_lower for kw in _STRICT_EXEMPT_KEYWORDS):
+                return False
             return True
     return False
 
 
-def _find_table_ranges(tex_text: str) -> list[tuple[int, int]]:
-    """Find line ranges of table environments."""
-    ranges: list[tuple[int, int]] = []
+def _find_table_ranges(tex_text: str) -> list[tuple[int, int, bool]]:
+    """Find line ranges of table environments.
+
+    Returns ``(start_line, end_line, is_results_table)`` tuples.
+    Hyperparameter / configuration tables (detected by ``\\caption`` keywords)
+    are marked ``is_results_table=False`` so the verifier skips strict checks
+    on their numeric content (BUG-192).
+    """
+    _HP_CAPTION_KW = {
+        "hyperparameter", "hyper-parameter", "configuration", "config",
+        "setting", "training detail", "implementation detail",
+    }
+    ranges: list[tuple[int, int, bool]] = []
     lines = tex_text.split("\n")
     in_table = False
     start = 0
@@ -322,7 +360,10 @@ def _find_table_ranges(tex_text: str) -> list[tuple[int, int]]:
             in_table = True
             start = i
         elif r"\end{table" in line and in_table:
-            ranges.append((start, i))
+            # Scan table block for \caption to determine type
+            table_block = "\n".join(lines[start : i + 1]).lower()
+            is_hp = any(kw in table_block for kw in _HP_CAPTION_KW)
+            ranges.append((start, i, not is_hp))
             in_table = False
     return ranges
 
@@ -381,6 +422,8 @@ def _check_condition_names(
             and not name.startswith("\\")
             and len(name) > 1
             and not name.isdigit()
+            # BUG-DA8-15: Reject numeric-looking strings (e.g. "91.5" from \textbf{91.5})
+            and not re.match(r'^[\d.eE+\-]+$', name)
         )
 
     def _clean_latex(s: str) -> str:

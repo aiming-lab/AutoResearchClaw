@@ -835,3 +835,170 @@ def test_package_deliverables_called_after_pipeline(
     captured = capsys.readouterr()
     assert "Deliverables packaged" in captured.out
     assert (run_dir / "deliverables" / "manifest.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# BUG-223: _promote_best_stage14 must always write experiment_summary_best.json
+# ---------------------------------------------------------------------------
+
+def _make_stage14_summary(run_dir: Path, suffix: str, pm_value: float) -> None:
+    """Helper: create a stage-14{suffix}/experiment_summary.json."""
+    d = run_dir / f"stage-14{suffix}"
+    d.mkdir(parents=True, exist_ok=True)
+    data = {
+        "metrics_summary": {
+            "primary_metric": {"min": pm_value, "max": pm_value, "mean": pm_value, "count": 1}
+        },
+        "condition_summaries": {"cond_a": {"metrics": {"primary_metric": pm_value}}},
+    }
+    (d / "experiment_summary.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+class TestPromoteBestStage14BestJson:
+    """BUG-223: experiment_summary_best.json must be written even when
+    stage-14/ already has the best result (early-return path)."""
+
+    @pytest.fixture()
+    def max_config(self, rc_config: RCConfig) -> RCConfig:
+        """Config with metric_direction=maximize (accuracy-like metrics)."""
+        object.__setattr__(rc_config.experiment, "metric_direction", "maximize")
+        return rc_config
+
+    def test_best_json_written_when_current_is_best(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """stage-14/ already best → should still write best.json."""
+        _make_stage14_summary(run_dir, "", 90.0)
+        _make_stage14_summary(run_dir, "_v1", 80.0)
+        _make_stage14_summary(run_dir, "_v2", 70.0)
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        assert best_path.exists(), "experiment_summary_best.json must always be written"
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 90.0
+
+    def test_best_json_written_when_promotion_needed(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """stage-14/ is NOT best → promote + write best.json."""
+        _make_stage14_summary(run_dir, "", 70.0)
+        _make_stage14_summary(run_dir, "_v1", 95.0)
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        assert best_path.exists()
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 95.0
+
+    def test_best_json_written_with_equal_values(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """BUG-223 exact scenario: stage-14 and stage-14_v1 have equal
+        metrics, stage-14_v2 is regressed."""
+        _make_stage14_summary(run_dir, "", 64.46)
+        _make_stage14_summary(run_dir, "_v1", 64.46)
+        _make_stage14_summary(run_dir, "_v2", 26.80)
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        assert best_path.exists(), "BUG-223: best.json missing when current is tied-best"
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 64.46
+
+
+class TestPromoteBestStage14AnalysisBest:
+    """BUG-225: analysis_best.md must be written from best stage-14 iteration."""
+
+    @pytest.fixture()
+    def max_config(self, rc_config: RCConfig) -> RCConfig:
+        object.__setattr__(rc_config.experiment, "metric_direction", "maximize")
+        return rc_config
+
+    def test_analysis_best_written_from_best_iteration(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """analysis_best.md should come from the best stage-14 iteration."""
+        _make_stage14_summary(run_dir, "", 70.0)
+        _make_stage14_summary(run_dir, "_v1", 95.0)
+        # Write analysis.md in each
+        (run_dir / "stage-14" / "analysis.md").write_text("Degenerate analysis", encoding="utf-8")
+        (run_dir / "stage-14_v1" / "analysis.md").write_text("Best analysis v1", encoding="utf-8")
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        best_analysis = run_dir / "analysis_best.md"
+        assert best_analysis.exists(), "BUG-225: analysis_best.md must be written"
+        assert best_analysis.read_text(encoding="utf-8") == "Best analysis v1"
+
+    def test_analysis_best_written_when_current_is_best(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """Even when stage-14 is already best, analysis_best.md should be written."""
+        _make_stage14_summary(run_dir, "", 90.0)
+        _make_stage14_summary(run_dir, "_v1", 80.0)
+        (run_dir / "stage-14" / "analysis.md").write_text("Best analysis current", encoding="utf-8")
+        (run_dir / "stage-14_v1" / "analysis.md").write_text("Worse analysis", encoding="utf-8")
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        best_analysis = run_dir / "analysis_best.md"
+        assert best_analysis.exists()
+        assert best_analysis.read_text(encoding="utf-8") == "Best analysis current"
+
+    def test_no_analysis_best_when_no_analysis_md(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """If best stage-14 has no analysis.md, no analysis_best.md is written."""
+        _make_stage14_summary(run_dir, "", 90.0)
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        assert not (run_dir / "analysis_best.md").exists()
+
+
+class TestPromoteBestStage14DegenerateDetection:
+    """BUG-226: Degenerate near-zero metrics must not be promoted as best."""
+
+    def test_degenerate_minimize_skipped(self, run_dir: Path, rc_config: RCConfig) -> None:
+        """When minimize, a value 1000x smaller than second-best is degenerate."""
+        # metric_direction defaults to "minimize"
+        _make_stage14_summary(run_dir, "", 7.26e-8)   # degenerate (broken normalization)
+        _make_stage14_summary(run_dir, "_v2", 0.37)   # valid
+
+        rc_runner._promote_best_stage14(run_dir, rc_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        assert best_path.exists()
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 0.37, "Degenerate value should be skipped, valid v2 promoted"
+
+    def test_legitimate_minimize_not_skipped(self, run_dir: Path, rc_config: RCConfig) -> None:
+        """When values are within normal range, smaller is legitimately best."""
+        _make_stage14_summary(run_dir, "", 0.15)
+        _make_stage14_summary(run_dir, "_v1", 0.37)
+
+        rc_runner._promote_best_stage14(run_dir, rc_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 0.15, "Legitimate lower value should be promoted"
+
+    def test_single_candidate_not_affected(self, run_dir: Path, rc_config: RCConfig) -> None:
+        """Single candidate is never skipped regardless of value."""
+        _make_stage14_summary(run_dir, "", 1e-10)
+
+        rc_runner._promote_best_stage14(run_dir, rc_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 1e-10

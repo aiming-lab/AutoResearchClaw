@@ -600,3 +600,49 @@ class TestBaseAgent:
         from researchclaw.agents.base import BaseAgent
         result = BaseAgent._parse_json("no json here at all")
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Required baselines injection (Improvement E)
+# ---------------------------------------------------------------------------
+
+
+class TestRequiredBaselines:
+    """Test that required baselines are injected from knowledge base."""
+
+    def test_inject_required_baselines_image_classification(self) -> None:
+        from researchclaw.agents.benchmark_agent.selector import SelectorAgent
+
+        llm = FakeLLM()
+        agent = SelectorAgent(llm, min_baselines=1)
+        selected: list[dict[str, Any]] = [
+            {"name": "EfficientNet-B0", "origin": "knowledge_base"},
+        ]
+        injected = agent._inject_required_baselines(
+            "image classification on CIFAR-10",
+            selected,
+            [],
+        )
+        # Should inject ResNet-50 and ViT-B/16 (required for image_classification)
+        injected_names = {b["name"] for b in injected}
+        assert "ResNet-50" in injected_names
+        assert "ViT-B/16" in injected_names
+        # Already-present baselines should not be duplicated
+        assert sum(1 for b in selected if b["name"] == "EfficientNet-B0") == 1
+
+    def test_inject_required_baselines_no_duplicates(self) -> None:
+        from researchclaw.agents.benchmark_agent.selector import SelectorAgent
+
+        llm = FakeLLM()
+        agent = SelectorAgent(llm, min_baselines=1)
+        selected: list[dict[str, Any]] = [
+            {"name": "ResNet-50", "origin": "knowledge_base"},
+            {"name": "ViT-B/16", "origin": "llm_suggestion"},
+        ]
+        injected = agent._inject_required_baselines(
+            "image classification on CIFAR-10",
+            selected,
+            [],
+        )
+        # Both are already present → nothing should be injected
+        assert len(injected) == 0

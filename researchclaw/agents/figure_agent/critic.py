@@ -59,12 +59,20 @@ class CriticAgent(BaseAgent):
             # Build script lookup
             script_map: dict[str, dict[str, Any]] = {}
             for s in scripts:
+                # BUG-38: skip non-dict entries
+                if not isinstance(s, dict):
+                    self.logger.warning("Skipping non-dict script entry: %s", type(s))
+                    continue
                 script_map[s.get("figure_id", "")] = s
 
             reviews: list[dict[str, Any]] = []
             all_passed = True
 
             for fig in rendered:
+                # BUG-38: skip non-dict entries
+                if not isinstance(fig, dict):
+                    self.logger.warning("Skipping non-dict rendered entry: %s", type(fig))
+                    continue
                 figure_id = fig.get("figure_id", "unknown")
                 if not fig.get("success"):
                     reviews.append({

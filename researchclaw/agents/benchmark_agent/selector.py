@@ -7,11 +7,16 @@ priorities to select the optimal combination of datasets and baselines.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from researchclaw.agents.base import AgentStepResult, BaseAgent
 
 logger = logging.getLogger(__name__)
+
+_KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "benchmark_knowledge.yaml"
 
 # Maximum dataset size (MB) by tier and network policy
 _SIZE_LIMITS: dict[str, int] = {
@@ -208,6 +213,54 @@ class SelectorAgent(BaseAgent):
 
         return selected_bench, selected_base
 
+    # -- Required baselines injection --------------------------------------
+
+    def _inject_required_baselines(
+        self,
+        topic: str,
+        selected: list[dict[str, Any]],
+        ranked: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Load required_baselines from knowledge base and inject missing ones.
+
+        Returns the list of newly injected baseline dicts.
+        """
+        try:
+            kb = yaml.safe_load(_KNOWLEDGE_PATH.read_text(encoding="utf-8"))
+            domains = kb.get("domains", {}) if isinstance(kb, dict) else {}
+        except Exception:  # noqa: BLE001
+            return []
+
+        topic_lower = topic.lower()
+        injected: list[dict[str, Any]] = []
+        selected_names = {b.get("name", "").lower() for b in selected}
+
+        for _domain_id, domain_data in domains.items():
+            if not isinstance(domain_data, dict):
+                continue
+            keywords = domain_data.get("keywords", [])
+            if not any(kw.lower() in topic_lower for kw in keywords):
+                continue
+            required = domain_data.get("required_baselines", [])
+            if not required:
+                continue
+            # Find each required baseline in ranked list or create stub
+            all_baselines = domain_data.get("common_baselines", [])
+            bl_by_name = {b.get("name", ""): b for b in all_baselines}
+            for req_name in required:
+                if req_name.lower() in selected_names:
+                    continue
+                # Try to find full entry from knowledge base
+                if req_name in bl_by_name:
+                    entry = {**bl_by_name[req_name], "origin": "required_baseline"}
+                else:
+                    entry = {"name": req_name, "origin": "required_baseline", "pip": []}
+                selected.append(entry)
+                selected_names.add(req_name.lower())
+                injected.append(entry)
+
+        return injected
+
     # -- Main entry point --------------------------------------------------
 
     def execute(self, context: dict[str, Any]) -> AgentStepResult:
@@ -268,6 +321,17 @@ class SelectorAgent(BaseAgent):
                     selected_base.append(bl)
                 if len(selected_base) >= self._min_base:
                     break
+
+        # 4b. Improvement E: Inject required baselines from knowledge base
+        _injected_required = self._inject_required_baselines(
+            topic, selected_base, ranked_base,
+        )
+        if _injected_required:
+            self.logger.info(
+                "Injected %d required baselines: %s",
+                len(_injected_required),
+                [b.get("name") for b in _injected_required],
+            )
 
         # 5. Collect required pip packages
         required_pip: list[str] = []

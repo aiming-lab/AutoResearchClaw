@@ -243,6 +243,110 @@ class VerifiedRegistry:
         return reg
 
     @classmethod
+    def from_run_dir(
+        cls,
+        run_dir: Path,
+        *,
+        metric_direction: str = "maximize",
+        best_only: bool = False,
+    ) -> VerifiedRegistry:
+        """Build registry from experiment data sources in *run_dir*.
+
+        Parameters
+        ----------
+        best_only:
+            BUG-222: When True, use ONLY ``experiment_summary_best.json``
+            (the promoted best iteration) as the ground truth.  This prevents
+            regressed REFINE iterations from polluting the verified value set.
+            When False (default), merges all ``stage-14*`` data for backward
+            compatibility (e.g., pre-built table generation that needs all
+            condition names).
+
+        Scans (when ``best_only=False``):
+        1. All ``stage-14*/experiment_summary.json`` (sorted, every version)
+        2. ``experiment_summary_best.json`` at run root (repair cycle output)
+        3. All ``stage-13*/refinement_log.json`` for enrichment
+        """
+        import json as _json_rd
+
+        target = cls(metric_direction=metric_direction)
+
+        if best_only:
+            # BUG-222: Only use promoted best data
+            best_path = run_dir / "experiment_summary_best.json"
+            if best_path.is_file():
+                try:
+                    best_data = _json_rd.loads(best_path.read_text(encoding="utf-8"))
+                    if isinstance(best_data, dict):
+                        sub = cls.from_experiment(best_data, metric_direction=metric_direction)
+                        _merge_into(target, sub)
+                        logger.debug("from_run_dir(best_only): using experiment_summary_best.json (%d values)", len(sub.values))
+                except (OSError, _json_rd.JSONDecodeError, Exception):  # noqa: BLE001
+                    logger.debug("from_run_dir(best_only): failed to load experiment_summary_best.json", exc_info=True)
+            if not target.values:
+                # Fallback: no best.json or it was empty — use stage-14/ (non-versioned)
+                s14_path = run_dir / "stage-14" / "experiment_summary.json"
+                if s14_path.is_file():
+                    try:
+                        es_data = _json_rd.loads(s14_path.read_text(encoding="utf-8"))
+                        if isinstance(es_data, dict):
+                            sub = cls.from_experiment(es_data, metric_direction=metric_direction)
+                            _merge_into(target, sub)
+                    except (OSError, _json_rd.JSONDecodeError, Exception):  # noqa: BLE001
+                        pass
+        else:
+            # --- 1. All stage-14* experiment summaries ---
+            for es_path in sorted(run_dir.glob("stage-14*/experiment_summary.json")):
+                try:
+                    es_data = _json_rd.loads(es_path.read_text(encoding="utf-8"))
+                    if not isinstance(es_data, dict):
+                        continue
+                    sub = cls.from_experiment(es_data, metric_direction=metric_direction)
+                    _merge_into(target, sub)
+                    logger.debug("from_run_dir: merged %s (%d values)", es_path.name, len(sub.values))
+                except (OSError, _json_rd.JSONDecodeError, Exception):  # noqa: BLE001
+                    logger.debug("from_run_dir: skipping %s", es_path, exc_info=True)
+
+            # --- 2. experiment_summary_best.json (repair cycle output) ---
+            best_path = run_dir / "experiment_summary_best.json"
+            if best_path.is_file():
+                try:
+                    best_data = _json_rd.loads(best_path.read_text(encoding="utf-8"))
+                    if isinstance(best_data, dict):
+                        sub = cls.from_experiment(best_data, metric_direction=metric_direction)
+                        _merge_into(target, sub)
+                        logger.debug("from_run_dir: merged experiment_summary_best.json (%d values)", len(sub.values))
+                except (OSError, _json_rd.JSONDecodeError, Exception):  # noqa: BLE001
+                    logger.debug("from_run_dir: skipping experiment_summary_best.json", exc_info=True)
+
+            # --- 3. All refinement logs (enrichment) ---
+            for rl_path in sorted(run_dir.glob("stage-13*/refinement_log.json")):
+                try:
+                    rl_data = _json_rd.loads(rl_path.read_text(encoding="utf-8"))
+                    if isinstance(rl_data, dict):
+                        _enrich_from_refinement_log(target, rl_data)
+                        logger.debug("from_run_dir: enriched from %s", rl_path.name)
+                except (OSError, _json_rd.JSONDecodeError, Exception):  # noqa: BLE001
+                    logger.debug("from_run_dir: skipping %s", rl_path, exc_info=True)
+
+        # Recompute per-condition stats after merging
+        for cond in target.conditions.values():
+            cond.compute_stats()
+            if cond.mean is not None:
+                target.add_value(cond.mean, f"{cond.name}.mean")
+            if cond.std is not None and cond.std > 0:
+                target.add_value(cond.std, f"{cond.name}.std")
+
+        logger.info(
+            "VerifiedRegistry.from_run_dir(%s): %d values, %d conditions (%s)",
+            "best_only" if best_only else "all",
+            len(target.values),
+            len(target.condition_names),
+            ", ".join(sorted(target.condition_names)) if target.condition_names else "none",
+        )
+        return target
+
+    @classmethod
     def from_files(
         cls,
         experiment_summary_path: Path,
@@ -258,6 +362,35 @@ class VerifiedRegistry:
         if refinement_log_path and refinement_log_path.exists():
             ref_data = json.loads(refinement_log_path.read_text(encoding="utf-8"))
         return cls.from_experiment(exp_data, ref_data, metric_direction=metric_direction)
+
+
+def _merge_into(target: VerifiedRegistry, source: VerifiedRegistry) -> None:
+    """Merge *source* values, conditions, and condition_names into *target*."""
+    for v, desc in source.values.items():
+        if v not in target.values:
+            target.values[v] = desc
+    target.condition_names |= source.condition_names
+    for cname, cresult in source.conditions.items():
+        if cname not in target.conditions:
+            target.conditions[cname] = ConditionResult(name=cname)
+        existing = target.conditions[cname]
+        # Merge per-seed values (source wins on conflict — later data is better)
+        existing.per_seed_values.update(cresult.per_seed_values)
+        if cresult.aggregate_metric is not None:
+            existing.aggregate_metric = cresult.aggregate_metric
+    # Keep the best primary metric
+    if source.primary_metric is not None:
+        if target.primary_metric is None:
+            target.primary_metric = source.primary_metric
+        elif target.metric_direction == "maximize":
+            target.primary_metric = max(target.primary_metric, source.primary_metric)
+        else:
+            target.primary_metric = min(target.primary_metric, source.primary_metric)
+    if source.primary_metric_std is not None:
+        # Only update std if the source's primary_metric actually won
+        if target.primary_metric == source.primary_metric:
+            target.primary_metric_std = source.primary_metric_std
+    target.training_config.update(source.training_config)
 
 
 def _enrich_from_refinement_log(reg: VerifiedRegistry, refinement_log: dict) -> None:

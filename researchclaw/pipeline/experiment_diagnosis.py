@@ -311,7 +311,10 @@ def diagnose_experiment(
     # 10. Insufficient seeds
     _check_insufficient_seeds(diag, experiment_summary)
 
-    # 11. No conditions at all
+    # 11. Near-random accuracy (BUG-204)
+    _check_near_random_accuracy(diag, experiment_summary)
+
+    # 12. No conditions at all
     if not completed_conditions:
         diag.deficiencies.append(Deficiency(
             type=DeficiencyType.NO_CONDITIONS_COMPLETED,
@@ -458,6 +461,8 @@ def _check_dataset_issues(diag: ExperimentDiagnosis, output: str) -> None:
     patterns = [
         (r"FileNotFoundError.*?(?:dataset|data|csv|json)", "Dataset file not found"),
         (r"No such file.*?(?:dataset|data|train|test)", "Dataset path does not exist"),
+        # BUG-203: HuggingFace DatasetNotFoundError (e.g. cifar10_corrupted)
+        (r"DatasetNotFoundError.*?doesn't exist", "HuggingFace dataset not found on Hub"),
     ]
     for pat, desc in patterns:
         if re.search(pat, output, re.IGNORECASE):
@@ -466,7 +471,13 @@ def _check_dataset_issues(diag: ExperimentDiagnosis, output: str) -> None:
                 severity="critical",
                 description=desc,
                 error_message=_extract_context(output, pat),
-                suggested_fix="Fix dataset path or download in setup.py.",
+                suggested_fix=(
+                    "The dataset does not exist on HuggingFace Hub. "
+                    "Use ONLY pre-cached datasets: CIFAR-10, CIFAR-100, MNIST, "
+                    "FashionMNIST, STL-10 (available at /opt/datasets). "
+                    "Remove the failing download from setup.py and use "
+                    "torchvision.datasets with root='/opt/datasets' instead."
+                ),
             ))
 
 
@@ -487,6 +498,8 @@ def _check_code_crashes(diag: ExperimentDiagnosis, stderr: str, output: str) -> 
         if "PermissionError" in error_msg:
             continue
         if "CUDA out of memory" in error_msg:
+            continue
+        if "DatasetNotFoundError" in error_msg:
             continue
         if error_msg in seen_errors:
             continue
@@ -528,6 +541,49 @@ def _check_hyperparams(diag: ExperimentDiagnosis, output: str, summary: dict) ->
                 description=f"Loss diverging (max={max(losses):.1f}). Training is unstable.",
                 suggested_fix="Reduce learning rate. Add gradient clipping. Check data normalization.",
             ))
+
+
+def _check_near_random_accuracy(diag: ExperimentDiagnosis, summary: dict) -> None:
+    """BUG-204: Detect when all conditions produce near-random accuracy.
+
+    If the metric name suggests accuracy/top-1 and the best value is below
+    15%, the model likely isn't learning (wrong LR, broken forward pass, etc.).
+    """
+    ms = summary.get("metrics_summary", {})
+    if not ms:
+        return
+
+    # Find accuracy-like metrics
+    _ACC_KEYS = {"accuracy", "acc", "top1", "top1_accuracy", "val_acc", "test_acc"}
+    best_acc: float | None = None
+    acc_key: str = ""
+    for key, val in ms.items():
+        key_lower = key.lower().split("/")[-1]  # strip condition prefix
+        if key_lower in _ACC_KEYS or "accuracy" in key_lower or "top1" in key_lower:
+            v = val.get("max", val) if isinstance(val, dict) else val
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if best_acc is None or fv > best_acc:
+                best_acc = fv
+                acc_key = key
+
+    if best_acc is not None and 0 < best_acc < 15.0:
+        diag.deficiencies.append(Deficiency(
+            type=DeficiencyType.HYPERPARAMETER_ISSUE,
+            severity="critical",
+            description=(
+                f"Best accuracy is {best_acc:.1f}% ({acc_key}), near random chance. "
+                f"The model is not learning."
+            ),
+            suggested_fix=(
+                "Check: (1) Learning rate too high/low — try 0.001 for Adam, 0.1 for SGD. "
+                "(2) Data preprocessing — normalize to [0,1] or ImageNet stats. "
+                "(3) Forward pass — ensure loss backward reaches all parameters. "
+                "(4) KD — ensure teacher is loaded with correct pretrained weights."
+            ),
+        ))
 
 
 def _check_identical_conditions(diag: ExperimentDiagnosis, summary: dict) -> None:
