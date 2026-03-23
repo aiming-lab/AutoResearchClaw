@@ -2,6 +2,7 @@
 """Tests for ssh_remote and colab_drive experiment backends."""
 from __future__ import annotations
 
+import gc
 import json
 import textwrap
 import time
@@ -508,3 +509,58 @@ class TestAcpSessionReconnect:
         with pytest.raises(RuntimeError, match="permission denied"):
             client._send_prompt("test prompt")
         assert call_count == 1  # no retry
+
+
+# ===========================================================================
+# ACP weakref accumulation tests (Issue #33)
+# ===========================================================================
+
+class TestAcpWeakrefCleanup:
+    def setup_method(self):
+        """Reset class state between tests."""
+        from researchclaw.llm.acp_client import ACPClient
+        ACPClient._live_instances.clear()
+        ACPClient._atexit_registered = False
+
+    def test_dead_weakrefs_pruned(self):
+        """Dead weakrefs are removed when a new instance is created."""
+        from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+        a = ACPClient(ACPConfig(agent="claude"))
+        b = ACPClient(ACPConfig(agent="claude"))
+        assert len(ACPClient._live_instances) == 2
+
+        del a
+        gc.collect()
+
+        c = ACPClient(ACPConfig(agent="claude"))
+        # Only b and c should remain (dead ref from 'a' pruned)
+        assert len(ACPClient._live_instances) == 2
+        live = [r() for r in ACPClient._live_instances]
+        assert b in live
+        assert c in live
+
+    def test_atexit_registered_once(self):
+        """atexit.register is called exactly once across multiple instances."""
+        with mock.patch("researchclaw.llm.acp_client.atexit") as mock_atexit:
+            from researchclaw.llm.acp_client import ACPClient, ACPConfig
+            ACPClient._atexit_registered = False
+            ACPClient(ACPConfig(agent="claude"))
+            ACPClient(ACPConfig(agent="claude"))
+            ACPClient(ACPConfig(agent="claude"))
+            assert mock_atexit.register.call_count == 1
+
+    def test_atexit_cleanup_closes_live_and_clears(self):
+        """_atexit_cleanup calls close() on live instances and clears list."""
+        from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+        a = ACPClient(ACPConfig(agent="claude"))
+        b = ACPClient(ACPConfig(agent="claude"))
+        a.close = mock.Mock()  # type: ignore[method-assign]
+        b.close = mock.Mock()  # type: ignore[method-assign]
+
+        ACPClient._atexit_cleanup()
+
+        a.close.assert_called_once()
+        b.close.assert_called_once()
+        assert len(ACPClient._live_instances) == 0
