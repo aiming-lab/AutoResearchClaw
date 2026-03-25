@@ -1727,6 +1727,7 @@ def _execute_export_publish(
     # F2.7: Post-process citations — [cite_key] → \cite{cite_key}
     # and copy final references.bib to export stage
     _ay_map: dict[str, str] = {}  # BUG-102: author-year → cite_key map
+    final_paper_latex = final_paper  # default when no bib_text available
     bib_text = _read_prior_artifact(run_dir, "references.bib")
     if bib_text:
         # Replace [cite_key] patterns in the final paper with \cite{cite_key}
@@ -2627,6 +2628,12 @@ def _execute_citation_verify(
         (stage_dir / "references_verified.bib").write_text(
             "% No references to verify\n", encoding="utf-8"
         )
+        # Always write paper_final_verified.md so deliverables packaging gets
+        # the latest paper (not a stale copy from a previous run)
+        if paper_text.strip():
+            (stage_dir / "paper_final_verified.md").write_text(
+                paper_text, encoding="utf-8"
+            )
         return StageResult(
             stage=Stage.CITATION_VERIFY,
             status=StageStatus.DONE,

@@ -456,10 +456,10 @@ def execute_pipeline(
             if result.decision == "degraded":
                 print(
                     f"{prefix} {stage.name} — DEGRADED ({elapsed:.1f}s) "
-                    f"— continuing with sanitization → {arts}"
+                    f"— continuing with sanitization -> {arts}"
                 )
             else:
-                print(f"{prefix} {stage.name} — done ({elapsed:.1f}s) → {arts}")
+                print(f"{prefix} {stage.name} — done ({elapsed:.1f}s) -> {arts}")
         elif result.status == StageStatus.FAILED:
             err = result.error or "unknown error"
             print(f"{prefix} {stage.name} — FAILED ({elapsed:.1f}s) — {err}")
@@ -636,7 +636,7 @@ def execute_pipeline(
     try:
         deliverables_dir = _package_deliverables(run_dir, run_id, config)
         if deliverables_dir is not None:
-            print(f"[{run_id}] Deliverables packaged → {deliverables_dir}")
+            print(f"[{run_id}] Deliverables packaged -> {deliverables_dir}")
     except Exception:  # noqa: BLE001
         logger.warning("Deliverables packaging failed (non-blocking)")
 
@@ -1389,7 +1389,7 @@ def execute_iterative_pipeline(
     try:
         deliverables_dir = _package_deliverables(run_dir, run_id, config)
         if deliverables_dir is not None:
-            print(f"[{run_id}] Deliverables packaged → {deliverables_dir}")
+            print(f"[{run_id}] Deliverables packaged -> {deliverables_dir}")
     except Exception:  # noqa: BLE001
         logger.warning("Deliverables packaging failed (non-blocking)")
 
