@@ -48,6 +48,8 @@ _DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
+_MAX_BACKOFF_SEC = 300  # 5-minute ceiling for retry delays
+
 
 @dataclass
 class LLMResponse:
@@ -327,7 +329,10 @@ class LLMClient:
                 # Retryable: 429 (rate limit), transient 400, 500, 502, 503, 504,
                 # 529 (Anthropic overloaded)
                 if status in (400, 429, 500, 502, 503, 504, 529):
-                    delay = self.config.retry_base_delay * (2**attempt)
+                    delay = min(
+                        self.config.retry_base_delay * (2**attempt),
+                        _MAX_BACKOFF_SEC,
+                    )
                     # Add jitter
                     import random
 
@@ -346,7 +351,10 @@ class LLMClient:
                 raise  # Other HTTP errors
             except urllib.error.URLError:
                 if attempt < self.config.max_retries - 1:
-                    delay = self.config.retry_base_delay * (2**attempt)
+                    delay = min(
+                        self.config.retry_base_delay * (2**attempt),
+                        _MAX_BACKOFF_SEC,
+                    )
                     time.sleep(delay)
                     continue
                 raise
