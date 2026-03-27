@@ -463,7 +463,7 @@ class ExperimentSandbox:
         # which loses the venv context (site-packages like numpy become unavailable).
         python = self.config.python_path
         python_path = Path(python)
-        if not python_path.is_absolute():
+        if not python_path.is_absolute() and python != "python":
             python_path = Path.cwd() / python_path
         # -u: unbuffered stdout/stderr so subprocess.run captures all output
         return [str(python_path), "-u", str(script_path)]
