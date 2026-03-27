@@ -225,6 +225,11 @@ def _request_with_retry(
     if not _cb_should_allow():
         return None
 
+    proxy_url = "http://127.0.0.1:8889"
+    proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+    opener = urllib.request.build_opener(proxy_handler)
+    urllib.request.install_opener(opener)
+
     for attempt in range(_MAX_RETRIES):
         try:
             req = urllib.request.Request(url, headers=headers)
