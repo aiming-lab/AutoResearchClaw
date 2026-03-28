@@ -31,6 +31,22 @@ from researchclaw.prompts import PromptManager
 logger = logging.getLogger(__name__)
 
 
+def _hardware_profile_context() -> str:
+    """Return conservative, model-agnostic hardware guidance for planning.
+
+    Keep this abstract on purpose: concrete GPU model names in prompts create
+    stale assumptions and can mislead planning when the real execution target
+    changes between runs.
+    """
+    return (
+        "- Execution target: single-GPU remote CUDA environment when GPU execution is used\n"
+        "- Hardware details may vary across runs; do NOT assume a specific GPU model or exact VRAM\n"
+        "- Treat compute as budget-constrained: prefer compact models, cached preprocessing, and efficient ablations\n"
+        "- Avoid multi-GPU plans, very large models, and long retraining cycles unless the configured budget explicitly allows them\n"
+        "- All experiment conditions must fit within the configured time budget"
+    )
+
+
 def _execute_experiment_design(
     stage_dir: Path,
     run_dir: Path,
@@ -118,11 +134,7 @@ def _execute_experiment_design(
         except Exception:  # noqa: BLE001
             pass
         # Improvement A: Compute hardware profile + per-condition budget
-        _hw_profile_str = (
-            "- GPU: NVIDIA RTX 6000 Ada (49140 MB VRAM)\n"
-            "- GPU count: 1\n"
-            "- CPU: shared server"
-        )
+        _hw_profile_str = _hardware_profile_context()
         _per_condition_sec = int(config.experiment.time_budget_sec * 0.7 / 6)
         _tier1 = "CIFAR-10, CIFAR-100, MNIST, FashionMNIST, STL-10, SVHN"
 

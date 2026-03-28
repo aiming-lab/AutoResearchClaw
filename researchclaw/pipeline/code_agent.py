@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -186,6 +187,17 @@ class CodeAgent:
         self._runs = 0
         self._log: list[str] = []
         self._sandbox: _SandboxLike | None = None
+        self._status_path = self._stage_dir / "code_agent_status.json"
+        self._status: dict[str, Any] = {
+            "status": "idle",
+            "current_phase": "",
+            "current_file": "",
+            "llm_calls": 0,
+            "sandbox_runs": 0,
+            "review_round": 0,
+            "last_event": "",
+            "last_update_at": "",
+        }
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -199,6 +211,7 @@ class CodeAgent:
     ) -> CodeAgentResult:
         """Execute all enabled phases and return generated files."""
         t0 = time.time()
+        self._update_status(status="running")
         self._log_event("CodeAgent.generate() started")
 
         # Phase 1: Blueprint planning
@@ -257,6 +270,7 @@ class CodeAgent:
         # Phase 5: Review dialog
         review_rounds = 0
         if self._cfg.review_max_rounds > 0:
+            self._update_status(review_round=0)
             best.files, review_rounds = self._phase4_review(
                 best.files, topic, exp_plan, metric,
             )
@@ -265,6 +279,12 @@ class CodeAgent:
         self._log_event(
             f"CodeAgent.generate() done in {elapsed:.1f}s — "
             f"{self._calls} LLM calls, {self._runs} sandbox runs"
+        )
+        self._update_status(
+            status="completed",
+            current_phase="completed",
+            current_file="",
+            review_round=review_rounds,
         )
 
         return CodeAgentResult(
@@ -287,6 +307,7 @@ class CodeAgent:
 
         Returns (raw_yaml_str, parsed_blueprint_dict_or_None).
         """
+        self._update_status(current_phase="blueprint_planning", current_file="")
         self._log_event("Phase 1: Blueprint planning")
 
         sp = self._pm.sub_prompt(
@@ -479,6 +500,7 @@ class CodeAgent:
         blueprint: dict[str, Any],
     ) -> dict[str, str]:
         """Generate files one-by-one following blueprint dependency order."""
+        self._update_status(current_phase="sequential_generation", current_file="")
         self._log_event("Phase 2: Sequential generation (blueprint-guided)")
 
         generated_files: dict[str, str] = {}
@@ -499,6 +521,10 @@ class CodeAgent:
             file_name = file_spec.get("name", "")
             if not file_name:
                 continue
+            self._update_status(
+                current_phase="sequential_generation",
+                current_file=str(file_name),
+            )
 
             self._log_event(
                 f"  Generating {file_name} "
@@ -668,6 +694,7 @@ class CodeAgent:
         Critical issues trigger targeted file regeneration.  Non-critical
         issues are logged as warnings only.
         """
+        self._update_status(current_phase="hard_validation", current_file="")
         self._log_event("Phase 2.5: Hard validation gates")
 
         for attempt in range(self._cfg.hard_validation_max_repairs + 1):
@@ -879,6 +906,7 @@ class CodeAgent:
         arch_spec: str,
     ) -> dict[str, str]:
         """Ask LLM to fix critical validation issues."""
+        self._update_status(current_phase="targeted_repair", current_file="")
         self._log_event("  Targeted repair for critical issues")
 
         # Identify which files need repair
@@ -947,6 +975,7 @@ class CodeAgent:
         max_tokens: int,
     ) -> dict[str, str]:
         """Generate code in single shot, then iteratively fix via sandbox."""
+        self._update_status(current_phase="single_shot_generation", current_file="main.py")
         self._log_event("Phase 2: Single-shot generate + exec-fix")
 
         # Initial generation (uses the existing code_generation prompt)
@@ -1203,12 +1232,17 @@ class CodeAgent:
         max_tokens: int,
     ) -> tuple[SolutionNode, int]:
         """Explore multiple candidate solutions via tree search."""
+        self._update_status(current_phase="tree_search", current_file="")
         self._log_event("Phase 3: Solution tree search")
         all_nodes: list[SolutionNode] = []
 
         # Generate initial candidates
         n_cand = max(self._cfg.tree_search_candidates, 1)
         for k in range(n_cand):
+            self._update_status(
+                current_phase="tree_search",
+                current_file=f"candidate_{k + 1}",
+            )
             self._log_event(f"  Generating candidate {k + 1}/{n_cand}")
             files = self._generate_code(
                 topic, exp_plan, metric, pkg_hint, arch_spec, max_tokens,
@@ -1321,11 +1355,13 @@ class CodeAgent:
         metric: str,
     ) -> tuple[dict[str, str], int]:
         """Reviewer agent examines code; coder fixes critical issues."""
+        self._update_status(current_phase="review", current_file="")
         self._log_event("Phase 4: Review dialog")
 
         rounds = 0
         for r in range(self._cfg.review_max_rounds):
             rounds += 1
+            self._update_status(current_phase="review", review_round=rounds)
             files_ctx = self._format_files(files)
 
             sp = self._pm.sub_prompt(
@@ -1381,6 +1417,7 @@ class CodeAgent:
     def _chat(self, system: str, user: str, max_tokens: int = 8192) -> Any:
         """Make an LLM call and track count."""
         self._calls += 1
+        self._update_status(llm_calls=self._calls)
         messages = [{"role": "user", "content": user}]
         return self._llm.chat(
             messages=messages,
@@ -1408,6 +1445,11 @@ class CodeAgent:
             raise RuntimeError("No sandbox factory configured")
 
         self._runs += 1
+        self._update_status(
+            current_phase="sandbox_validation",
+            sandbox_runs=self._runs,
+            current_file="main.py" if "main.py" in files else "",
+        )
         timeout = timeout_sec or self._cfg.exec_fix_timeout_sec
 
         # Write files to a numbered attempt directory
@@ -1489,6 +1531,21 @@ class CodeAgent:
         """Log to both Python logger and the internal validation log."""
         logger.info("[CodeAgent] %s", msg)
         self._log.append(msg)
+        self._update_status(last_event=msg)
+
+    def _update_status(self, **updates: Any) -> None:
+        """Persist lightweight progress state for external monitoring."""
+        self._status.update(updates)
+        self._status["llm_calls"] = self._calls
+        self._status["sandbox_runs"] = self._runs
+        self._status["last_update_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            self._status_path.write_text(
+                json.dumps(self._status, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.debug("Failed to write CodeAgent status file", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

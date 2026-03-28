@@ -167,6 +167,26 @@ class TestPhase1Architecture:
         assert "design the architecture for an experiment" not in first_call_user.lower()
 
 
+class TestRealtimeStatus:
+    def test_log_event_writes_status_file(
+        self, stage_dir: Path, pm: PromptManager,
+    ) -> None:
+        llm = FakeLLM()
+        agent = CodeAgent(
+            llm=llm, prompts=pm,
+            config=CodeAgentConfig(),
+            stage_dir=stage_dir,
+        )
+
+        agent._log_event("Phase 1: Blueprint planning")
+
+        status_path = stage_dir / "code_agent_status.json"
+        assert status_path.exists()
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        assert status["last_event"] == "Phase 1: Blueprint planning"
+        assert "last_update_at" in status
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: Execution-in-the-Loop
 # ---------------------------------------------------------------------------

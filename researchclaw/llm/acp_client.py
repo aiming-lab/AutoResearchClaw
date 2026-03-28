@@ -68,6 +68,7 @@ class ACPClient:
     # Track live instances for atexit cleanup (weak refs to avoid preventing GC)
     _live_instances: list[weakref.ref[ACPClient]] = []
     _atexit_registered: bool = False
+    _SESSION_INIT_TIMEOUT_SEC: int = 120
 
     def __init__(self, acp_config: ACPConfig) -> None:
         self.config = acp_config
@@ -203,13 +204,18 @@ class ACPClient:
         if not acpx:
             raise RuntimeError("acpx not found")
 
+        session_init_timeout = min(
+            self.config.timeout_sec,
+            self._SESSION_INIT_TIMEOUT_SEC,
+        )
+
         # Use 'ensure' which finds existing or creates new
         result = subprocess.run(
             [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
              self.config.agent, "sessions", "ensure",
              "--name", self.config.session_name],
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=30,
+            errors="replace", timeout=session_init_timeout,
         )
         if result.returncode != 0:
             # Fall back to 'new'
@@ -218,7 +224,7 @@ class ACPClient:
                  self.config.agent, "sessions", "new",
                  "--name", self.config.session_name],
                 capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=30,
+                errors="replace", timeout=session_init_timeout,
             )
             if result.returncode != 0:
                 raise RuntimeError(

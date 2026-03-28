@@ -433,6 +433,25 @@ def test_acp_windows_cmd_wrapper_uses_lower_inline_limit(monkeypatch: pytest.Mon
     assert limit == ACPClient._MAX_CMD_WRAPPER_PROMPT_BYTES
 
 
+def test_acp_ensure_session_uses_longer_init_timeout(monkeypatch: pytest.MonkeyPatch):
+    from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+    client = ACPClient(ACPConfig(agent="codex", timeout_sec=1800))
+    client._acpx = "acpx"
+
+    calls: list[int] = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs["timeout"])
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr("researchclaw.llm.acp_client.subprocess.run", fake_run)
+
+    client._ensure_session()
+
+    assert calls == [120]
+
+
 def test_new_param_models_contains_expected_models():
     expected = {"gpt-5", "gpt-5.1", "gpt-5.2", "gpt-5.4", "o3", "o3-mini", "o4-mini"}
     assert expected.issubset(_NEW_PARAM_MODELS)

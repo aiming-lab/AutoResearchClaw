@@ -179,6 +179,13 @@ class TestPromptManagerDefaults:
         )
         assert "import error" in irp.user
 
+    def test_llm_training_guidance_uses_generic_single_gpu_language(self) -> None:
+        pm = PromptManager()
+        block = pm.block("llm_training_guidance")
+        assert "RTX 6000 Ada" not in block
+        assert "49GB VRAM" not in block
+        assert "single-GPU" in block
+
 
 # ---------------------------------------------------------------------------
 # PromptManager — YAML override
