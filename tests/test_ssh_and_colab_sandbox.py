@@ -104,6 +104,19 @@ class TestSshRemoteSandboxCommands:
         cmd = sb._build_bare_exec_cmd("/tmp/rc-test", entry_point="main.py")
         assert "CUDA_VISIBLE_DEVICES" not in cmd
 
+    def test_bare_exec_cmd_forwards_args_and_env(self, tmp_path: Path):
+        cfg = SshRemoteConfig(host="server", user="test", remote_python="python3")
+        sb = SshRemoteSandbox(cfg, tmp_path)
+        cmd = sb._build_bare_exec_cmd(
+            "/tmp/rc-test",
+            entry_point="main.py",
+            args=["--foo", "bar baz"],
+            env_overrides={"A_ENV": "1", "B_ENV": "two words"},
+        )
+        assert "A_ENV=1" in cmd
+        assert "B_ENV='two words'" in cmd
+        assert "python3 -u main.py --foo 'bar baz'" in cmd
+
     def test_docker_exec_cmd(self, tmp_path: Path):
         cfg = SshRemoteConfig(
             host="server", user="test",
@@ -124,6 +137,23 @@ class TestSshRemoteSandboxCommands:
         assert "device=0" in cmd
         assert "myimage:latest" in cmd
         assert cmd.endswith("main.py")
+
+    def test_docker_exec_cmd_forwards_args_and_env(self, tmp_path: Path):
+        cfg = SshRemoteConfig(
+            host="server",
+            user="test",
+            use_docker=True,
+            docker_image="myimage:latest",
+        )
+        sb = SshRemoteSandbox(cfg, tmp_path)
+        cmd = sb._build_docker_exec_cmd(
+            "/tmp/rc-test",
+            entry_point="main.py",
+            args=["--foo", "bar"],
+            env_overrides={"A_ENV": "1"},
+        )
+        assert "-e A_ENV=1" in cmd
+        assert cmd.endswith("main.py --foo bar")
 
     def test_docker_exec_full_network(self, tmp_path: Path):
         cfg = SshRemoteConfig(

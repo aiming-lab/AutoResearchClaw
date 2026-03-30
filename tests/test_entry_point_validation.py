@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -99,7 +100,7 @@ class TestExperimentSandboxEntryPointValidation:
     def _make_sandbox(self, tmp_path: Path) -> ExperimentSandbox:
         from researchclaw.config import SandboxConfig
 
-        cfg = SandboxConfig()
+        cfg = SandboxConfig(python_path=sys.executable)
         return ExperimentSandbox(cfg, tmp_path / "work")
 
     def test_rejects_path_traversal(self, tmp_path: Path) -> None:
@@ -140,3 +141,35 @@ class TestExperimentSandboxEntryPointValidation:
     # for future copy mechanism changes; see
     # TestValidateEntryPointResolved.test_symlink_escape_rejected for
     # the unit-level proof that the function catches symlink escapes.
+
+    def test_run_project_passes_args_and_env_overrides(self, tmp_path: Path) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / "main.py").write_text(
+            "\n".join(
+                [
+                    "from __future__ import annotations",
+                    "import argparse",
+                    "import os",
+                    "",
+                    "parser = argparse.ArgumentParser()",
+                    "parser.add_argument('--value', required=True)",
+                    "args = parser.parse_args()",
+                    "if os.environ.get('RC_TEST_FLAG') != 'ok':",
+                    "    raise SystemExit('missing env override')",
+                    "print(f'metric: {float(args.value):.1f}')",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        sandbox = self._make_sandbox(tmp_path)
+        result = sandbox.run_project(
+            project,
+            args=["--value", "1.0"],
+            env_overrides={"RC_TEST_FLAG": "ok"},
+            timeout_sec=10,
+        )
+
+        assert result.returncode == 0
+        assert result.metrics.get("metric") == 1.0
