@@ -40,7 +40,6 @@ logger = logging.getLogger(__name__)
 # Domain detection (extracted to _domain.py)
 # ---------------------------------------------------------------------------
 from researchclaw.pipeline._domain import (  # noqa: E402
-    _DOMAIN_KEYWORDS,
     _detect_domain,
     _is_ml_domain,
 )

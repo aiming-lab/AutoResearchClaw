@@ -2144,7 +2144,8 @@ class TestDataIntegrityBlock:
     """Test paper draft blocked when no metrics exist (R4-2a)."""
 
     def test_paper_draft_blocked_with_no_metrics(
-        self, tmp_path: Path, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle
+        self, tmp_path: Path, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Write prior artifacts with NO metrics
         _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
@@ -2158,6 +2159,13 @@ class TestDataIntegrityBlock:
 
         stage_dir = run_dir / "stage-17"
         stage_dir.mkdir(parents=True, exist_ok=True)
+
+        # Ensure domain detection returns an empirical domain so the block triggers
+        from researchclaw.pipeline.stage_impls import _paper_writing
+        monkeypatch.setattr(
+            _paper_writing, "_detect_domain",
+            lambda topic, domains=(): ("ml", "machine learning", "NeurIPS, ICML, ICLR"),
+        )
 
         llm = FakeLLMClient("should not be called")
         result = rc_executor._execute_paper_draft(

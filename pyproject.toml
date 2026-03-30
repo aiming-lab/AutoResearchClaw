@@ -26,7 +26,7 @@ all = [
     "matplotlib>=3.7",
     "scipy>=1.10",
 ]
-dev = ["pytest>=7.0", "httpx>=0.24"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "httpx>=0.24"]
 
 [project.scripts]
 researchclaw = "researchclaw.cli:main"

@@ -470,7 +470,7 @@ def execute_pipeline(
             print(f"{prefix} {stage.name} — blocked (awaiting approval)")
         elif result.status == StageStatus.PAUSED:
             err = result.error or "paused"
-            print(f"{prefix} {stage.name} бк PAUSED ({elapsed:.1f}s) бк {err}")
+            print(f"{prefix} {stage.name} -- PAUSED ({elapsed:.1f}s) -- {err}")
         results.append(result)
 
         if kb_root is not None and result.status == StageStatus.DONE:

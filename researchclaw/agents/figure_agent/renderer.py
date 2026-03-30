@@ -317,7 +317,7 @@ class RendererAgent(BaseAgent):
             "-v", f"{script_path.resolve()}:/workspace/script.py:ro",
             "-v", f"{output_dir.resolve()}:/workspace/output:rw",
             "-w", "/workspace/output",  # BUG-60: CWD = output dir so relative paths work
-            "--user", f"{os.getuid()}:{os.getgid()}",
+            *(["--user", f"{os.getuid()}:{os.getgid()}"] if hasattr(os, "getuid") else []),
             "--entrypoint", "python3",
             self._docker_image,
             "/workspace/script.py",
