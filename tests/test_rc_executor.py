@@ -3360,3 +3360,89 @@ class TestValidateDraftQuality:
         assert "section_analysis" in data
         assert "overall_warnings" in data
         assert "revision_directives" in data
+
+
+class TestExperimentValidatorPrecision:
+    def test_deep_validation_detects_undefined_helper_calls(self) -> None:
+        from researchclaw.experiment.validator import deep_validate_files
+
+        issues = deep_validate_files(
+            {
+                "main.py": (
+                    "def main():\n"
+                    "    create_empty_csv('tmp.csv', ['a'])\n\n"
+                    "if __name__ == '__main__':\n"
+                    "    main()\n"
+                )
+            }
+        )
+
+        assert any(
+            "Call to undefined function 'create_empty_csv()'" in issue
+            for issue in issues
+        )
+
+    def test_deep_validation_allows_inherited_single_core_method_subclass(
+        self,
+    ) -> None:
+        from researchclaw.experiment.validator import deep_validate_files
+
+        issues = deep_validate_files(
+            {
+                "main.py": (
+                    "class BaseVerifier:\n"
+                    "    def __init__(self, scale=1.0):\n"
+                    "        self.scale = float(scale)\n\n"
+                    "class ChildVerifier(BaseVerifier):\n"
+                    "    def predict(self, value):\n"
+                    "        total = value * self.scale\n"
+                    "        shifted = total + 1.0\n"
+                    "        centered = shifted - 0.5\n"
+                    "        bounded = max(centered, 0.0)\n"
+                    "        return {'score': bounded}\n"
+                )
+            }
+        )
+
+        assert not any(
+            "Class 'ChildVerifier' has only 1 non-dunder method" in issue
+            for issue in issues
+        )
+
+    def test_deep_validation_detects_duplicate_algorithm_classes_across_files(
+        self,
+    ) -> None:
+        from researchclaw.experiment.validator import deep_validate_files
+
+        issues = deep_validate_files(
+            {
+                "main.py": (
+                    "class DuplicateVerifier:\n"
+                    "    def __init__(self, bias=0.0):\n"
+                    "        self.bias = float(bias)\n\n"
+                    "    def predict(self, value):\n"
+                    "        shifted = value + self.bias\n"
+                    "        bounded = max(shifted, 0.0)\n"
+                    "        return {'score': bounded}\n"
+                ),
+                "models.py": (
+                    "class DuplicateVerifier:\n"
+                    "    def __init__(self, bias=0.0):\n"
+                    "        self.bias = float(bias)\n\n"
+                    "    def predict(self, value):\n"
+                    "        shifted = value + self.bias\n"
+                    "        bounded = max(shifted, 0.0)\n"
+                    "        return {'score': bounded}\n"
+                ),
+            }
+        )
+
+        assert any(
+            "Class 'DuplicateVerifier' is defined in multiple files" in issue
+            for issue in issues
+        )
+        assert not any(
+            "Classes 'DuplicateVerifier' and 'DuplicateVerifier' have identical"
+            in issue
+            for issue in issues
+        )
