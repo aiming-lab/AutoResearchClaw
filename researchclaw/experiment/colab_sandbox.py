@@ -158,6 +158,8 @@ class ColabDriveSandbox:
         *,
         entry_point: str = "main.py",
         timeout_sec: int = 300,
+        args: list[str] | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> SandboxResult:
         # BUG-DA8-07: Validate entry_point (path traversal, etc.) like other backends
         from researchclaw.experiment.sandbox import validate_entry_point

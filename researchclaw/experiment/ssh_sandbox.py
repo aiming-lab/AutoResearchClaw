@@ -71,6 +71,8 @@ class SshRemoteSandbox:
         *,
         entry_point: str = "main.py",
         timeout_sec: int = 300,
+        args: list[str] | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> SandboxResult:
         """Run a multi-file experiment project on the remote host."""
         self._run_counter += 1
@@ -119,7 +121,13 @@ class SshRemoteSandbox:
                 metrics={},
             )
 
-        return self._execute(staging, entry_point=entry_point, timeout_sec=timeout_sec)
+        return self._execute(
+            staging,
+            entry_point=entry_point,
+            timeout_sec=timeout_sec,
+            entry_args=args,
+            env_overrides=env_overrides,
+        )
 
     # ------------------------------------------------------------------
     # Static helpers
@@ -158,7 +166,13 @@ class SshRemoteSandbox:
     # ------------------------------------------------------------------
 
     def _execute(
-        self, staging_dir: Path, *, entry_point: str, timeout_sec: int
+        self,
+        staging_dir: Path,
+        *,
+        entry_point: str,
+        timeout_sec: int,
+        entry_args: list[str] | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> SandboxResult:
         """Core execution flow for remote experiments.
 
@@ -213,11 +227,17 @@ class SshRemoteSandbox:
         # 4. Execute experiment
         if cfg.use_docker:
             exec_cmd = self._build_docker_exec_cmd(
-                remote_dir, entry_point=entry_point,
+                remote_dir,
+                entry_point=entry_point,
+                args=entry_args,
+                env_overrides=env_overrides,
             )
         else:
             exec_cmd = self._build_bare_exec_cmd(
-                remote_dir, entry_point=entry_point,
+                remote_dir,
+                entry_point=entry_point,
+                args=entry_args,
+                env_overrides=env_overrides,
             )
 
         start = time.monotonic()
@@ -242,13 +262,26 @@ class SshRemoteSandbox:
         )
 
     def _build_bare_exec_cmd(
-        self, remote_dir: str, *, entry_point: str,
+        self,
+        remote_dir: str,
+        *,
+        entry_point: str,
+        args: list[str] | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> str:
         """Build command to run Python directly on remote host (with basic sandboxing)."""
         cfg = self.config
         rd = shlex.quote(remote_dir)
         ep = shlex.quote(entry_point)
         py = shlex.quote(cfg.remote_python)
+        arg_text = " ".join(shlex.quote(arg) for arg in (args or []))
+        arg_suffix = f" {arg_text}" if arg_text else ""
+        env_parts = [
+            f"{name}={shlex.quote(value)}"
+            for name, value in sorted((env_overrides or {}).items())
+            if value
+        ]
+        env_prefix = (" ".join(env_parts) + " ") if env_parts else ""
 
         gpu_env = ""
         if cfg.gpu_ids:
@@ -264,17 +297,24 @@ class SshRemoteSandbox:
             f"if command -v unshare >/dev/null 2>&1; then "
             f"HOME={rd} "
             f"{gpu_env}"
-            f"unshare --net {py} -u {ep}; "
+            f"{env_prefix}"
+            f"unshare --net {py} -u {ep}{arg_suffix}; "
             f"else "
             f"echo 'WARNING: unshare not available, running without network isolation' >&2; "
             f"HOME={rd} "
             f"{gpu_env}"
-            f"{py} -u {ep}; "
+            f"{env_prefix}"
+            f"{py} -u {ep}{arg_suffix}; "
             f"fi"
         )
 
     def _build_docker_exec_cmd(
-        self, remote_dir: str, *, entry_point: str,
+        self,
+        remote_dir: str,
+        *,
+        entry_point: str,
+        args: list[str] | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> str:
         """Build command to run inside a Docker container on the remote host.
 
@@ -307,8 +347,16 @@ class SshRemoteSandbox:
             # Try to pass all GPUs; fails gracefully if none available
             parts.extend(["--gpus", "all"])
 
+        if env_overrides:
+            for name, value in sorted(env_overrides.items()):
+                if not value:
+                    continue
+                parts.extend(["-e", shlex.quote(f"{name}={value}")])
+
         parts.append(shlex.quote(cfg.docker_image))
         parts.extend(["python3", "-u", shlex.quote(entry_point)])
+        if args:
+            parts.extend(shlex.quote(arg) for arg in args)
 
         return " ".join(parts)
 

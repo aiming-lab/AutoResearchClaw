@@ -47,6 +47,9 @@ def _build_pipeline_summary(
         "run_id": run_id,
         "stages_executed": len(results),
         "stages_done": sum(1 for item in results if item.status == StageStatus.DONE),
+        "stages_paused": sum(
+            1 for item in results if item.status == StageStatus.PAUSED
+        ),
         "stages_blocked": sum(
             1 for item in results if item.status == StageStatus.BLOCKED_APPROVAL
         ),
@@ -463,6 +466,9 @@ def execute_pipeline(
         elif result.status == StageStatus.FAILED:
             err = result.error or "unknown error"
             print(f"{prefix} {stage.name} — FAILED ({elapsed:.1f}s) — {err}")
+        elif result.status == StageStatus.PAUSED:
+            err = result.error or "paused"
+            print(f"{prefix} {stage.name} — PAUSED ({elapsed:.1f}s) — {err}")
         elif result.status == StageStatus.BLOCKED_APPROVAL:
             print(f"{prefix} {stage.name} — blocked (awaiting approval)")
         results.append(result)
@@ -604,6 +610,14 @@ def execute_pipeline(
                 logger.warning("Noncritical stage %s failed - skipping", stage.name)
             else:
                 break
+        if result.status == StageStatus.PAUSED:
+            logger.warning(
+                "[%s] Pipeline paused at %s: %s",
+                run_id,
+                stage.name,
+                result.error or result.decision,
+            )
+            break
         if result.status == StageStatus.BLOCKED_APPROVAL and stop_on_gate:
             break
 

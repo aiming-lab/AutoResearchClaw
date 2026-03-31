@@ -184,6 +184,13 @@ class AcpConfig:
     acpx_command: str = ""
     session_name: str = "researchclaw"
     timeout_sec: int = 1800
+    verbose: bool = False
+    stateless_prompt: bool = False
+    reconnect_retries: int = 2
+    reconnect_backoff_sec: float = 2.0
+    capture_status_on_failure: bool = False
+    debug_log_path: str = ""
+    archive_failed_prompt_files: bool = False
 
 
 @dataclass(frozen=True)
@@ -295,6 +302,7 @@ class CodeAgentConfig:
     """Configuration for the advanced multi-phase code generation agent."""
 
     enabled: bool = True
+    fallback_to_legacy_on_acp_failure: bool = False
     # Phase 1: Blueprint planning (deep implementation blueprint)
     architecture_planning: bool = True
     # Phase 2: Sequential file generation (one-by-one following blueprint)
@@ -347,6 +355,8 @@ class BenchmarkAgentConfig:
     min_benchmarks: int = 1
     min_baselines: int = 2
     prefer_cached: bool = True
+    preserve_existing_assets: bool = True
+    pass_existing_assets_as_reference: bool = True
     # Orchestrator
     max_iterations: int = 2
 
@@ -426,6 +436,10 @@ class ExperimentConfig:
     metric_key: str = "primary_metric"
     metric_direction: str = "minimize"
     keep_threshold: float = 0.0
+    require_real_data: bool = False
+    forbid_synthetic_proxy: bool = False
+    fail_on_stdout_parsed_results: bool = False
+    required_real_data_refs: tuple[str, ...] = ()
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     docker: DockerSandboxConfig = field(default_factory=DockerSandboxConfig)
     agentic: AgenticConfig = field(default_factory=AgenticConfig)
@@ -972,6 +986,17 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
             acpx_command=acp_data.get("acpx_command", ""),
             session_name=acp_data.get("session_name", "researchclaw"),
             timeout_sec=int(acp_data.get("timeout_sec", 1800)),
+            verbose=bool(acp_data.get("verbose", False)),
+            stateless_prompt=bool(acp_data.get("stateless_prompt", False)),
+            reconnect_retries=_safe_int(acp_data.get("reconnect_retries"), 2),
+            reconnect_backoff_sec=_safe_float(acp_data.get("reconnect_backoff_sec"), 2.0),
+            capture_status_on_failure=bool(
+                acp_data.get("capture_status_on_failure", False)
+            ),
+            debug_log_path=str(acp_data.get("debug_log_path", "")),
+            archive_failed_prompt_files=bool(
+                acp_data.get("archive_failed_prompt_files", False)
+            ),
         ),
     )
 
@@ -1008,6 +1033,12 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         metric_key=data.get("metric_key", "primary_metric"),
         metric_direction=data.get("metric_direction", "minimize"),
         keep_threshold=_safe_float(data.get("keep_threshold"), 0.0),
+        require_real_data=bool(data.get("require_real_data", False)),
+        forbid_synthetic_proxy=bool(data.get("forbid_synthetic_proxy", False)),
+        fail_on_stdout_parsed_results=bool(
+            data.get("fail_on_stdout_parsed_results", False)
+        ),
+        required_real_data_refs=tuple(data.get("required_real_data_refs") or ()),
         sandbox=SandboxConfig(
             python_path=sandbox_data.get("python_path", DEFAULT_PYTHON_PATH),
             gpu_required=bool(sandbox_data.get("gpu_required", False)),
@@ -1086,6 +1117,10 @@ def _parse_benchmark_agent_config(data: dict[str, Any]) -> BenchmarkAgentConfig:
         min_benchmarks=_safe_int(data.get("min_benchmarks"), 1),
         min_baselines=_safe_int(data.get("min_baselines"), 2),
         prefer_cached=bool(data.get("prefer_cached", True)),
+        preserve_existing_assets=bool(data.get("preserve_existing_assets", True)),
+        pass_existing_assets_as_reference=bool(
+            data.get("pass_existing_assets_as_reference", True)
+        ),
         max_iterations=_safe_int(data.get("max_iterations"), 2),
     )
 
@@ -1142,6 +1177,9 @@ def _parse_code_agent_config(data: dict[str, Any]) -> CodeAgentConfig:
         return CodeAgentConfig()
     return CodeAgentConfig(
         enabled=bool(data.get("enabled", True)),
+        fallback_to_legacy_on_acp_failure=bool(
+            data.get("fallback_to_legacy_on_acp_failure", False)
+        ),
         architecture_planning=bool(data.get("architecture_planning", True)),
         sequential_generation=bool(data.get("sequential_generation", True)),
         hard_validation=bool(data.get("hard_validation", True)),

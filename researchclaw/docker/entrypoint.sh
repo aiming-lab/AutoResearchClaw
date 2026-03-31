@@ -11,7 +11,10 @@
 set -e
 
 WORKSPACE="/workspace"
-ENTRY_POINT="${1:-main.py}"
+ENTRY_POINT="${RC_ENTRY_POINT:-${1:-main.py}}"
+if [ "$#" -gt 0 ]; then
+    shift
+fi
 
 # ----------------------------------------------------------------
 # Phase 0: Install additional pip packages
@@ -51,4 +54,4 @@ fi
 # Phase 2: Run experiment
 # ----------------------------------------------------------------
 echo "[RC] Phase 2: Running experiment ($ENTRY_POINT)..."
-exec python3 -u "$WORKSPACE/$ENTRY_POINT"
+exec python3 -u "$WORKSPACE/$ENTRY_POINT" "$@"

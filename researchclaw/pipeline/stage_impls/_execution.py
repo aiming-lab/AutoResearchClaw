@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import time as _time
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
@@ -21,6 +24,7 @@ from researchclaw.llm.client import LLMClient
 from researchclaw.pipeline._domain import _detect_domain
 from researchclaw.pipeline._helpers import (
     StageResult,
+    _build_research_repair_brief,
     _chat_with_prompt,
     _detect_runtime_issues,
     _ensure_sandbox_deps,
@@ -32,6 +36,8 @@ from researchclaw.pipeline._helpers import (
     _read_prior_artifact,
     _safe_filename,
     _safe_json_loads,
+    detect_synthetic_proxy_signals,
+    should_fail_synthetic_proxy_guard,
     _utcnow_iso,
     _write_stage_meta,
 )
@@ -39,6 +45,238 @@ from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.prompts import PromptManager
 
 logger = logging.getLogger(__name__)
+
+
+_KNOWN_REAL_ASSET_ARG_MAP: tuple[tuple[str, str], ...] = (
+    ("--simple_manifest", "VECTRA_SIMPLE_MANIFEST_PATH"),
+    ("--simple_heatmap_cache", "VECTRA_SIMPLE_HEATMAP_DIR"),
+    ("--simple_asset_root", "VECTRA_SIMPLE_ASSET_ROOT"),
+    ("--page_dataset_root", "VECTRA_PAGE_DATASET_ROOT"),
+    ("--page_image_dir", "VECTRA_PAGE_IMAGE_DIR"),
+    ("--page_sidecar_dir", "VECTRA_PAGE_SIDECAR_DIR"),
+    ("--page_split_json", "VECTRA_PAGE_SPLIT_JSON"),
+    ("--gt_solid_csv", "VECTRA_PAGE_GT_SOLID_CSV"),
+    ("--gt_dashed_csv", "VECTRA_PAGE_GT_DASHED_CSV"),
+    ("--deep_patent_root", "VECTRA_DEEPPATENT_DATASET_ROOT"),
+)
+
+
+def _collect_vectra_env_overrides() -> dict[str, str]:
+    """Return non-empty VECTRA_* variables from the current runtime."""
+    overrides: dict[str, str] = {}
+    for name, value in os.environ.items():
+        if not name.startswith("VECTRA_"):
+            continue
+        cleaned = str(value).strip()
+        if cleaned:
+            overrides[name] = cleaned
+    return overrides
+
+
+def _build_project_entrypoint_runtime_overrides(
+    project_dir: Path,
+    *,
+    entry_point: str = "main.py",
+) -> tuple[list[str], dict[str, str]]:
+    """Derive optional CLI args/env for generated projects that require local assets.
+
+    The harness still calls ``python main.py`` by default, but some generated
+    experiments insist on asset-path flags. When those flags are present, use the
+    already-resolved VECTRA_* runtime variables as optional overrides.
+    """
+    env_overrides = _collect_vectra_env_overrides()
+    entry_path = project_dir / entry_point
+    if not entry_path.exists():
+        return [], env_overrides
+
+    try:
+        source = entry_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return [], env_overrides
+
+    args: list[str] = []
+    missing: list[str] = []
+    for flag, env_name in _KNOWN_REAL_ASSET_ARG_MAP:
+        if flag not in source:
+            continue
+        value = env_overrides.get(env_name, "").strip()
+        if value:
+            args.extend([flag, value])
+        else:
+            missing.append(f"{flag} <= {env_name}")
+
+    if args:
+        logger.info(
+            "Execution harness injecting %d real-data CLI args for %s",
+            len(args) // 2,
+            entry_path,
+        )
+    if missing:
+        logger.warning(
+            "Execution harness detected asset CLI flags in %s but runtime vars were missing: %s",
+            entry_path,
+            ", ".join(missing),
+        )
+    return args, env_overrides
+
+
+def _shorten_prompt_text(text: str, *, max_chars: int) -> str:
+    """Collapse whitespace and trim *text* without cutting mid-word when possible."""
+    compact = re.sub(r"\s+", " ", text).strip()
+    if len(compact) <= max_chars:
+        return compact
+    head = compact[: max_chars - 3].rsplit(" ", 1)[0].strip()
+    return f"{head or compact[: max_chars - 3]}..."
+
+
+def _compact_research_topic(topic: str) -> str:
+    """Return a short topic line for Stage 13 without discarding the plan."""
+    if not topic.strip():
+        return ""
+    lines = [line.strip() for line in topic.splitlines()]
+    summary_lines: list[str] = []
+    stop_headers = (
+        "important constraints:",
+        "please produce:",
+        "existing assets",
+        "existing baselines:",
+        "main source doc:",
+        "core code path:",
+        "key functions",
+        "existing result artifacts:",
+        "existing conclusions to preserve:",
+    )
+    for line in lines:
+        if not line:
+            if summary_lines:
+                break
+            continue
+        lowered = line.lower()
+        if lowered.startswith("- ") or re.match(r"^\d+\.", line):
+            break
+        if any(lowered.startswith(header) for header in stop_headers):
+            break
+        summary_lines.append(line)
+    summary = " ".join(summary_lines) if summary_lines else topic
+    return _shorten_prompt_text(summary, max_chars=260)
+
+
+def _extract_topic_constraints(topic: str, *, max_items: int = 8) -> list[str]:
+    """Pull compact bullet constraints out of long topic briefs."""
+    lines = [line.strip() for line in topic.splitlines()]
+    bullets: list[str] = []
+    capture = False
+    wanted_headers = {
+        "important constraints",
+        "existing conclusions to preserve",
+    }
+    for line in lines:
+        lowered = line.lower().rstrip(":")
+        if lowered in wanted_headers:
+            capture = True
+            continue
+        if not capture:
+            continue
+        if not line:
+            continue
+        if line.startswith("- "):
+            bullets.append(line[2:].strip())
+            if len(bullets) >= max_items:
+                break
+            continue
+        if re.match(r"^\d+\.", line) or line.endswith(":"):
+            capture = False
+    return bullets
+
+
+def _named_plan_entries(entries: Any, *, max_items: int = 8) -> list[str]:
+    """Extract entry names from list-shaped plan sections."""
+    names: list[str] = []
+    if not isinstance(entries, list):
+        return names
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+        if len(names) >= max_items:
+            break
+    return names
+
+
+def _build_refine_prompt_context(
+    topic: str,
+    exp_plan_text: str,
+    repair_brief: str = "",
+) -> tuple[str, str]:
+    """Split long research briefs into a short topic and a structured anchor."""
+    compact_topic = _compact_research_topic(topic)
+    plan_summary_lines: list[str] = []
+    try:
+        plan_data = yaml.safe_load(exp_plan_text) if exp_plan_text.strip() else {}
+    except yaml.YAMLError:
+        plan_data = {}
+    if isinstance(plan_data, dict):
+        objectives = plan_data.get("objectives")
+        if isinstance(objectives, dict):
+            for label, key in (
+                ("Problem formulation", "problem_formulation"),
+                ("Novelty statement", "novelty_statement"),
+                ("Recommended first prototype", "recommended_first_prototype"),
+            ):
+                value = objectives.get(key)
+                if isinstance(value, str) and value.strip():
+                    plan_summary_lines.append(
+                        f"- {label}: {_shorten_prompt_text(value, max_chars=220)}"
+                    )
+            research_questions = objectives.get("research_questions")
+            if isinstance(research_questions, list) and research_questions:
+                rq_text = "; ".join(
+                    str(item).strip() for item in research_questions[:4] if str(item).strip()
+                )
+                if rq_text:
+                    plan_summary_lines.append(
+                        f"- Research questions: {_shorten_prompt_text(rq_text, max_chars=220)}"
+                    )
+        metrics = plan_data.get("metrics")
+        if isinstance(metrics, dict):
+            primary_metric = metrics.get("primary_metric")
+            if isinstance(primary_metric, dict):
+                metric_name = primary_metric.get("name")
+                if isinstance(metric_name, str) and metric_name.strip():
+                    plan_summary_lines.append(f"- Primary metric: {metric_name.strip()}")
+        for label, key in (
+            ("Baselines", "baselines"),
+            ("Proposed methods", "proposed_methods"),
+            ("Ablations", "ablations"),
+        ):
+            names = _named_plan_entries(plan_data.get(key))
+            if names:
+                plan_summary_lines.append(f"- {label}: {', '.join(names)}")
+
+    anchor_parts: list[str] = []
+    if repair_brief.strip():
+        anchor_parts.append(repair_brief.strip())
+    if plan_summary_lines:
+        anchor_parts.append(
+            "Structured experiment plan summary:\n" + "\n".join(plan_summary_lines)
+        )
+    topic_constraints = _extract_topic_constraints(topic)
+    if topic_constraints:
+        anchor_parts.append(
+            "Key research constraints to preserve:\n"
+            + "\n".join(f"- {item}" for item in topic_constraints)
+        )
+    if exp_plan_text.strip():
+        excerpt_limit = 900 if repair_brief.strip() else 1600
+        excerpt = exp_plan_text[:excerpt_limit].rstrip()
+        suffix = "\n...\n" if len(exp_plan_text) > excerpt_limit else "\n"
+        anchor_parts.append(
+            "Original experiment plan excerpt:\n"
+            f"```yaml\n{excerpt}{suffix}```\n"
+        )
+    return compact_topic or _shorten_prompt_text(topic, max_chars=260), "\n\n".join(anchor_parts)
 
 
 def _execute_resource_planning(
@@ -131,6 +369,8 @@ def _execute_experiment_run(
     runs_dir.mkdir(parents=True, exist_ok=True)
     mode = config.experiment.mode
     if mode in ("sandbox", "docker"):
+        stage_status = StageStatus.DONE
+        stage_error: str | None = None
         # P7: Auto-install missing dependencies before subprocess sandbox
         if mode == "sandbox":
             _all_code = code_text
@@ -145,8 +385,14 @@ def _execute_experiment_run(
         sandbox = create_sandbox(config.experiment, runs_dir / "sandbox")
         # Use run_project for multi-file, run for single-file
         if exp_dir_path and Path(exp_dir_path).is_dir():
+            entry_args, env_overrides = _build_project_entrypoint_runtime_overrides(
+                Path(exp_dir_path)
+            )
             result = sandbox.run_project(
-                Path(exp_dir_path), timeout_sec=config.experiment.time_budget_sec
+                Path(exp_dir_path),
+                timeout_sec=config.experiment.time_budget_sec,
+                args=entry_args,
+                env_overrides=env_overrides,
             )
         else:
             result = sandbox.run(
@@ -220,6 +466,51 @@ def _execute_experiment_run(
         }
         if structured_results is not None:
             run_payload["structured_results"] = structured_results
+
+        guard_issues: list[str] = []
+        _structured_source = (
+            structured_results.get("source")
+            if isinstance(structured_results, dict)
+            else None
+        )
+        if getattr(config.experiment, "fail_on_stdout_parsed_results", False):
+            if structured_results is None and effective_metrics:
+                guard_issues.append(
+                    "structured results.json was missing; metrics were only recoverable via stdout parsing"
+                )
+            elif _structured_source == "stdout_parsed":
+                guard_issues.append(
+                    "results.json declares source=stdout_parsed instead of a structured experiment output"
+                )
+
+        if getattr(config.experiment, "forbid_synthetic_proxy", False) and sandbox_project.exists():
+            _project_texts: dict[str, str] = {}
+            for _pyf in sandbox_project.glob("*.py"):
+                try:
+                    _project_texts[_pyf.name] = _pyf.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+            _proxy_signals = detect_synthetic_proxy_signals(_project_texts)
+            if should_fail_synthetic_proxy_guard(_proxy_signals):
+                guard_issues.extend(_proxy_signals)
+
+        if guard_issues:
+            guard_payload = {
+                "status": "failed",
+                "issues": guard_issues,
+                "structured_results_present": structured_results is not None,
+                "structured_results_source": _structured_source,
+                "timestamp": _utcnow_iso(),
+            }
+            (stage_dir / "real_data_guard.json").write_text(
+                json.dumps(guard_payload, indent=2), encoding="utf-8"
+            )
+            run_status = "failed"
+            run_payload["status"] = run_status
+            run_payload["real_data_guard"] = guard_payload
+            stage_status = StageStatus.FAILED
+            stage_error = "Real-data guard blocked proxy or stdout-only experiment results."
+
         # Auto-generate results.json from parsed metrics if sandbox didn't produce one
         if structured_results is None and effective_metrics:
             auto_results = {"source": "stdout_parsed", "metrics": effective_metrics}
@@ -325,6 +616,18 @@ def _execute_experiment_run(
             (runs_dir / f"{_safe_filename(run_id)}.json").write_text(
                 json.dumps(payload, indent=2), encoding="utf-8"
             )
+        artifacts = ["runs/"]
+        evidence_refs = ["stage-12/runs/"]
+        if (stage_dir / "real_data_guard.json").exists():
+            artifacts.append("real_data_guard.json")
+            evidence_refs.append("stage-12/real_data_guard.json")
+        return StageResult(
+            stage=Stage.EXPERIMENT_RUN,
+            status=stage_status,
+            artifacts=tuple(artifacts),
+            evidence_refs=tuple(evidence_refs),
+            error=stage_error,
+        )
     return StageResult(
         stage=Stage.EXPERIMENT_RUN,
         status=StageStatus.DONE,
@@ -652,6 +955,41 @@ def _execute_iterative_refine(
             parts.append(f"```filename:{fname}\n{code}\n```")
         return "\n\n".join(parts)
 
+    def _write_refinement_log() -> None:
+        (stage_dir / "refinement_log.json").write_text(
+            json.dumps(log, indent=2), encoding="utf-8"
+        )
+
+    def _pause_refinement(
+        *,
+        reason: str,
+        stop_reason: str,
+        iteration: int | None = None,
+    ) -> StageResult:
+        log.update(
+            {
+                "paused": True,
+                "converged": False,
+                "stop_reason": stop_reason,
+                "pause_reason": reason,
+                "best_metric": best_metric,
+                "best_version": best_version,
+                "iterations_completed": len(log["iterations"]),
+            }
+        )
+        if iteration is not None:
+            log["pause_iteration"] = iteration
+        _write_refinement_log()
+        artifacts = ("refinement_log.json",)
+        return StageResult(
+            stage=Stage.ITERATIVE_REFINE,
+            status=StageStatus.PAUSED,
+            artifacts=artifacts,
+            error=reason,
+            decision="resume",
+            evidence_refs=tuple(f"stage-13/{a}" for a in artifacts),
+        )
+
     if llm is None:
         logger.info("Stage 13: LLM unavailable, saving original experiment as final")
         final_dir = stage_dir / "experiment_final"
@@ -677,9 +1015,7 @@ def _execute_iterative_refine(
                 ],
             }
         )
-        (stage_dir / "refinement_log.json").write_text(
-            json.dumps(log, indent=2), encoding="utf-8"
-        )
+        _write_refinement_log()
         artifacts = ("refinement_log.json", "experiment_final/")
         return StageResult(
             stage=Stage.ITERATIVE_REFINE,
@@ -693,6 +1029,12 @@ def _execute_iterative_refine(
 
     # R7-3: Read experiment plan to detect condition coverage gaps
     _exp_plan_text = _read_prior_artifact(run_dir, "exp_plan.yaml") or ""
+    _repair_brief = _build_research_repair_brief(run_dir)
+    _refine_topic, _exp_plan_anchor = _build_refine_prompt_context(
+        config.research.topic,
+        _exp_plan_text,
+        _repair_brief,
+    )
     _condition_coverage_hint = ""
     if _exp_plan_text and run_summaries:
         # Check if stdout contains condition labels
@@ -764,14 +1106,6 @@ def _execute_iterative_refine(
                 logger.warning("Stage 13: metric saturation detected, injecting difficulty upgrade hint")
 
         files_context = _files_to_context(best_files)
-        # BUG-10 fix: anchor refinement to original experiment plan
-        _exp_plan_anchor = ""
-        if _exp_plan_text.strip():
-            _exp_plan_anchor = (
-                "Original experiment plan (exp_plan.yaml):\n"
-                "```yaml\n" + _exp_plan_text[:4000] + "\n```\n"
-                "You MUST preserve ALL condition names from this plan.\n\n"
-            )
         ip = _pm.sub_prompt(
             "iterative_improve",
             metric_key=metric_key,
@@ -779,7 +1113,7 @@ def _execute_iterative_refine(
             files_context=files_context,
             run_summaries=chr(10).join(run_summaries[:20]),
             condition_coverage_hint=_condition_coverage_hint,
-            topic=config.research.topic,
+            topic=_refine_topic,
             exp_plan_anchor=_exp_plan_anchor,
         )
 
@@ -803,12 +1137,25 @@ def _execute_iterative_refine(
                 timeout_refine_attempts,
             )
 
-        response = _chat_with_prompt(
-            llm,
-            ip.system,
-            user_prompt,
-            max_tokens=ip.max_tokens or 8192,
-        )
+        try:
+            response = _chat_with_prompt(
+                llm,
+                ip.system,
+                user_prompt,
+                max_tokens=ip.max_tokens or 8192,
+            )
+        except RuntimeError as exc:
+            if "ACP prompt timed out after" in str(exc):
+                logger.warning(
+                    "Stage 13: ACP prompt timed out during iteration %d; pausing for resume",
+                    iteration,
+                )
+                return _pause_refinement(
+                    reason=str(exc),
+                    stop_reason="acp_prompt_timeout",
+                    iteration=iteration,
+                )
+            raise
         extracted_files = _extract_multi_file_blocks(response.content)
         # If LLM returns only single block, treat as main.py update
         if not extracted_files:
@@ -865,7 +1212,20 @@ def _execute_iterative_refine(
                 issue_text=issue_text,
                 all_files_ctx=_files_to_context(candidate_files),
             )
-            repair_response = _chat_with_prompt(llm, irp.system, irp.user)
+            try:
+                repair_response = _chat_with_prompt(llm, irp.system, irp.user)
+            except RuntimeError as exc:
+                if "ACP prompt timed out after" in str(exc):
+                    logger.warning(
+                        "Stage 13: ACP repair prompt timed out during iteration %d; pausing for resume",
+                        iteration,
+                    )
+                    return _pause_refinement(
+                        reason=str(exc),
+                        stop_reason="acp_prompt_timeout",
+                        iteration=iteration,
+                    )
+                raise
             candidate_files["main.py"] = _extract_code_block(repair_response.content)
             validation = validate_code(candidate_files["main.py"])
             repaired = True
@@ -898,9 +1258,14 @@ def _execute_iterative_refine(
                 config.experiment,
                 stage_dir / f"refine_sandbox_v{iteration}",
             )
+            rerun_args, rerun_env = _build_project_entrypoint_runtime_overrides(
+                version_dir
+            )
             rerun = sandbox.run_project(
                 version_dir,
                 timeout_sec=config.experiment.time_budget_sec,
+                args=rerun_args,
+                env_overrides=rerun_env,
             )
             metric_val = _find_metric(rerun.metrics, metric_key)
             # R19-1: Store stdout (capped) so PAIRED lines survive for Stage 14
@@ -977,7 +1342,20 @@ def _execute_iterative_refine(
                     issue_text=runtime_issues,
                     all_files_ctx=_files_to_context(candidate_files),
                 )
-                repair_resp = _chat_with_prompt(llm, rrp.system, rrp.user)
+                try:
+                    repair_resp = _chat_with_prompt(llm, rrp.system, rrp.user)
+                except RuntimeError as exc:
+                    if "ACP prompt timed out after" in str(exc):
+                        logger.warning(
+                            "Stage 13: ACP runtime-repair prompt timed out during iteration %d; pausing for resume",
+                            iteration,
+                        )
+                        return _pause_refinement(
+                            reason=str(exc),
+                            stop_reason="acp_prompt_timeout",
+                            iteration=iteration,
+                        )
+                    raise
                 repaired_files = _extract_multi_file_blocks(repair_resp.content)
                 if not repaired_files:
                     single = _extract_code_block(repair_resp.content)
@@ -996,9 +1374,14 @@ def _execute_iterative_refine(
                         config.experiment,
                         stage_dir / f"refine_sandbox_v{iteration}_fix",
                     )
+                    rerun2_args, rerun2_env = _build_project_entrypoint_runtime_overrides(
+                        version_dir
+                    )
                     rerun2 = sandbox2.run_project(
                         version_dir,
                         timeout_sec=config.experiment.time_budget_sec,
+                        args=rerun2_args,
+                        env_overrides=rerun2_env,
                     )
                     metric_val = _find_metric(rerun2.metrics, metric_key)
                     iter_record["sandbox_after_fix"] = {
@@ -1067,9 +1450,7 @@ def _execute_iterative_refine(
     )
     if _all_ablation_identical:
         log["ablation_identical_warning"] = True
-    (stage_dir / "refinement_log.json").write_text(
-        json.dumps(log, indent=2), encoding="utf-8"
-    )
+    _write_refinement_log()
 
     artifacts = ["refinement_log.json", "experiment_final/"]
     artifacts.extend(

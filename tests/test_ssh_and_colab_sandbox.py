@@ -508,7 +508,42 @@ class TestAcpSessionReconnect:
         import pytest
         with pytest.raises(RuntimeError, match="permission denied"):
             client._send_prompt("test prompt")
-        assert call_count == 1  # no retry
+
+    def test_stateless_reconnect_on_session_died(self):
+        """Stateless mode retries with a fresh ephemeral session on reconnect errors."""
+        from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+        client = ACPClient(ACPConfig(agent="claude", stateless_prompt=True))
+        client._acpx = "/usr/bin/true"
+
+        sessions: list[str] = []
+        closed: list[str] = []
+        call_count = 0
+
+        def fake_new_ephemeral(acpx: str) -> str:
+            name = f"ephemeral-{len(sessions) + 1}"
+            sessions.append(name)
+            return name
+
+        def fake_close_named(acpx: str, session_name: str) -> None:
+            closed.append(session_name)
+
+        def fake_cli(acpx: str, prompt: str, *, session_name: str | None = None) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("ACP prompt failed (exit 1): agent needs reconnect")
+            return f"success via {session_name}"
+
+        client._new_ephemeral_session = fake_new_ephemeral  # type: ignore[assignment]
+        client._close_named_session = fake_close_named  # type: ignore[assignment]
+        client._send_prompt_cli = fake_cli  # type: ignore[assignment]
+
+        result = client._send_prompt("test prompt")
+        assert result == "success via ephemeral-2"
+        assert call_count == 2
+        assert sessions == ["ephemeral-1", "ephemeral-2"]
+        assert closed == ["ephemeral-1", "ephemeral-2"]
 
 
 # ===========================================================================

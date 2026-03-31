@@ -10,13 +10,17 @@ Key advantage: a single persistent session maintains context across all
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 import weakref
 from dataclasses import dataclass
 from typing import Any
@@ -41,6 +45,13 @@ class ACPConfig:
     acpx_command: str = ""  # auto-detect if empty
     session_name: str = "researchclaw"
     timeout_sec: int = 1800  # per-prompt timeout
+    verbose: bool = False
+    stateless_prompt: bool = False
+    reconnect_retries: int = 2
+    reconnect_backoff_sec: float = 2.0
+    capture_status_on_failure: bool = False
+    debug_log_path: str = ""
+    archive_failed_prompt_files: bool = False
 
 
 def _find_acpx() -> str | None:
@@ -90,6 +101,13 @@ class ACPClient:
             acpx_command=getattr(acp, "acpx_command", ""),
             session_name=getattr(acp, "session_name", "researchclaw"),
             timeout_sec=getattr(acp, "timeout_sec", 1800),
+            verbose=getattr(acp, "verbose", False),
+            stateless_prompt=getattr(acp, "stateless_prompt", False),
+            reconnect_retries=getattr(acp, "reconnect_retries", 2),
+            reconnect_backoff_sec=getattr(acp, "reconnect_backoff_sec", 2.0),
+            capture_status_on_failure=getattr(acp, "capture_status_on_failure", False),
+            debug_log_path=getattr(acp, "debug_log_path", ""),
+            archive_failed_prompt_files=getattr(acp, "archive_failed_prompt_files", False),
         ))
 
     # ------------------------------------------------------------------
@@ -137,6 +155,8 @@ class ACPClient:
         agent = self.config.agent
         if not shutil.which(agent):
             return False, f"ACP agent CLI not found: {agent!r} (not on PATH)"
+        if self.config.stateless_prompt:
+            return True, f"OK - ACP stateless prompt mode ready ({agent} via acpx)"
         # Create the session
         try:
             self._ensure_session()
@@ -146,6 +166,9 @@ class ACPClient:
 
     def close(self) -> None:
         """Close the acpx session."""
+        if self.config.stateless_prompt:
+            self._session_ready = False
+            return
         if not self._session_ready:
             return
         acpx = self._resolve_acpx()
@@ -153,9 +176,12 @@ class ACPClient:
             return
         try:
             subprocess.run(
-                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
-                 self.config.agent, "sessions", "close",
-                 self.config.session_name],
+                [
+                    *self._acpx_base_command(acpx, approve_all=False),
+                    "sessions",
+                    "close",
+                    self.config.session_name,
+                ],
                 capture_output=True, timeout=15,
             )
         except Exception:  # noqa: BLE001
@@ -195,6 +221,128 @@ class ACPClient:
     def _abs_cwd(self) -> str:
         return os.path.abspath(self.config.cwd)
 
+    def _acpx_base_command(self, acpx: str, *, approve_all: bool) -> list[str]:
+        cmd = [acpx]
+        if self.config.verbose:
+            cmd.append("--verbose")
+        if approve_all:
+            cmd.append("--approve-all")
+        cmd.extend(["--ttl", "0", "--cwd", self._abs_cwd(), self.config.agent])
+        return cmd
+
+    def _debug_log_path(self) -> Path | None:
+        raw = str(getattr(self.config, "debug_log_path", "") or "").strip()
+        if not raw:
+            return None
+        return Path(raw)
+
+    @staticmethod
+    def _debug_timestamp() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    def _append_debug_event(self, event: str, **payload: Any) -> None:
+        record = {
+            "ts": self._debug_timestamp(),
+            "event": event,
+            **payload,
+        }
+        serialized = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        logger.info("ACP_DEBUG %s", serialized)
+        debug_path = self._debug_log_path()
+        if debug_path is None:
+            return
+        try:
+            debug_path.parent.mkdir(parents=True, exist_ok=True)
+            with debug_path.open("a", encoding="utf-8") as handle:
+                handle.write(serialized + "\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to append ACP debug log %s: %s", debug_path, exc)
+
+    def _archive_prompt_file(self, prompt_path: str, *, session_name: str) -> str:
+        if not self.config.archive_failed_prompt_files:
+            return ""
+        source_path = Path(prompt_path)
+        if not source_path.exists():
+            return ""
+        debug_path = self._debug_log_path()
+        base_dir = debug_path.parent if debug_path is not None else Path(self._abs_cwd())
+        archive_dir = base_dir / "acp_failed_prompts"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target_name = f"{session_name}-{source_path.name}"
+        target_path = archive_dir / target_name
+        shutil.copy2(source_path, target_path)
+        return str(target_path)
+
+    def _status_command(self, acpx: str, session_name: str) -> list[str]:
+        cmd = self._acpx_base_command(acpx, approve_all=False)
+        cmd.extend(["status", "-s", session_name])
+        return cmd
+
+    def _capture_session_status(self, acpx: str, session_name: str) -> str:
+        if not self.config.capture_status_on_failure:
+            return ""
+        try:
+            result = subprocess.run(
+                self._status_command(acpx, session_name),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"<status lookup failed: {exc}>"
+
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        chunks = [f"exit={result.returncode}"]
+        if stdout:
+            chunks.append(f"stdout:\n{stdout}")
+        if stderr:
+            chunks.append(f"stderr:\n{stderr}")
+        return "\n".join(chunks)
+
+    def _record_failure_context(
+        self,
+        *,
+        acpx: str,
+        session_name: str,
+        transport: str,
+        prompt_bytes: int,
+        prompt_limit: int,
+        use_file: bool,
+        error_text: str,
+        prompt_path: str | None = None,
+        returncode: int | None = None,
+        timed_out: bool = False,
+    ) -> None:
+        archived_prompt_path = ""
+        if prompt_path:
+            try:
+                archived_prompt_path = self._archive_prompt_file(
+                    prompt_path,
+                    session_name=session_name,
+                )
+            except Exception as exc:  # noqa: BLE001
+                archived_prompt_path = ""
+                logger.warning("Failed to archive ACP prompt file %s: %s", prompt_path, exc)
+
+        status_text = self._capture_session_status(acpx, session_name)
+        self._append_debug_event(
+            "prompt_failure",
+            session_name=session_name,
+            transport=transport,
+            prompt_bytes=prompt_bytes,
+            prompt_limit=prompt_limit,
+            use_file=use_file,
+            prompt_path=prompt_path or "",
+            archived_prompt_path=archived_prompt_path,
+            returncode=returncode,
+            timed_out=timed_out,
+            error=error_text,
+            session_status=status_text,
+        )
+
     def _ensure_session(self) -> None:
         """Find or create the named acpx session."""
         if self._session_ready:
@@ -202,28 +350,7 @@ class ACPClient:
         acpx = self._resolve_acpx()
         if not acpx:
             raise RuntimeError("acpx not found")
-
-        # Use 'ensure' which finds existing or creates new
-        result = subprocess.run(
-            [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
-             self.config.agent, "sessions", "ensure",
-             "--name", self.config.session_name],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=30,
-        )
-        if result.returncode != 0:
-            # Fall back to 'new'
-            result = subprocess.run(
-                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
-                 self.config.agent, "sessions", "new",
-                 "--name", self.config.session_name],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=30,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to create ACP session: {result.stderr.strip()}"
-                )
+        self._create_or_ensure_session(acpx, self.config.session_name, ensure=True)
         self._session_ready = True
         logger.info("ACP session '%s' ready (%s)", self.config.session_name, self.config.agent)
 
@@ -231,7 +358,7 @@ class ACPClient:
     # for the entire command line, not just the prompt payload. acpx adds
     # several fixed arguments plus quoting overhead, so leave generous headroom
     # on Windows and switch to temp-file transport earlier.
-    _MAX_CLI_PROMPT_BYTES = 20_000 if sys.platform == "win32" else 100_000
+    _MAX_CLI_PROMPT_BYTES = 6_000
     # On Windows, npm-installed CLIs usually resolve to ``.cmd`` launchers,
     # which are routed through ``cmd.exe`` and hit a much smaller practical
     # command-line limit (~8 KB). Use file transport much earlier there.
@@ -250,9 +377,9 @@ class ACPClient:
     _RECONNECT_ERRORS = (
         "agent needs reconnect",
         "session not found",
-        "Query closed",
+        "query closed",
+        "queue owner disconnected before prompt completion",
     )
-    _MAX_RECONNECT_ATTEMPTS = 2
 
     @classmethod
     def _cli_prompt_limit(cls, acpx: str | None) -> int:
@@ -264,6 +391,18 @@ class ACPClient:
                 return min(limit, cls._MAX_CMD_WRAPPER_PROMPT_BYTES)
         return limit
 
+    @staticmethod
+    def _sanitize_prompt(prompt: str) -> str:
+        """Strip NUL bytes before subprocess transport.
+
+        ``subprocess.run()`` rejects arguments containing ``\\x00`` with
+        ``ValueError: embedded null byte``. This can happen when upstream
+        scraping or artifact text accidentally carries NULs into the prompt.
+        """
+        if "\x00" not in prompt:
+            return prompt
+        return prompt.replace("\x00", "")
+
     def _send_prompt(self, prompt: str) -> str:
         """Send a prompt via acpx and return the response text.
 
@@ -272,11 +411,13 @@ class ACPClient:
         is asked to read it.
 
         If the session has died (common after long-running stages), retries
-        up to ``_MAX_RECONNECT_ATTEMPTS`` times with automatic reconnection.
+        up to the configured reconnect retry count with automatic reconnection.
         """
         acpx = self._resolve_acpx()
         if not acpx:
             raise RuntimeError("acpx not found")
+
+        prompt = self._sanitize_prompt(prompt)
 
         prompt_bytes = len(prompt.encode("utf-8"))
         prompt_limit = self._cli_prompt_limit(acpx)
@@ -288,13 +429,123 @@ class ACPClient:
                 prompt_limit,
             )
 
+        if self.config.stateless_prompt:
+            last_exc: RuntimeError | None = None
+            for attempt in range(1 + self.config.reconnect_retries):
+                session_name = self._new_ephemeral_session(acpx)
+                self._append_debug_event(
+                    "prompt_attempt",
+                    session_name=session_name,
+                    stateless=True,
+                    attempt=attempt + 1,
+                    max_attempts=1 + self.config.reconnect_retries,
+                    prompt_bytes=prompt_bytes,
+                    prompt_limit=prompt_limit,
+                    use_file=use_file,
+                )
+                try:
+                    if use_file:
+                        return self._send_prompt_via_file(
+                            acpx,
+                            prompt,
+                            session_name=session_name,
+                            prompt_bytes=prompt_bytes,
+                            prompt_limit=prompt_limit,
+                        )
+                    return self._send_prompt_cli(
+                        acpx,
+                        prompt,
+                        session_name=session_name,
+                        prompt_bytes=prompt_bytes,
+                        prompt_limit=prompt_limit,
+                    )
+                except OSError as os_exc:
+                    if not use_file:
+                        logger.warning(
+                            "Stateless ACP subprocess raised OSError, "
+                            "falling back to temp file: %s",
+                            os_exc,
+                        )
+                        use_file = True
+                        return self._send_prompt_via_file(
+                            acpx,
+                            prompt,
+                            session_name=session_name,
+                            prompt_bytes=prompt_bytes,
+                            prompt_limit=prompt_limit,
+                        )
+                    raise RuntimeError(
+                        f"ACP prompt failed: {os_exc}"
+                    ) from os_exc
+                except RuntimeError as exc:
+                    exc_lower = str(exc).lower()
+                    if not use_file and any(
+                        h in exc_lower for h in self._CMD_TOO_LONG_HINTS
+                    ):
+                        logger.warning(
+                            "Stateless ACP prompt too long for OS, "
+                            "falling back to temp file: %s",
+                            exc,
+                        )
+                        use_file = True
+                        return self._send_prompt_via_file(
+                            acpx,
+                            prompt,
+                            session_name=session_name,
+                        )
+                    if not self._is_reconnect_error(exc):
+                        raise
+                    last_exc = exc
+                    if attempt < self.config.reconnect_retries:
+                        self._append_debug_event(
+                            "prompt_retrying",
+                            session_name=session_name,
+                            stateless=True,
+                            attempt=attempt + 1,
+                            remaining_retries=self.config.reconnect_retries - attempt,
+                            error=str(exc),
+                        )
+                        logger.warning(
+                            "Stateless ACP session died (%s), retrying "
+                            "with a fresh ephemeral session (attempt %d/%d)...",
+                            exc,
+                            attempt + 1,
+                            self.config.reconnect_retries,
+                        )
+                        self._sleep_before_retry()
+                        continue
+                finally:
+                    self._close_named_session(acpx, session_name)
+
+            raise last_exc  # type: ignore[misc]
+
         last_exc: RuntimeError | None = None
-        for attempt in range(1 + self._MAX_RECONNECT_ATTEMPTS):
+        for attempt in range(1 + self.config.reconnect_retries):
             self._ensure_session()
+            self._append_debug_event(
+                "prompt_attempt",
+                session_name=self.config.session_name,
+                stateless=False,
+                attempt=attempt + 1,
+                max_attempts=1 + self.config.reconnect_retries,
+                prompt_bytes=prompt_bytes,
+                prompt_limit=prompt_limit,
+                use_file=use_file,
+            )
             try:
                 if use_file:
-                    return self._send_prompt_via_file(acpx, prompt)
-                return self._send_prompt_cli(acpx, prompt)
+                    return self._send_prompt_via_file(
+                        acpx,
+                        prompt,
+                        prompt_bytes=prompt_bytes,
+                        prompt_limit=prompt_limit,
+                    )
+                return self._send_prompt_cli(
+                    acpx,
+                    prompt,
+                    prompt_bytes=prompt_bytes,
+                    prompt_limit=prompt_limit,
+                )
             except OSError as os_exc:
                 # OS-level failure (e.g., Windows CreateProcess arg limit).
                 # Fall back to temp-file transport automatically.
@@ -305,7 +556,12 @@ class ACPClient:
                         os_exc,
                     )
                     use_file = True
-                    return self._send_prompt_via_file(acpx, prompt)
+                    return self._send_prompt_via_file(
+                        acpx,
+                        prompt,
+                        prompt_bytes=prompt_bytes,
+                        prompt_limit=prompt_limit,
+                    )
                 raise RuntimeError(
                     f"ACP prompt failed: {os_exc}"
                 ) from os_exc
@@ -322,17 +578,26 @@ class ACPClient:
                     )
                     use_file = True
                     return self._send_prompt_via_file(acpx, prompt)
-                if not any(pat in str(exc) for pat in self._RECONNECT_ERRORS):
+                if not self._is_reconnect_error(exc):
                     raise
                 last_exc = exc
-                if attempt < self._MAX_RECONNECT_ATTEMPTS:
+                if attempt < self.config.reconnect_retries:
+                    self._append_debug_event(
+                        "prompt_retrying",
+                        session_name=self.config.session_name,
+                        stateless=False,
+                        attempt=attempt + 1,
+                        remaining_retries=self.config.reconnect_retries - attempt,
+                        error=str(exc),
+                    )
                     logger.warning(
                         "ACP session died (%s), reconnecting (attempt %d/%d)...",
                         exc,
                         attempt + 1,
-                        self._MAX_RECONNECT_ATTEMPTS,
+                        self.config.reconnect_retries,
                     )
                     self._force_reconnect()
+                    self._sleep_before_retry()
 
         raise last_exc  # type: ignore[misc]
 
@@ -344,35 +609,97 @@ class ACPClient:
             pass
         self._session_ready = False
 
-    def _send_prompt_cli(self, acpx: str, prompt: str) -> str:
+    def _is_reconnect_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(pattern in text for pattern in self._RECONNECT_ERRORS)
+
+    def _sleep_before_retry(self) -> None:
+        delay = max(float(getattr(self.config, "reconnect_backoff_sec", 0.0) or 0.0), 0.0)
+        if delay > 0:
+            time.sleep(delay)
+
+    def _send_prompt_cli(
+        self,
+        acpx: str,
+        prompt: str,
+        *,
+        session_name: str | None = None,
+        prompt_bytes: int,
+        prompt_limit: int,
+    ) -> str:
         """Send prompt as a CLI argument (original path)."""
+        active_session = session_name or self.config.session_name
         try:
             result = subprocess.run(
-                [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
-                 self.config.agent, "-s", self.config.session_name,
-                 prompt],
+                self._prompt_command(acpx, prompt, session_name=active_session),
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=self.config.timeout_sec,
             )
         except subprocess.TimeoutExpired as exc:
+            self._record_failure_context(
+                acpx=acpx,
+                session_name=active_session,
+                transport="cli",
+                prompt_bytes=prompt_bytes,
+                prompt_limit=prompt_limit,
+                use_file=False,
+                error_text=f"ACP prompt timed out after {self.config.timeout_sec}s",
+                timed_out=True,
+            )
             raise RuntimeError(
                 f"ACP prompt timed out after {self.config.timeout_sec}s"
             ) from exc
 
         if result.returncode != 0:
             stderr = (result.stderr or "").strip()
+            self._record_failure_context(
+                acpx=acpx,
+                session_name=active_session,
+                transport="cli",
+                prompt_bytes=prompt_bytes,
+                prompt_limit=prompt_limit,
+                use_file=False,
+                error_text=stderr,
+                returncode=result.returncode,
+            )
             raise RuntimeError(f"ACP prompt failed (exit {result.returncode}): {stderr}")
 
-        return self._extract_response(result.stdout)
+        response = self._extract_response(result.stdout)
+        self._append_debug_event(
+            "prompt_success",
+            session_name=active_session,
+            transport="cli",
+            prompt_bytes=prompt_bytes,
+            use_file=False,
+            response_bytes=len(response.encode("utf-8")),
+        )
+        return response
 
-    def _send_prompt_via_file(self, acpx: str, prompt: str) -> str:
+    def _send_prompt_via_file(
+        self,
+        acpx: str,
+        prompt: str,
+        *,
+        session_name: str | None = None,
+        prompt_bytes: int,
+        prompt_limit: int,
+    ) -> str:
         """Write prompt to a temp file, ask the agent to read and respond."""
         fd, prompt_path = tempfile.mkstemp(
             suffix=".md", prefix="rc_prompt_",
         )
+        active_session = session_name or self.config.session_name
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(prompt)
+            self._append_debug_event(
+                "prompt_file_written",
+                session_name=active_session,
+                transport="file",
+                prompt_bytes=prompt_bytes,
+                prompt_limit=prompt_limit,
+                prompt_path=prompt_path,
+            )
 
             short_prompt = (
                 f"Read the file at {prompt_path} in its entirety. "
@@ -383,29 +710,133 @@ class ACPClient:
 
             try:
                 result = subprocess.run(
-                    [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
-                     self.config.agent, "-s", self.config.session_name,
-                     short_prompt],
+                    self._prompt_command(acpx, short_prompt, session_name=active_session),
                     capture_output=True, text=True, encoding="utf-8",
                     errors="replace", timeout=self.config.timeout_sec,
                 )
             except subprocess.TimeoutExpired as exc:
+                self._record_failure_context(
+                    acpx=acpx,
+                    session_name=active_session,
+                    transport="file",
+                    prompt_bytes=prompt_bytes,
+                    prompt_limit=prompt_limit,
+                    use_file=True,
+                    error_text=f"ACP prompt timed out after {self.config.timeout_sec}s",
+                    prompt_path=prompt_path,
+                    timed_out=True,
+                )
                 raise RuntimeError(
                     f"ACP prompt timed out after {self.config.timeout_sec}s"
                 ) from exc
 
             if result.returncode != 0:
                 stderr = (result.stderr or "").strip()
+                self._record_failure_context(
+                    acpx=acpx,
+                    session_name=active_session,
+                    transport="file",
+                    prompt_bytes=prompt_bytes,
+                    prompt_limit=prompt_limit,
+                    use_file=True,
+                    error_text=stderr,
+                    prompt_path=prompt_path,
+                    returncode=result.returncode,
+                )
                 raise RuntimeError(
                     f"ACP prompt failed (exit {result.returncode}): {stderr}"
                 )
 
-            return self._extract_response(result.stdout)
+            response = self._extract_response(result.stdout)
+            self._append_debug_event(
+                "prompt_success",
+                session_name=active_session,
+                transport="file",
+                prompt_bytes=prompt_bytes,
+                use_file=True,
+                prompt_path=prompt_path,
+                response_bytes=len(response.encode("utf-8")),
+            )
+            return response
         finally:
             try:
                 os.unlink(prompt_path)
             except OSError:
                 pass
+
+    def _prompt_command(
+        self,
+        acpx: str,
+        prompt: str,
+        *,
+        session_name: str | None = None,
+    ) -> list[str]:
+        """Build the acpx prompt command for session or stateless mode."""
+        cmd = self._acpx_base_command(acpx, approve_all=True)
+        cmd.append("prompt")
+        active_session = session_name or self.config.session_name
+        cmd.extend(["-s", active_session])
+        cmd.append(prompt)
+        return cmd
+
+    def _create_or_ensure_session(
+        self,
+        acpx: str,
+        session_name: str,
+        *,
+        ensure: bool,
+    ) -> None:
+        action = "ensure" if ensure else "new"
+        result = subprocess.run(
+            [
+                *self._acpx_base_command(acpx, approve_all=False),
+                "sessions",
+                action,
+                "--name",
+                session_name,
+            ],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30,
+        )
+        if result.returncode == 0:
+            self._append_debug_event(
+                "session_ready",
+                session_name=session_name,
+                ensure=ensure,
+                stateless=self.config.stateless_prompt,
+            )
+            return
+        if ensure:
+            self._create_or_ensure_session(acpx, session_name, ensure=False)
+            return
+        raise RuntimeError(
+            f"Failed to create ACP session: {(result.stderr or '').strip()}"
+        )
+
+    def _new_ephemeral_session(self, acpx: str) -> str:
+        session_name = f"{self.config.session_name}-{uuid.uuid4().hex[:8]}"
+        self._create_or_ensure_session(acpx, session_name, ensure=False)
+        logger.info("ACP ephemeral session '%s' ready (%s)", session_name, self.config.agent)
+        return session_name
+
+    def _close_named_session(self, acpx: str, session_name: str) -> None:
+        try:
+            subprocess.run(
+                [
+                    *self._acpx_base_command(acpx, approve_all=False),
+                    "sessions",
+                    "close",
+                    session_name,
+                ],
+                capture_output=True, timeout=15,
+            )
+            self._append_debug_event(
+                "session_closed",
+                session_name=session_name,
+                stateless=self.config.stateless_prompt,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     @staticmethod
     def _extract_response(raw_output: str | None) -> str:

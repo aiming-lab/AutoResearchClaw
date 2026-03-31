@@ -13,6 +13,7 @@ import pytest
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.pipeline import executor as rc_executor
+from researchclaw.pipeline.stage_impls import _code_generation as code_generation
 from researchclaw.pipeline.stages import Stage, StageStatus
 
 
@@ -35,6 +36,26 @@ class FakeLLMClientWithConfig(FakeLLMClient):
         self.config: SimpleNamespace = SimpleNamespace(
             base_url="http://fake", api_key="fake-key"
         )
+
+
+class SequencedFakeLLMClient(FakeLLMClient):
+    def __init__(self, responses: list[str]):
+        super().__init__(response_text=responses[-1] if responses else "mock response")
+        self._responses = list(responses)
+        self._idx = 0
+
+    def chat(self, messages: list[dict[str, str]], **kwargs: object):
+        _ = kwargs
+        self.calls.append(messages)
+        from researchclaw.llm.client import LLMResponse
+
+        if self._responses:
+            idx = min(self._idx, len(self._responses) - 1)
+            content = self._responses[idx]
+            self._idx += 1
+        else:
+            content = self.response_text
+        return LLMResponse(content=content, model="fake-model")
 
 
 @pytest.fixture()
@@ -270,6 +291,29 @@ def test_write_stage_meta_writes_expected_json(run_dir: Path) -> None:
     assert payload["evidence_refs"] == ["stage-01/goal.md"]
     assert payload["next_stage"] == 2
     assert re.match(r"\d{4}-\d{2}-\d{2}T", payload["ts"])
+
+
+def test_write_stage_meta_keeps_paused_stage_as_next_stage(run_dir: Path) -> None:
+    stage_dir = run_dir / "stage-02"
+    stage_dir.mkdir()
+    result = rc_executor.StageResult(
+        stage=Stage.PROBLEM_DECOMPOSE,
+        status=StageStatus.PAUSED,
+        artifacts=("refinement_log.json",),
+        decision="resume",
+        error="ACP prompt timed out after 1800s",
+        evidence_refs=("stage-02/refinement_log.json",),
+    )
+    rc_executor._write_stage_meta(
+        stage_dir, Stage.PROBLEM_DECOMPOSE, "run-paused", result
+    )
+    payload = cast(
+        dict[str, Any],
+        json.loads((stage_dir / "decision.json").read_text(encoding="utf-8")),
+    )
+    assert payload["status"] == "paused"
+    assert payload["decision"] == "resume"
+    assert payload["next_stage"] == int(Stage.PROBLEM_DECOMPOSE)
 
 
 def test_execute_stage_creates_stage_dir_writes_artifacts_and_meta(
@@ -750,6 +794,45 @@ class TestIterativeRefine:
         )
         assert payload["stop_reason"] == "llm_unavailable"
         assert result.status == StageStatus.DONE
+
+    def test_refine_acp_timeout_pauses_for_resume(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._prepare_refine_inputs(run_dir)
+        stage_dir = run_dir / "stage-13"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        from researchclaw.pipeline.stage_impls import _execution as execution_impl
+
+        def _timeout(*args, **kwargs):
+            _ = args, kwargs
+            raise RuntimeError("ACP prompt timed out after 1800s")
+
+        monkeypatch.setattr(execution_impl, "_chat_with_prompt", _timeout)
+
+        result = rc_executor._execute_iterative_refine(
+            stage_dir,
+            run_dir,
+            rc_config,
+            adapters,
+            llm=FakeLLMClient("unused"),
+        )
+
+        payload = json.loads(
+            (stage_dir / "refinement_log.json").read_text(encoding="utf-8")
+        )
+        assert result.status == StageStatus.PAUSED
+        assert result.decision == "resume"
+        assert result.artifacts == ("refinement_log.json",)
+        assert payload["paused"] is True
+        assert payload["stop_reason"] == "acp_prompt_timeout"
+        assert payload["pause_iteration"] == 1
+        assert payload["best_version"] == "experiment/"
+        assert not (stage_dir / "experiment_final").exists()
 
     def test_refine_with_llm_generates_improved_code(
         self,
@@ -1910,6 +1993,379 @@ class TestComputeBudgetBlock:
             call[-1]["content"] for call in llm.calls if call
         )
         assert "60" in all_user_msgs or "Compute Budget" in all_user_msgs
+
+    def test_code_generation_repairs_missing_local_helper_modules(
+        self, tmp_path: Path, run_dir: Path, adapters: AdapterBundle
+    ) -> None:
+        data = {
+            "project": {"name": "rc-test", "mode": "docs-first"},
+            "research": {
+                "topic": "optimizer comparison",
+                "domains": ["ml"],
+                "daily_paper_count": 2,
+                "quality_threshold": 8.2,
+            },
+            "runtime": {"timezone": "UTC"},
+            "notifications": {
+                "channel": "local",
+                "on_stage_start": True,
+                "on_stage_fail": False,
+                "on_gate_required": True,
+            },
+            "knowledge_base": {"backend": "markdown", "root": str(tmp_path / "kb")},
+            "openclaw_bridge": {"use_memory": True, "use_message": True},
+            "llm": {
+                "provider": "openai-compatible",
+                "base_url": "http://localhost:1234/v1",
+                "api_key_env": "RC_TEST_KEY",
+                "api_key": "inline-test-key",
+                "primary_model": "fake-model",
+                "fallback_models": [],
+            },
+            "security": {"hitl_required_stages": [5, 9, 20]},
+            "experiment": {
+                "mode": "sandbox",
+                "time_budget_sec": 30,
+                "metric_key": "primary_metric",
+                "metric_direction": "minimize",
+                "code_agent": {"enabled": False},
+                "opencode": {"enabled": False},
+            },
+        }
+        cfg = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+
+        _write_prior_artifact(run_dir, 10, "exp_plan.yaml", "objectives: test")
+
+        initial_generation = (
+            "```filename:main.py\n"
+            "from models import ToyModel\n\n"
+            "def main():\n"
+            "    print('primary_metric: 0.3')\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+            "```\n"
+            "```filename:requirements.txt\n"
+            "numpy\n"
+            "```"
+        )
+        review_json = '{"score": 8, "issues": [], "verdict": "pass"}'
+        alignment_json = '{"aligned": true, "reason": "", "suggestions": ""}'
+        self_contained_fix = (
+            "```filename:main.py\n"
+            "from models import ToyModel\n\n"
+            "def main():\n"
+            "    _ = ToyModel()\n"
+            "    print('primary_metric: 0.3')\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+            "```\n"
+            "```filename:models.py\n"
+            "class ToyModel:\n"
+            "    pass\n"
+            "```\n"
+            "```filename:requirements.txt\n"
+            "numpy\n"
+            "```"
+        )
+        llm = SequencedFakeLLMClient(
+            [initial_generation, review_json, alignment_json, self_contained_fix]
+        )
+        stage_dir = run_dir / "stage-11"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        result = rc_executor._execute_code_generation(
+            stage_dir, run_dir, cfg, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.DONE
+        exp_dir = stage_dir / "experiment"
+        assert (exp_dir / "main.py").exists()
+        assert (exp_dir / "models.py").exists()
+
+    def test_detects_placeholder_ablation_stubs(self) -> None:
+        issues = code_generation._find_placeholder_experiment_issues(
+            {
+                "main.py": (
+                    "# Dummy Implementations for Standalone Operation\n"
+                    "class ClutterAwareDisagreementRadiusAdaptiveReranker:\n"
+                    "    def __init__(self, hparams):\n"
+                    "        pass\n"
+                    "    def evaluate(self, seed=None, regime=None):\n"
+                    "        return 0.22\n"
+                )
+            }
+        )
+
+        assert any("Placeholder experiment text found" in issue for issue in issues)
+        assert any(
+            "placeholder experiment implementation" in issue
+            or "demonstration stub" in issue
+            for issue in issues
+        )
+
+    def test_detects_missing_condition_distinctness_check(self) -> None:
+        issues = code_generation._find_condition_distinctness_issues(
+            {
+                "main.py": (
+                    "class BaselineVerifier:\n"
+                    "    def predict(self, value):\n"
+                    "        return {'score': value}\n\n"
+                    "class AblationWithoutRadius:\n"
+                    "    def predict(self, value):\n"
+                    "        return {'score': value + 1}\n\n"
+                    "models = [\n"
+                    "    ('Baseline', BaselineVerifier()),\n"
+                    "    ('Abl_NoRadius', AblationWithoutRadius()),\n"
+                    "    ('Abl_NoVoteShape', AblationWithoutRadius()),\n"
+                    "    ('FusionWithoutScaleBins', AblationWithoutRadius()),\n"
+                    "]\n"
+                )
+            }
+        )
+
+        assert any(
+            "No ablation/condition distinctness self-check found" in issue
+            for issue in issues
+        )
+
+    def test_code_generation_repairs_placeholder_ablation_stubs(
+        self, tmp_path: Path, run_dir: Path, adapters: AdapterBundle
+    ) -> None:
+        data = {
+            "project": {"name": "rc-test", "mode": "docs-first"},
+            "research": {
+                "topic": "geometry-learning fusion ablation study",
+                "domains": ["ml"],
+                "daily_paper_count": 2,
+                "quality_threshold": 8.2,
+            },
+            "runtime": {"timezone": "UTC"},
+            "notifications": {
+                "channel": "local",
+                "on_stage_start": True,
+                "on_stage_fail": False,
+                "on_gate_required": True,
+            },
+            "knowledge_base": {"backend": "markdown", "root": str(tmp_path / "kb")},
+            "openclaw_bridge": {"use_memory": True, "use_message": True},
+            "llm": {
+                "provider": "openai-compatible",
+                "base_url": "http://localhost:1234/v1",
+                "api_key_env": "RC_TEST_KEY",
+                "api_key": "inline-test-key",
+                "primary_model": "fake-model",
+                "fallback_models": [],
+            },
+            "security": {"hitl_required_stages": [5, 9, 20]},
+            "experiment": {
+                "mode": "sandbox",
+                "time_budget_sec": 30,
+                "metric_key": "primary_metric",
+                "metric_direction": "minimize",
+                "code_agent": {"enabled": False},
+                "opencode": {"enabled": False},
+            },
+        }
+        cfg = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+        _write_prior_artifact(run_dir, 10, "exp_plan.yaml", "objectives: test")
+
+        initial_generation = (
+            "```filename:main.py\n"
+            "# Dummy Implementations for Standalone Operation\n"
+            "class GeometryFusionVerifier:\n"
+            "    def __init__(self, hparams):\n"
+            "        pass\n\n"
+            "    def evaluate(self, seed=None, regime=None):\n"
+            "        return 0.2\n\n"
+            "class AblationWithoutRadius:\n"
+            "    def __init__(self, hparams):\n"
+            "        pass\n\n"
+            "    def evaluate(self, seed=None, regime=None):\n"
+            "        return 0.2\n\n"
+            "def main():\n"
+            "    print('primary_metric: 0.3')\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+            "```\n"
+            "```filename:requirements.txt\n"
+            "numpy\n"
+            "```"
+        )
+        repaired_generation = (
+            "```filename:main.py\n"
+            "class GeometryFusionVerifier:\n"
+            "    def __init__(self, hparams):\n"
+            "        self.bias = float(hparams.get('bias', 0.0))\n\n"
+            "    def evaluate(self, seed=None, regime=None):\n"
+            "        seed = 0 if seed is None else int(seed)\n"
+            "        base = 0.10 + 0.02 * (seed % 3)\n"
+            "        if regime == 'hard':\n"
+            "            base += 0.05\n"
+            "        return base + self.bias\n\n"
+            "class AblationWithoutRadius(GeometryFusionVerifier):\n"
+            "    def evaluate(self, seed=None, regime=None):\n"
+            "        base = super().evaluate(seed=seed, regime=regime)\n"
+            "        return base + 0.07\n\n"
+            "def main():\n"
+            "    verifier = GeometryFusionVerifier({'bias': 0.01})\n"
+            "    ablation = AblationWithoutRadius({'bias': 0.01})\n"
+            "    primary_metric = min(\n"
+            "        verifier.evaluate(seed=1, regime='hard'),\n"
+            "        ablation.evaluate(seed=1, regime='hard'),\n"
+            "    )\n"
+            "    print(f'primary_metric: {primary_metric:.3f}')\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+            "```\n"
+            "```filename:requirements.txt\n"
+            "numpy\n"
+            "```"
+        )
+        review_json = '{"score": 8, "issues": [], "verdict": "pass"}'
+        alignment_json = '{"aligned": true, "reason": "", "suggestions": ""}'
+        llm = SequencedFakeLLMClient(
+            [initial_generation, repaired_generation, review_json, alignment_json]
+        )
+        stage_dir = run_dir / "stage-11"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        result = rc_executor._execute_code_generation(
+            stage_dir, run_dir, cfg, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.DONE
+        main_text = (stage_dir / "experiment" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        assert "Dummy Implementations" not in main_text
+        assert "return 0.2" not in main_text
+
+    def test_code_generation_repairs_missing_condition_distinctness_check(
+        self, tmp_path: Path, run_dir: Path, adapters: AdapterBundle
+    ) -> None:
+        data = {
+            "project": {"name": "rc-test", "mode": "docs-first"},
+            "research": {
+                "topic": "geometry-learning fusion ablation study",
+                "domains": ["ml"],
+                "daily_paper_count": 2,
+                "quality_threshold": 8.2,
+            },
+            "runtime": {"timezone": "UTC"},
+            "notifications": {
+                "channel": "local",
+                "on_stage_start": True,
+                "on_stage_fail": False,
+                "on_gate_required": True,
+            },
+            "knowledge_base": {"backend": "markdown", "root": str(tmp_path / "kb")},
+            "openclaw_bridge": {"use_memory": True, "use_message": True},
+            "llm": {
+                "provider": "openai-compatible",
+                "base_url": "http://localhost:1234/v1",
+                "api_key_env": "RC_TEST_KEY",
+                "api_key": "inline-test-key",
+                "primary_model": "fake-model",
+                "fallback_models": [],
+            },
+            "security": {"hitl_required_stages": [5, 9, 20]},
+            "experiment": {
+                "mode": "sandbox",
+                "time_budget_sec": 30,
+                "metric_key": "primary_metric",
+                "metric_direction": "minimize",
+                "code_agent": {"enabled": False},
+                "opencode": {"enabled": False},
+            },
+        }
+        cfg = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+        _write_prior_artifact(run_dir, 10, "exp_plan.yaml", "objectives: test")
+
+        initial_generation = (
+            "```filename:main.py\n"
+            "class BaselineVerifier:\n"
+            "    def predict(self, value):\n"
+            "        return {'score': value}\n\n"
+            "class AblationWithoutRadius:\n"
+            "    def predict(self, value):\n"
+            "        return {'score': value + 1}\n\n"
+            "class AblationWithoutVoteShape:\n"
+            "    def predict(self, value):\n"
+            "        return {'score': value + 2}\n\n"
+            "class FusionWithoutScaleBins:\n"
+            "    def predict(self, value):\n"
+            "        return {'score': value + 3}\n\n"
+            "models = [\n"
+            "    ('Baseline', BaselineVerifier()),\n"
+            "    ('Abl_NoRadius', AblationWithoutRadius()),\n"
+            "    ('Abl_NoVoteShape', AblationWithoutVoteShape()),\n"
+            "    ('FusionWithoutScaleBins', FusionWithoutScaleBins()),\n"
+            "]\n\n"
+            "def sanity_check_condition_outputs_differ():\n"
+            "    pass\n\n"
+            "def main():\n"
+            "    print('primary_metric: 0.3')\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+            "```\n"
+            "```filename:requirements.txt\n"
+            "numpy\n"
+            "```"
+        )
+        repaired_generation = (
+            "```filename:main.py\n"
+            "class BaselineVerifier:\n"
+            "    def predict(self, value):\n"
+            "        return {'score': value}\n\n"
+            "class AblationWithoutRadius:\n"
+            "    def predict(self, value):\n"
+            "        return {'score': value + 1}\n\n"
+            "class AblationWithoutVoteShape:\n"
+            "    def predict(self, value):\n"
+            "        return {'score': value + 2}\n\n"
+            "class FusionWithoutScaleBins:\n"
+            "    def predict(self, value):\n"
+            "        return {'score': value + 3}\n\n"
+            "models = [\n"
+            "    ('Baseline', BaselineVerifier()),\n"
+            "    ('Abl_NoRadius', AblationWithoutRadius()),\n"
+            "    ('Abl_NoVoteShape', AblationWithoutVoteShape()),\n"
+            "    ('FusionWithoutScaleBins', FusionWithoutScaleBins()),\n"
+            "]\n\n"
+            "def sanity_check_condition_outputs_differ():\n"
+            "    probe = 5\n"
+            "    outputs = {name: model.predict(probe)['score'] for name, model in models}\n"
+            "    assert len(set(outputs.values())) == len(outputs), outputs\n"
+            "    print('ABLATION_CHECK: outputs_differ=True')\n\n"
+            "def main():\n"
+            "    sanity_check_condition_outputs_differ()\n"
+            "    print('primary_metric: 0.3')\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+            "```\n"
+            "```filename:requirements.txt\n"
+            "numpy\n"
+            "```"
+        )
+        review_json = '{"score": 8, "issues": [], "verdict": "pass"}'
+        alignment_json = '{"aligned": true, "reason": "", "suggestions": ""}'
+        llm = SequencedFakeLLMClient(
+            [initial_generation, repaired_generation, review_json, alignment_json]
+        )
+        stage_dir = run_dir / "stage-11"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        result = rc_executor._execute_code_generation(
+            stage_dir, run_dir, cfg, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.DONE
+        main_text = (stage_dir / "experiment" / "main.py").read_text(
+            encoding="utf-8"
+        )
+        assert "def sanity_check_condition_outputs_differ" in main_text
+        assert "pass" not in main_text
+        assert "sanity_check_condition_outputs_differ()" in main_text
 
 
 class TestPartialTimeoutStatus:
@@ -3170,6 +3626,55 @@ class TestRefineTopicAlignment:
         assert "EXPERIMENT PLAN ANCHOR" in sp.user
         assert "multi-agent diversity scaling" in sp.user
         assert "NEVER rename" in sp.user
+
+
+class TestRefinePromptCompaction:
+    def test_build_refine_prompt_context_preserves_constraints(self) -> None:
+        from researchclaw.pipeline.stage_impls._execution import (
+            _build_refine_prompt_context,
+        )
+
+        topic = """
+        Design a research project around hybrid circle localization for engineering drawings.
+
+        Important constraints:
+        - Keep the direction hybrid geometry + learning
+        - Focus especially on small circles, partial circles, dashed circles, and cluttered drawings
+        - Do not propose a purely black-box end-to-end detector
+
+        Please produce:
+        1. Problem formulation
+        2. Novelty statement
+        """
+        exp_plan = """
+baselines:
+- name: ExplicitArcVoteRuleCascade
+- name: ImplicitHeatmapPeakVerifier
+proposed_methods:
+- name: ScaleBinnedRulePriorHeatmapCalibration
+ablations:
+- name: AntiEvidenceRerankerWithFixedPatchVerifier
+metrics:
+  primary_metric:
+    name: hard_subset_miss_rate
+objectives:
+  problem_formulation: Treat circle localization as a comparison between D(x) and H(x).
+  novelty_statement: Audit whether geometric and learned vote fields are complementary.
+  recommended_first_prototype: Start with cached diagnostics and two shallow trainable methods.
+  research_questions:
+  - Are D(x) and H(x) complementary?
+  - Does rule density help more as calibration or anti-evidence?
+"""
+
+        compact_topic, anchor = _build_refine_prompt_context(topic, exp_plan)
+
+        assert len(compact_topic) < len(topic)
+        assert "Important constraints" not in compact_topic
+        assert "Structured experiment plan summary" in anchor
+        assert "ScaleBinnedRulePriorHeatmapCalibration" in anchor
+        assert "hard_subset_miss_rate" in anchor
+        assert "Key research constraints to preserve" in anchor
+        assert "Keep the direction hybrid geometry + learning" in anchor
 
 
 # =====================================================================

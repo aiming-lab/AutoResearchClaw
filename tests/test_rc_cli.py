@@ -9,6 +9,8 @@ import pytest
 
 from researchclaw import cli as rc_cli
 from researchclaw.config import resolve_config_path
+from researchclaw.pipeline.executor import StageResult
+from researchclaw.pipeline.stages import Stage, StageStatus
 
 
 def _write_valid_config(path: Path) -> None:
@@ -98,6 +100,55 @@ def test_cmd_validate_valid_config_returns_zero(
     code = rc_cli.cmd_validate(args)
     assert code == 0
     assert "Config validation passed" in capsys.readouterr().out
+
+
+def test_cmd_run_reports_paused_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_valid_config(config_path)
+    output_dir = tmp_path / "artifacts" / "paused-run"
+
+    from researchclaw.pipeline import runner as rc_runner
+
+    monkeypatch.setattr(
+        rc_runner,
+        "execute_pipeline",
+        lambda **kwargs: [
+            StageResult(
+                stage=Stage.TOPIC_INIT,
+                status=StageStatus.DONE,
+                artifacts=("goal.md",),
+            ),
+            StageResult(
+                stage=Stage.PROBLEM_DECOMPOSE,
+                status=StageStatus.PAUSED,
+                artifacts=("refinement_log.json",),
+                error="ACP prompt timed out after 1800s",
+                decision="resume",
+            ),
+        ],
+    )
+    monkeypatch.setattr(rc_runner, "read_checkpoint", lambda run_dir: None)
+
+    args = argparse.Namespace(
+        config=str(config_path),
+        topic=None,
+        output=str(output_dir),
+        from_stage=None,
+        auto_approve=False,
+        skip_preflight=True,
+        resume=False,
+        skip_noncritical_stage=False,
+        no_graceful_degradation=False,
+    )
+    code = rc_cli.cmd_run(args)
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Pipeline paused:" in captured.out
+    assert "1 paused" in captured.out
 
 
 def test_main_dispatches_run_command(monkeypatch: pytest.MonkeyPatch) -> None:

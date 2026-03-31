@@ -42,6 +42,70 @@ class StageResult:
     evidence_refs: tuple[str, ...] = ()
 
 
+def detect_synthetic_proxy_signals(file_texts: dict[str, str]) -> list[str]:
+    """Heuristically detect toy/proxy dataset generation in experiment code."""
+    if not file_texts:
+        return []
+
+    combined = "\n\n".join(file_texts.values())
+    combined_lower = combined.lower()
+    signals: list[str] = []
+
+    if "class cachedevidencerepository" in combined_lower:
+        signals.append(
+            "contains `CachedEvidenceRepository`, a repository-local synthetic evidence scaffold"
+        )
+    if re.search(r"def\s+_build_example\s*\(", combined):
+        signals.append("contains `_build_example(...)`, suggesting in-code sample synthesis")
+    if re.search(r"def\s+_build_splits\s*\(", combined):
+        signals.append("contains `_build_splits(...)`, suggesting in-code dataset assembly")
+    if re.search(r"def\s+_sample_circle\s*\(", combined):
+        signals.append("contains `_sample_circle(...)`, suggesting synthetic circle generation")
+
+    split_match = re.search(
+        r"_SPLIT_SIZES\s*=\s*\{[^}]*['\"]train['\"]\s*:\s*(\d+)"
+        r"[^}]*['\"]val['\"]\s*:\s*(\d+)"
+        r"[^}]*['\"]test['\"]\s*:\s*(\d+)",
+        combined,
+        re.DOTALL,
+    )
+    if split_match:
+        split_sizes = tuple(int(split_match.group(i)) for i in range(1, 4))
+        if sum(split_sizes) <= 500:
+            signals.append(
+                "contains hard-coded tiny split sizes "
+                f"train/val/test={split_sizes[0]}/{split_sizes[1]}/{split_sizes[2]}"
+            )
+
+    for phrase in (
+        "toy dataset",
+        "proxy dataset",
+        "synthetic benchmark",
+        "repository-local benchmark",
+    ):
+        if phrase in combined_lower:
+            signals.append(f"contains suspicious phrase `{phrase}`")
+
+    return signals
+
+
+def should_fail_synthetic_proxy_guard(signals: list[str]) -> bool:
+    """Return True when synthetic/proxy signals are strong enough to hard-fail."""
+    if not signals:
+        return False
+
+    strong_markers = ("CachedEvidenceRepository", "hard-coded tiny split sizes")
+    if any(any(marker in signal for marker in strong_markers) for signal in signals):
+        return True
+
+    has_build_example = any("_build_example" in signal for signal in signals)
+    has_build_splits = any("_build_splits" in signal for signal in signals)
+    if has_build_example and has_build_splits:
+        return True
+
+    return len(signals) >= 3
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -235,7 +299,12 @@ def _build_fallback_queries(topic: str) -> list[str]:
 def _write_stage_meta(
     stage_dir: Path, stage: Stage, run_id: str, result: "StageResult"
 ) -> None:
-    next_stage = NEXT_STAGE[stage]
+    if result.status is StageStatus.DONE:
+        next_stage = NEXT_STAGE[stage]
+    else:
+        # Failed / paused / blocked stages should point back to themselves so
+        # retry-resume tooling does not imply that the pipeline advanced.
+        next_stage = stage
     meta = {
         "stage_id": f"{int(stage):02d}-{stage.name.lower()}",
         "run_id": run_id,
@@ -369,6 +438,79 @@ def _load_hardware_profile(run_dir: Path) -> dict[str, Any] | None:
         return data if isinstance(data, dict) else None
     except (json.JSONDecodeError, ValueError):
         return None
+
+
+def _load_research_repair_metadata(run_dir: Path) -> dict[str, Any] | None:
+    """Load child-run repair metadata when this run was created via research-repair."""
+    metadata_path = run_dir / "research_repair_parent.json"
+    if not metadata_path.exists():
+        return None
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _build_research_repair_brief(
+    run_dir: Path,
+    *,
+    max_feedback_items: int = 5,
+) -> str:
+    """Return a compact repair brief for prompt injection.
+
+    The child-run repair metadata is authoritative for repair semantics.
+    Use this short block instead of repeating the full repair narrative in
+    `research.topic`.
+    """
+    metadata = _load_research_repair_metadata(run_dir)
+    if not metadata:
+        return ""
+
+    compact = str(metadata.get("compact_repair_brief", "")).strip()
+    if compact:
+        return compact
+
+    parent_run_id = str(metadata.get("parent_run_id", "")).strip()
+    target_stage_name = str(metadata.get("target_stage_name", "")).strip()
+    repair_reason = " ".join(
+        str(metadata.get("repair_reason", "")).split()
+    ).strip()
+    reuse_policy = metadata.get("reuse_policy")
+    hard_reuse: list[str] = []
+    if isinstance(reuse_policy, dict):
+        hard_reuse = [
+            str(item).strip()
+            for item in reuse_policy.get("hard_reuse_stage_dirs", [])
+            if str(item).strip()
+        ]
+
+    feedback_excerpt = str(metadata.get("feedback_excerpt", "")).strip()
+    feedback_items: list[str] = []
+    for raw_line in feedback_excerpt.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("- "):
+            continue
+        payload = line[2:].strip()
+        lowered = payload.lower()
+        if lowered.startswith(("parent run:", "target stage:", "reason:")):
+            continue
+        feedback_items.append(" ".join(payload.split()))
+        if len(feedback_items) >= max_feedback_items:
+            break
+
+    lines = ["## Repair Context"]
+    if parent_run_id:
+        lines.append(f"- Parent run: `{parent_run_id}`")
+    if target_stage_name:
+        lines.append(f"- Authoritative rerun starts at: `{target_stage_name}`")
+    if repair_reason:
+        lines.append(f"- Repair reason: {repair_reason}")
+    if hard_reuse:
+        lines.append("- Hard reuse: " + ", ".join(hard_reuse))
+    lines.append("- Downstream parent analysis and paper artifacts are soft context only.")
+    lines.extend(f"- {item}" for item in feedback_items)
+    return "\n".join(lines).strip()
 
 
 # ---------------------------------------------------------------------------

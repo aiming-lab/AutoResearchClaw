@@ -53,6 +53,16 @@ def _failed(stage: Stage, msg: str = "boom") -> StageResult:
     return StageResult(stage=stage, status=StageStatus.FAILED, artifacts=(), error=msg)
 
 
+def _paused(stage: Stage, msg: str = "resume needed") -> StageResult:
+    return StageResult(
+        stage=stage,
+        status=StageStatus.PAUSED,
+        artifacts=("refinement_log.json",),
+        error=msg,
+        decision="resume",
+    )
+
+
 def _blocked(stage: Stage) -> StageResult:
     return StageResult(
         stage=stage,
@@ -111,6 +121,37 @@ def test_execute_pipeline_stops_on_failed_stage(
     assert results[-1].stage == fail_stage
     assert results[-1].status == StageStatus.FAILED
     assert len(results) == int(fail_stage)
+
+
+def test_execute_pipeline_stops_on_paused_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    pause_stage = Stage.ITERATIVE_REFINE
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        if stage == pause_stage:
+            return _paused(stage, "ACP prompt timed out after 1800s")
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-paused",
+        config=rc_config,
+        adapters=adapters,
+    )
+    assert results[-1].stage == pause_stage
+    assert results[-1].status == StageStatus.PAUSED
+    assert len(results) == int(pause_stage)
+    checkpoint = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    assert checkpoint["last_completed_stage"] == int(Stage.EXPERIMENT_RUN)
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text(encoding="utf-8"))
+    assert summary["stages_paused"] == 1
+    assert summary["final_status"] == "paused"
 
 
 def test_execute_pipeline_stops_on_gate_when_stop_on_gate_enabled(
@@ -217,6 +258,7 @@ def test_pipeline_summary_has_expected_fields_and_values(
     assert summary["stages_done"] == sum(
         1 for r in results if r.status == StageStatus.DONE
     )
+    assert summary["stages_paused"] == 0
     assert summary["stages_blocked"] == 1
     assert summary["stages_failed"] == 1
     assert summary["from_stage"] == 1
@@ -337,6 +379,7 @@ def test_should_start_logic(stage: Stage, started: bool, expected: bool) -> None
     [
         ([], "no_stages", int(Stage.TOPIC_INIT)),
         ([_done(Stage.TOPIC_INIT)], "done", int(Stage.TOPIC_INIT)),
+        ([_done(Stage.TOPIC_INIT), _paused(Stage.PROBLEM_DECOMPOSE)], "paused", int(Stage.PROBLEM_DECOMPOSE)),
         (
             [_done(Stage.TOPIC_INIT), _failed(Stage.PROBLEM_DECOMPOSE)],
             "failed",

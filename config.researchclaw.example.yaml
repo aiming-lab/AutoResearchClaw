@@ -50,6 +50,13 @@ llm:
   # primary_model: "MiniMax-M2.5"
   # fallback_models:
   #   - "MiniMax-M2.5-highspeed"
+  # acp:
+  #   reconnect_retries: 2
+  #   reconnect_backoff_sec: 2.0
+  #   verbose: true
+  #   capture_status_on_failure: true
+  #   debug_log_path: "artifacts/acp_debug.jsonl"
+  #   archive_failed_prompt_files: true
 
 security:
   hitl_required_stages: [5, 9, 20]
@@ -66,6 +73,22 @@ experiment:
   max_iterations: 10
   metric_key: "primary_metric"
   metric_direction: "minimize"
+  # Optional hard guards for trust-first experiment runs.
+  # When enabled, generated experiments must use real local assets/caches, fail fast
+  # if those assets are missing, and emit structured machine-readable results.
+  require_real_data: false
+  forbid_synthetic_proxy: false
+  fail_on_stdout_parsed_results: false
+  required_real_data_refs: []
+  benchmark_agent:
+    enabled: true
+    preserve_existing_assets: true
+    pass_existing_assets_as_reference: true
+  code_agent:
+    enabled: true
+    # If the ACP transport drops during multi-round Stage 10 generation,
+    # fall back to the older one-shot generator instead of failing immediately.
+    fallback_to_legacy_on_acp_failure: false
   sandbox:
     # Use ".venv/Scripts/python.exe" on Windows
     python_path: ".venv/bin/python3"

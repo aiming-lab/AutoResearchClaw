@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import ast
+import importlib.util
 import json
 import logging
 import re
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
@@ -19,7 +23,9 @@ from researchclaw.llm.client import LLMClient
 from researchclaw.pipeline._domain import _detect_domain
 from researchclaw.pipeline._helpers import (
     StageResult,
+    _build_research_repair_brief,
     _chat_with_prompt,
+    detect_synthetic_proxy_signals,
     _ensure_sandbox_deps,
     _extract_code_block,
     _extract_multi_file_blocks,
@@ -28,6 +34,7 @@ from researchclaw.pipeline._helpers import (
     _load_hardware_profile,
     _read_prior_artifact,
     _safe_json_loads,
+    should_fail_synthetic_proxy_guard,
     _utcnow_iso,
 )
 from researchclaw.pipeline.stages import Stage, StageStatus
@@ -41,6 +48,121 @@ _CONTINUOUS_ENVS = {
     "swimmer", "reacher", "invertedpendulum", "inverteddoublependulum",
     "mountaincarcontinuous", "lunarlander-continuous",
 }
+
+_LIKELY_LOCAL_HELPER_MODULES = {
+    "backbone",
+    "backbones",
+    "config",
+    "configs",
+    "constants",
+    "data_loader",
+    "data_utils",
+    "dataloader",
+    "dataset",
+    "datasets",
+    "decoder",
+    "decoders",
+    "encoder",
+    "encoders",
+    "helper",
+    "helpers",
+    "layer",
+    "layers",
+    "loader",
+    "loaders",
+    "loss",
+    "losses",
+    "metric",
+    "metrics",
+    "model",
+    "models",
+    "module",
+    "modules",
+    "network",
+    "networks",
+    "postprocess",
+    "postprocessing",
+    "preprocess",
+    "preprocessing",
+    "train_utils",
+    "trainer",
+    "trainers",
+    "transform",
+    "transforms",
+    "util",
+    "utils",
+}
+
+_PLACEHOLDER_EXPERIMENT_PATTERNS = (
+    "dummy implementation",
+    "dummy implementations",
+    "dummy placeholder",
+    "placeholder implementation",
+    "replace with actual implementation",
+    "replace with actual implementations",
+    "for standalone operation",
+    "for demonstration",
+)
+
+_EXPERIMENT_CLASS_NAME_HINTS = (
+    "ablation",
+    "baseline",
+    "detector",
+    "fusion",
+    "model",
+    "reranker",
+    "verifier",
+)
+
+_CORE_EXPERIMENT_METHODS = {
+    "evaluate",
+    "forward",
+    "predict",
+    "run",
+    "score",
+    "train_step",
+}
+
+_ABLATION_NAME_HINTS = (
+    "without",
+    "ablation",
+    "abl_",
+    "no_",
+    "minus",
+)
+
+_DISTINCTNESS_CHECK_NAME_HINTS = (
+    "ablation_check",
+    "condition_outputs_differ",
+    "distinctness",
+    "outputs_differ",
+    "sanity_check_condition",
+    "verify_condition",
+)
+
+_CRITICAL_DEEP_KEYWORDS = (
+    "unboundlocalerror",
+    "unregistered",
+    "does not exist",
+    "empty or trivial subclass",
+    "does not override",
+    "import-usage mismatch",
+    "nameerror",
+    "was removed",
+    "ptp()",
+    "copy-paste",
+    "identical method signatures",
+    "identical ast",
+    "not a real ablation",
+    "shadows stdlib/pip",
+    "placeholder experiment text found",
+    "placeholder experiment implementation",
+    "fixed-constant core method",
+    "demonstration stub",
+    "no ablation/condition distinctness self-check",
+    "distinctness self-check",
+    "does not call distinctness check",
+)
 
 
 def _check_rl_compatibility(code: str) -> list[str]:
@@ -64,6 +186,716 @@ def _check_rl_compatibility(code: str) -> list[str]:
     return errors
 
 
+def _find_missing_local_module_imports(files: dict[str, str]) -> list[str]:
+    """Detect local helper-module imports that are not present in *files*.
+
+    This is intentionally narrower than generic import validation: we only flag
+    imports that strongly indicate an intra-project Python module dependency.
+    """
+    known_modules = {
+        fname[:-3]
+        for fname in files
+        if fname.endswith(".py")
+    }
+    issues: list[str] = []
+    seen: set[tuple[str, str, int | None]] = set()
+
+    def _record_issue(
+        file_name: str,
+        module_name: str,
+        *,
+        line: int | None,
+    ) -> None:
+        if (
+            module_name in known_modules
+            or module_name.startswith("_")
+        ):
+            return
+        key = (file_name, module_name, line)
+        if key in seen:
+            return
+        seen.add(key)
+        line_text = f" line {line}" if line is not None else ""
+        issues.append(
+            f"[{file_name}] Local helper module '{module_name}.py' is imported at"
+            f"{line_text} but was not generated. The experiment project must be"
+            f" self-contained: either return '{module_name}.py' or inline its"
+            f" code and remove the import."
+        )
+
+    for fname, code in files.items():
+        if not fname.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top = alias.name.split(".")[0]
+                    if top in _LIKELY_LOCAL_HELPER_MODULES:
+                        _record_issue(
+                            fname,
+                            top,
+                            line=getattr(node, "lineno", None),
+                        )
+            elif isinstance(node, ast.ImportFrom):
+                line = getattr(node, "lineno", None)
+                if node.level > 0:
+                    if node.module:
+                        top = node.module.split(".")[0]
+                        _record_issue(fname, top, line=line)
+                    else:
+                        for alias in node.names:
+                            top = alias.name.split(".")[0]
+                            _record_issue(fname, top, line=line)
+                elif node.module:
+                    top = node.module.split(".")[0]
+                    if top in _LIKELY_LOCAL_HELPER_MODULES:
+                        _record_issue(fname, top, line=line)
+
+    return issues
+
+
+def _strip_docstring(body: list[ast.stmt]) -> list[ast.stmt]:
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        return body[1:]
+    return body
+
+
+def _is_literal_constant(node: ast.AST | None) -> bool:
+    if node is None:
+        return True
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        return _is_literal_constant(node.operand)
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return all(_is_literal_constant(elt) for elt in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(
+            (key is None or _is_literal_constant(key)) and _is_literal_constant(value)
+            for key, value in zip(node.keys, node.values, strict=False)
+        )
+    return False
+
+
+def _method_is_pass_only(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    body = _strip_docstring(list(node.body))
+    return len(body) == 1 and isinstance(body[0], ast.Pass)
+
+
+def _method_returns_fixed_constant(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    body = _strip_docstring(list(node.body))
+    return (
+        len(body) == 1
+        and isinstance(body[0], ast.Return)
+        and _is_literal_constant(body[0].value)
+    )
+
+
+def _looks_like_experiment_class(node: ast.ClassDef) -> bool:
+    lowered = node.name.lower()
+    if any(hint in lowered for hint in _EXPERIMENT_CLASS_NAME_HINTS):
+        return True
+    return any(
+        isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and item.name in _CORE_EXPERIMENT_METHODS
+        for item in node.body
+    )
+
+
+def _call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+def _extract_condition_entries(tree: ast.AST) -> list[tuple[str, str | None]]:
+    entries: list[tuple[str, str | None]] = []
+
+    def _extract_label(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        return None
+
+    def _extract_class_name(node: ast.AST) -> str | None:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Call):
+            return _extract_class_name(node.func)
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return None
+
+    for assign in ast.walk(tree):
+        if not isinstance(assign, ast.Assign):
+            continue
+        if not isinstance(assign.value, (ast.List, ast.Tuple)):
+            continue
+        for elt in assign.value.elts:
+            if not isinstance(elt, ast.Tuple) or len(elt.elts) < 2:
+                continue
+            label = _extract_label(elt.elts[0]) or ""
+            class_name = _extract_class_name(elt.elts[1])
+            if label or class_name:
+                entries.append((label, class_name))
+    return entries
+
+
+def _looks_like_ablation_entry(label: str, class_name: str | None) -> bool:
+    lowered = f"{label} {class_name or ''}".lower()
+    return any(hint in lowered for hint in _ABLATION_NAME_HINTS)
+
+
+def _function_has_distinctness_logic(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    body = _strip_docstring(list(node.body))
+    if not body:
+        return False
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Assert):
+            return True
+        if isinstance(sub, ast.Compare):
+            return True
+        if isinstance(sub, ast.Call):
+            call_name = _call_name(sub.func).lower()
+            if call_name in {"allclose", "array_equal"}:
+                return True
+            if "assert" in call_name or "raise" in call_name:
+                return True
+    return False
+
+
+def _find_placeholder_experiment_issues(files: dict[str, str]) -> list[str]:
+    """Detect obviously placeholder experiment implementations.
+
+    This is stricter than generic code-complexity warnings: it looks for
+    generated experiments that openly advertise themselves as demonstrations,
+    or condition classes whose core methods are pass-only / fixed-constant stubs.
+    """
+    issues: list[str] = []
+
+    for fname, code in files.items():
+        if not fname.endswith(".py"):
+            continue
+        lowered_code = code.lower()
+        for pattern in _PLACEHOLDER_EXPERIMENT_PATTERNS:
+            if pattern in lowered_code:
+                issues.append(
+                    f"[{fname}] Placeholder experiment text found ('{pattern}') — "
+                    "generated experiment code must implement real logic, not "
+                    "demonstration stubs."
+                )
+                break
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef) or not _looks_like_experiment_class(node):
+                continue
+
+            methods = [
+                item
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            if not methods:
+                continue
+
+            pass_only_init = any(
+                method.name == "__init__" and _method_is_pass_only(method)
+                for method in methods
+            )
+            constant_core_methods = [
+                method.name
+                for method in methods
+                if method.name in _CORE_EXPERIMENT_METHODS
+                and _method_returns_fixed_constant(method)
+            ]
+            trivial_core_methods = [
+                method.name
+                for method in methods
+                if method.name in _CORE_EXPERIMENT_METHODS
+                and (
+                    _method_is_pass_only(method)
+                    or _method_returns_fixed_constant(method)
+                )
+            ]
+
+            if pass_only_init and constant_core_methods:
+                issues.append(
+                    f"[{fname}] Class '{node.name}' looks like a placeholder "
+                    "experiment implementation: __init__ is pass-only and core "
+                    "method(s) "
+                    + ", ".join(sorted(constant_core_methods))
+                    + " use fixed-constant core method returns. Ablation/condition "
+                      "classes must exercise real differentiating logic."
+                )
+                continue
+
+            if trivial_core_methods and len(trivial_core_methods) == len(
+                [
+                    method
+                    for method in methods
+                    if method.name in _CORE_EXPERIMENT_METHODS
+                ]
+            ):
+                issues.append(
+                    f"[{fname}] Class '{node.name}' is a demonstration stub: all "
+                    "core experiment methods ("
+                    + ", ".join(sorted(trivial_core_methods))
+                    + ") are pass-only or fixed-constant. Generated ablations must "
+                      "implement real computation."
+                )
+
+    return issues
+
+
+def _find_condition_distinctness_issues(files: dict[str, str]) -> list[str]:
+    """Detect missing or non-functional ablation distinctness self-checks."""
+    issues: list[str] = []
+    condition_entries: list[tuple[str, str | None]] = []
+    distinctness_functions: dict[str, tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    called_distinctness_functions: set[str] = set()
+
+    for fname, code in files.items():
+        if not fname.endswith(".py"):
+            continue
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            continue
+
+        condition_entries.extend(_extract_condition_entries(tree))
+
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                lowered_name = node.name.lower()
+                if any(hint in lowered_name for hint in _DISTINCTNESS_CHECK_NAME_HINTS):
+                    distinctness_functions[node.name] = (fname, node)
+            elif isinstance(node, ast.Call):
+                call_name = _call_name(node.func)
+                if any(hint in call_name.lower() for hint in _DISTINCTNESS_CHECK_NAME_HINTS):
+                    called_distinctness_functions.add(call_name)
+
+    if not condition_entries:
+        return issues
+
+    ablation_entries = [
+        (label, class_name)
+        for label, class_name in condition_entries
+        if _looks_like_ablation_entry(label, class_name)
+    ]
+    if len(condition_entries) < 4 or len(ablation_entries) < 2:
+        return issues
+
+    if not distinctness_functions:
+        issues.append(
+            "No ablation/condition distinctness self-check found. Experiments with "
+            "multiple ablation-like conditions must include a startup check that "
+            "compares condition outputs on the same probe input and fails if they "
+            "are identical."
+        )
+        return issues
+
+    valid_function_names: set[str] = set()
+    for func_name, (fname, func_node) in distinctness_functions.items():
+        if _method_is_pass_only(func_node):
+            issues.append(
+                f"[{fname}] Distinctness self-check '{func_name}' is pass-only. It "
+                "must actively compare condition outputs and fail loudly on "
+                "identical behavior."
+            )
+            continue
+        if _method_returns_fixed_constant(func_node):
+            issues.append(
+                f"[{fname}] Distinctness self-check '{func_name}' returns a fixed "
+                "constant instead of validating ablation behavior."
+            )
+            continue
+        if not _function_has_distinctness_logic(func_node):
+            issues.append(
+                f"[{fname}] Distinctness self-check '{func_name}' exists but does "
+                "not contain comparison/assertion logic. It must compare outputs "
+                "from multiple conditions on the same probe input."
+            )
+            continue
+        valid_function_names.add(func_name)
+
+    if valid_function_names and not any(
+        called in valid_function_names for called in called_distinctness_functions
+    ):
+        issues.append(
+            "Experiment defines a condition distinctness self-check but does not "
+            "call it before running the main evaluation. Call the self-check at "
+            "startup and fail fast on identical outputs."
+        )
+
+    return issues
+
+
+def _is_critical_deep_warning(message: str) -> bool:
+    lowered = message.lower()
+    return any(keyword in lowered for keyword in _CRITICAL_DEEP_KEYWORDS)
+
+
+def _repair_self_contained_project(
+    *,
+    llm: LLMClient,
+    prompt_manager: PromptManager,
+    files: dict[str, str],
+    issues: list[str],
+    max_tokens: int,
+    max_repair: int,
+) -> tuple[dict[str, str], list[str]]:
+    """Repair missing local helper-module files by asking for a full file set."""
+    current_files = dict(files)
+    current_issues = list(issues)
+
+    for attempt in range(1, max_repair + 1):
+        repair_prompt = (
+            "SELF-CONTAINMENT REPAIR REQUIRED.\n\n"
+            "The generated experiment project is not self-contained. Some files "
+            "import local helper modules that were never returned.\n\n"
+            "Missing local-module issues:\n"
+            + "\n".join(f"- {issue}" for issue in current_issues)
+            + "\n\nRULES:\n"
+            "- If any file imports a local helper module such as models, utils, "
+            "data_utils, metrics, or loaders, you MUST return that helper file "
+            "too.\n"
+            "- If you do not want a helper file, inline its code into an existing "
+            "file and remove the import.\n"
+            "- Preserve working files unless you are intentionally replacing them.\n"
+            "- The final project must be runnable via `python main.py`.\n"
+            "- Return ALL project files using ```filename:...``` blocks.\n\n"
+            "Current files:\n"
+            + "\n\n".join(
+                f"```filename:{fname}\n{code}\n```"
+                for fname, code in current_files.items()
+            )
+        )
+
+        resp = _chat_with_prompt(
+            llm,
+            prompt_manager.system("code_generation"),
+            repair_prompt,
+            max_tokens=max_tokens,
+        )
+        repaired_files = _extract_multi_file_blocks(resp.content)
+        if not repaired_files:
+            logger.warning(
+                "Stage 10: Self-containment repair attempt %d returned no files",
+                attempt,
+            )
+            continue
+
+        merged = dict(current_files)
+        merged.update(repaired_files)
+        current_files = merged
+        current_issues = _find_missing_local_module_imports(current_files)
+        if not current_issues:
+            logger.info(
+                "Stage 10: Self-containment repair succeeded on attempt %d",
+                attempt,
+            )
+            return current_files, []
+
+    return current_files, current_issues
+
+
+def _build_real_data_guard_guidance(config: RCConfig) -> str:
+    exp_cfg = config.experiment
+    if not (
+        getattr(exp_cfg, "require_real_data", False)
+        or getattr(exp_cfg, "forbid_synthetic_proxy", False)
+        or getattr(exp_cfg, "fail_on_stdout_parsed_results", False)
+        or getattr(exp_cfg, "required_real_data_refs", ())
+    ):
+        return ""
+
+    refs = tuple(getattr(exp_cfg, "required_real_data_refs", ()) or ())
+    refs_block = ""
+    if refs:
+        refs_block = "Required local data references (use these, do not invent substitutes):\n"
+        refs_block += "".join(f"- {ref}\n" for ref in refs)
+
+    asset_paths_block = _build_resolved_local_asset_guidance()
+
+    return (
+        "\n\nREAL DATA ENFORCEMENT (HARD RULE):\n"
+        "- This project MUST use real local project assets/caches, not an internally "
+        "generated proxy benchmark.\n"
+        "- If the required local assets are unavailable, FAIL FAST with a clear "
+        "FileNotFoundError or RuntimeError. Do NOT silently degrade to a toy dataset.\n"
+        "- FORBIDDEN fallback patterns include: helper functions such as "
+        "`_build_example`, `_build_splits`, or `_sample_circle` that generate the "
+        "benchmark in code; hard-coded tiny train/val/test split dictionaries; "
+        "repository-local synthetic evidence repositories; or any results source that "
+        "exists only as stdout metric lines.\n"
+        "- main.py must write a structured `results.json`; stdout-only metrics are "
+        "insufficient for this run.\n"
+        "- The execution harness invokes `python main.py` directly. Do NOT require "
+        "dataset/asset CLI flags just to start the experiment. Asset path flags may "
+        "exist only as optional overrides; the default path resolution must come "
+        "from the VECTRA_* env vars or the authoritative absolute roots below.\n"
+        "- Emit machine-readable provenance where practical, including "
+        "`data_manifest.json` and `protocol_manifest.json`, so later stages can verify "
+        "which local assets were actually used.\n"
+        "- Resolve data from the authoritative absolute roots or env vars below. "
+        "Do NOT invent packaged relative directories such as "
+        "`./page_minus_titleblock_train1000_local`.\n"
+        + refs_block
+        + asset_paths_block
+    )
+
+
+def _build_resolved_local_asset_guidance() -> str:
+    """Expose authoritative local asset roots from the repo's experiment config."""
+    specs = _load_project_dataset_specs()
+    if not specs:
+        return ""
+
+    def _path_text(value: Any) -> str:
+        text = " ".join(str(value).replace("\\", "/").split()).strip()
+        return text
+
+    lines = ["Authoritative local asset roots for this repository:"]
+
+    def _append_path(dataset_name: str, label: str, env_name: str, value: Any) -> None:
+        text = _path_text(value)
+        if not text:
+            return
+        lines.append(f"- {dataset_name} {label}: {text} (env: {env_name})")
+
+    repo_root = Path(__file__).resolve().parents[3]
+    lines.append(f"- repo root: {repo_root.as_posix()} (env: VECTRA_REPO_ROOT)")
+
+    simple_key = "engineering_primitives_simple_scenes_noslot_v1_local_20260326"
+    simple_spec = specs.get(simple_key)
+    if isinstance(simple_spec, dict):
+        cache_roots = simple_spec.get("cache_roots")
+        _append_path(simple_key, "dataset_root", "VECTRA_SIMPLE_DATASET_ROOT", simple_spec.get("dataset_root"))
+        _append_path(simple_key, "dataset_root", "VECTRA_SIMPLE_ASSET_ROOT", simple_spec.get("dataset_root"))
+        _append_path(simple_key, "manifest_path", "VECTRA_SIMPLE_MANIFEST_PATH", simple_spec.get("manifest_path"))
+        if isinstance(cache_roots, dict):
+            _append_path(simple_key, "learned_cache", "VECTRA_SIMPLE_HEATMAP_DIR", cache_roots.get("learned"))
+
+    page_key = "page_minus_titleblock"
+    page_spec = specs.get(page_key)
+    if isinstance(page_spec, dict):
+        dataset_root = page_spec.get("dataset_root")
+        split_manifest = page_spec.get("split_manifest_path")
+        _append_path(page_key, "dataset_root", "VECTRA_PAGE_DATASET_ROOT", dataset_root)
+        if dataset_root:
+            dataset_root_path = Path(str(dataset_root))
+            _append_path(page_key, "image_dir", "VECTRA_PAGE_IMAGE_DIR", dataset_root_path / "train2017")
+            _append_path(page_key, "sidecar_dir", "VECTRA_PAGE_SIDECAR_DIR", dataset_root_path / "sidecars" / "train2017")
+        _append_path(page_key, "split_manifest", "VECTRA_PAGE_SPLIT_JSON", split_manifest)
+        if split_manifest:
+            split_manifest_path = Path(str(split_manifest))
+            one_drive_png_root = split_manifest_path.parent.parent
+            _append_path(page_key, "png_root", "VECTRA_ONE_DRIVE_PNG_ROOT", one_drive_png_root)
+            _append_path(page_key, "gt_solid_csv", "VECTRA_PAGE_GT_SOLID_CSV", split_manifest_path.parent / "gt" / "train2017_solid.csv")
+            _append_path(page_key, "gt_dashed_csv", "VECTRA_PAGE_GT_DASHED_CSV", split_manifest_path.parent / "gt" / "train2017_dashed.csv")
+
+    probe_key = "DeepPatent2_negative_clutter_probe"
+    probe_spec = specs.get(probe_key)
+    if isinstance(probe_spec, dict):
+        _append_path(probe_key, "dataset_root", "VECTRA_DEEPPATENT_DATASET_ROOT", probe_spec.get("dataset_root"))
+
+    if len(lines) <= 1:
+        return ""
+    lines.extend(
+        [
+            "- Loader rule: first read the env vars above if they are set, otherwise fall back to the exact absolute paths above.",
+            "- If a required asset path does not exist, raise FileNotFoundError naming the env var/path that was missing.",
+        ]
+    )
+    return "\n" + "\n".join(lines) + "\n"
+
+
+def _load_project_dataset_specs() -> dict[str, dict[str, Any]]:
+    """Load the repo-root experiment dataset specs for prompt grounding."""
+    repo_root = Path(__file__).resolve().parents[3]
+    config_path = repo_root / "config.py"
+    if not config_path.exists():
+        return {}
+
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "researchclaw_project_config_for_codegen",
+            config_path,
+        )
+        if spec is None or spec.loader is None:
+            return {}
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        build_default_config = getattr(module, "build_default_config", None)
+        if not callable(build_default_config):
+            return {}
+        project_config = build_default_config()
+        build_dataset_specs = getattr(project_config, "build_dataset_specs", None)
+        if not callable(build_dataset_specs):
+            return {}
+        dataset_specs = build_dataset_specs()
+        if not isinstance(dataset_specs, dict):
+            return {}
+        return dataset_specs
+    except Exception:  # noqa: BLE001
+        logger.debug("Resolved local asset guidance unavailable", exc_info=True)
+        return {}
+
+
+def _extract_named_plan_items(value: Any, *, limit: int = 8) -> list[str]:
+    items: list[str] = []
+    if value is None:
+        return items
+    if isinstance(value, dict):
+        if "name" in value:
+            candidate = " ".join(str(value.get("name", "")).split()).strip()
+            if candidate:
+                items.append(candidate)
+        else:
+            for key in value:
+                candidate = " ".join(str(key).split()).strip()
+                if candidate:
+                    items.append(candidate)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            if isinstance(item, dict):
+                candidate = " ".join(str(item.get("name", "")).split()).strip()
+            else:
+                candidate = " ".join(str(item).split()).strip()
+            if candidate:
+                items.append(candidate)
+    else:
+        candidate = " ".join(str(value).split()).strip()
+        if candidate:
+            items.append(candidate)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _build_codegen_plan_summary(exp_plan_text: str, config: RCConfig) -> str:
+    """Compress the experiment plan into the subset needed for Stage 10."""
+    if not exp_plan_text.strip():
+        return ""
+
+    try:
+        plan_data = yaml.safe_load(exp_plan_text)
+    except yaml.YAMLError:
+        plan_data = None
+    if not isinstance(plan_data, dict):
+        excerpt = exp_plan_text[:2200].rstrip()
+        suffix = "\n...\n" if len(exp_plan_text) > 2200 else "\n"
+        return "PLAN EXCERPT:\n" + excerpt + suffix
+
+    lines = ["## Experiment Plan Summary"]
+
+    plan_topic = " ".join(str(plan_data.get("topic", "")).split()).strip()
+    if plan_topic:
+        if len(plan_topic) > 320:
+            plan_topic = plan_topic[:320].rstrip() + "..."
+        lines.append(f"- Topic anchor: {plan_topic}")
+
+    datasets = _extract_named_plan_items(plan_data.get("datasets"), limit=6)
+    if datasets:
+        lines.append("- Datasets: " + ", ".join(datasets))
+
+    baselines = _extract_named_plan_items(plan_data.get("baselines"), limit=8)
+    if baselines:
+        lines.append("- Baselines: " + ", ".join(baselines))
+
+    methods = _extract_named_plan_items(plan_data.get("proposed_methods"), limit=8)
+    if methods:
+        lines.append("- Proposed methods: " + ", ".join(methods))
+
+    ablations = _extract_named_plan_items(plan_data.get("ablations"), limit=8)
+    if ablations:
+        lines.append("- Ablations: " + ", ".join(ablations))
+
+    metrics = plan_data.get("metrics")
+    if isinstance(metrics, dict):
+        primary = metrics.get("primary_metric")
+        if isinstance(primary, dict):
+            primary_name = " ".join(str(primary.get("name", "")).split()).strip()
+            direction = " ".join(
+                str(primary.get("direction", config.experiment.metric_direction)).split()
+            ).strip()
+            if primary_name:
+                lines.append(
+                    f"- Primary metric: {primary_name} ({direction or config.experiment.metric_direction})"
+                )
+        secondary = _extract_named_plan_items(metrics.get("secondary_metrics"), limit=8)
+        if secondary:
+            lines.append("- Secondary metrics: " + ", ".join(secondary))
+
+    compute_budget = plan_data.get("compute_budget")
+    if isinstance(compute_budget, dict):
+        total_seconds = compute_budget.get("total_time_budget_seconds")
+        seeded_conditions = compute_budget.get("seeded_condition_count")
+        budget_bits: list[str] = []
+        if total_seconds is not None:
+            budget_bits.append(f"total_time_budget_seconds={total_seconds}")
+        if seeded_conditions is not None:
+            budget_bits.append(f"seeded_condition_count={seeded_conditions}")
+        if budget_bits:
+            lines.append("- Compute budget: " + ", ".join(budget_bits))
+
+    refs = tuple(getattr(config.experiment, "required_real_data_refs", ()) or ())
+    if refs:
+        lines.append("- Required local asset refs:")
+        lines.extend(f"  - {ref}" for ref in refs[:8])
+
+    return "\n".join(lines).strip()
+
+
+def _is_acp_transport_failure(exc: Exception) -> bool:
+    """Return True when a Stage-10 failure came from the ACP transport layer."""
+    parts = [str(exc)]
+    cause = getattr(exc, "__cause__", None)
+    context = getattr(exc, "__context__", None)
+    if cause:
+        parts.append(str(cause))
+    if context:
+        parts.append(str(context))
+    text = " ".join(part.strip() for part in parts if part).lower()
+    if not text:
+        return False
+    indicators = (
+        "acp prompt failed",
+        "acp prompt timed out after",
+        "queue owner disconnected before prompt completion",
+        "agent needs reconnect",
+    )
+    return any(indicator in text for indicator in indicators)
+
+
 def _execute_code_generation(
     stage_dir: Path,
     run_dir: Path,
@@ -74,6 +906,7 @@ def _execute_code_generation(
     prompts: PromptManager | None = None,
 ) -> StageResult:
     exp_plan = _read_prior_artifact(run_dir, "exp_plan.yaml") or ""
+    exp_plan_prompt = _build_codegen_plan_summary(exp_plan, config)
     metric = config.experiment.metric_key
     max_repair = 5  # BUG-14: Increased from 3 to give more chances for critical bugs
     files: dict[str, str] = {}
@@ -208,11 +1041,29 @@ def _execute_code_generation(
             )
             _bp_block = _bp.to_prompt_block()
             if _bp_block:
-                extra_guidance += (
-                    "\n\n## BenchmarkAgent Selections (USE THESE)\n"
+                _has_existing_plan_assets = any(
+                    item.get("origin") == "existing_plan"
+                    for item in (_bp.selected_benchmarks + _bp.selected_baselines)
+                    if isinstance(item, dict)
+                )
+                _bp_heading = "## BenchmarkAgent Selections (USE THESE)"
+                _bp_instruction = (
                     "The following datasets, baselines, and code snippets were "
                     "automatically selected and validated by the BenchmarkAgent. "
                     "You MUST use these selections in your experiment code.\n\n"
+                )
+                if _has_existing_plan_assets:
+                    _bp_heading = "## BenchmarkAgent Selections (PRESERVE IN-PROJECT ASSETS)"
+                    _bp_instruction = (
+                        "The following datasets and baselines include in-project "
+                        "assets carried over from the existing experiment plan plus "
+                        "BenchmarkAgent supplements. You MUST preserve the in-project "
+                        "datasets/baselines and may use the extra BenchmarkAgent "
+                        "selections only as supplemental additions.\n\n"
+                    )
+                extra_guidance += (
+                    f"\n\n{_bp_heading}\n"
+                    + _bp_instruction
                     + _bp_block
                 )
                 logger.info(
@@ -317,7 +1168,18 @@ def _execute_code_generation(
         "- Prefer lightweight CPU-friendly libraries (numpy, scipy, "
         "sklearn, pandas) unless deep learning is inherent to the topic.\n"
         "- The experiment MUST be self-contained and runnable without GPU.\n"
+        "- The returned experiment project must be self-contained at the file "
+        "level. If `main.py` or any other file imports a local helper module "
+        "(for example `models`, `utils`, `data_utils`, `metrics`, `loaders`), "
+        "you MUST return that helper file too.\n"
+        "- Never reference a local Python module that is absent from the "
+        "returned file set. If in doubt, inline the helper code into an "
+        "existing returned file instead of importing a missing module.\n"
     )
+    repair_brief = _build_research_repair_brief(run_dir)
+    if repair_brief:
+        extra_guidance += "\n\n" + repair_brief
+    extra_guidance += _build_real_data_guard_guidance(config)
 
     # --- Code generation: Beast Mode → CodeAgent → Legacy single-shot ---
     _code_agent_active = False
@@ -401,7 +1263,7 @@ def _execute_code_generation(
                 _oc_result: OpenCodeResult = _bridge.generate(
                     stage_dir=stage_dir,
                     topic=config.research.topic,
-                    exp_plan=exp_plan,
+                    exp_plan=exp_plan_prompt,
                     metric=metric,
                     pkg_hint=pkg_hint + "\n" + compute_budget,
                     extra_guidance=extra_guidance,
@@ -503,52 +1365,75 @@ def _execute_code_generation(
         except Exception:  # noqa: BLE001
             logger.debug("Domain detection unavailable", exc_info=True)
 
-        _agent = _CodeAgent(
-            llm=llm,
-            prompts=_pm,
-            config=_ca_cfg,
-            stage_dir=stage_dir,
-            sandbox_factory=_sandbox_factory,
-            experiment_config=config.experiment,
-            domain_profile=_domain_profile,
-            code_search_result=_code_search_result,
-        )
-        _agent_result = _agent.generate(
-            topic=config.research.topic,
-            exp_plan=exp_plan,
-            metric=metric,
-            pkg_hint=pkg_hint + "\n" + compute_budget + "\n" + extra_guidance,
-            max_tokens=_code_max_tokens,
-        )
-        files = _agent_result.files
-        _code_agent_active = True
-
-        # Write agent artifacts
-        (stage_dir / "code_agent_log.json").write_text(
-            json.dumps(
-                {
-                    "log": _agent_result.validation_log,
-                    "llm_calls": _agent_result.total_llm_calls,
-                    "sandbox_runs": _agent_result.total_sandbox_runs,
-                    "best_score": _agent_result.best_score,
-                    "tree_nodes_explored": _agent_result.tree_nodes_explored,
-                    "review_rounds": _agent_result.review_rounds,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        if _agent_result.architecture_spec:
-            (stage_dir / "architecture_spec.yaml").write_text(
-                _agent_result.architecture_spec, encoding="utf-8",
+        try:
+            _agent = _CodeAgent(
+                llm=llm,
+                prompts=_pm,
+                config=_ca_cfg,
+                stage_dir=stage_dir,
+                sandbox_factory=_sandbox_factory,
+                experiment_config=config.experiment,
+                domain_profile=_domain_profile,
+                code_search_result=_code_search_result,
             )
-        logger.info(
-            "CodeAgent: %d LLM calls, %d sandbox runs, score=%.2f",
-            _agent_result.total_llm_calls,
-            _agent_result.total_sandbox_runs,
-            _agent_result.best_score,
-        )
-    elif not _beast_mode_used and llm is not None:
+            _agent_result = _agent.generate(
+                topic=config.research.topic,
+                exp_plan=exp_plan_prompt,
+                metric=metric,
+                pkg_hint=pkg_hint + "\n" + compute_budget + "\n" + extra_guidance,
+                max_tokens=_code_max_tokens,
+            )
+            files = _agent_result.files
+            _code_agent_active = True
+
+            # Write agent artifacts
+            (stage_dir / "code_agent_log.json").write_text(
+                json.dumps(
+                    {
+                        "log": _agent_result.validation_log,
+                        "llm_calls": _agent_result.total_llm_calls,
+                        "sandbox_runs": _agent_result.total_sandbox_runs,
+                        "best_score": _agent_result.best_score,
+                        "tree_nodes_explored": _agent_result.tree_nodes_explored,
+                        "review_rounds": _agent_result.review_rounds,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            if _agent_result.architecture_spec:
+                (stage_dir / "architecture_spec.yaml").write_text(
+                    _agent_result.architecture_spec, encoding="utf-8",
+                )
+            logger.info(
+                "CodeAgent: %d LLM calls, %d sandbox runs, score=%.2f",
+                _agent_result.total_llm_calls,
+                _agent_result.total_sandbox_runs,
+                _agent_result.best_score,
+            )
+        except Exception as exc:
+            fallback_enabled = bool(
+                getattr(_ca_cfg, "fallback_to_legacy_on_acp_failure", False)
+            )
+            if fallback_enabled and _is_acp_transport_failure(exc):
+                fallback_payload = {
+                    "fallback_triggered": True,
+                    "reason": "code_agent_acp_transport_failure",
+                    "error": str(exc),
+                    "triggered_at": _utcnow_iso(),
+                }
+                (stage_dir / "code_agent_fallback.json").write_text(
+                    json.dumps(fallback_payload, indent=2),
+                    encoding="utf-8",
+                )
+                logger.warning(
+                    "CodeAgent ACP transport failure detected; falling back to legacy single-shot generation: %s",
+                    exc,
+                )
+            else:
+                raise
+
+    if not _beast_mode_used and llm is not None and not _code_agent_active:
         # ── Legacy single-shot generation ─────────────────────────────────
         topic = config.research.topic
         _md = config.experiment.metric_direction
@@ -563,7 +1448,7 @@ def _execute_code_generation(
             topic=topic,
             metric=metric,
             pkg_hint=pkg_hint + "\n" + compute_budget + "\n" + extra_guidance,
-            exp_plan=exp_plan,
+            exp_plan=exp_plan_prompt,
             metric_direction_hint=_md_hint,
         )
         # R13-3: Use higher max_tokens for reasoning models (they consume tokens
@@ -817,20 +1702,16 @@ def _execute_code_generation(
 
     # --- P1.1+P1.2: Deep quality analysis (class quality, scoping, API) ---
     deep_warnings = deep_validate_files(files)
+    placeholder_impl_issues = _find_placeholder_experiment_issues(files)
+    distinctness_issues = _find_condition_distinctness_issues(files)
+    deep_warnings.extend(placeholder_impl_issues)
+    deep_warnings.extend(distinctness_issues)
     for w in deep_warnings:
         logger.warning("Stage 10 deep quality: %s", w)
     complexity_warnings.extend(deep_warnings)
 
     # --- P1.2: If critical deep issues found, attempt one repair cycle ---
-    critical_deep = [w for w in deep_warnings if any(
-        kw in w for kw in ("UnboundLocalError", "unregistered", "does not exist",
-                           "empty or trivial subclass", "does NOT override",
-                           "Import-usage mismatch", "NameError",
-                           "was removed", "ptp()",
-                           "copy-paste", "identical method signatures",
-                           "identical AST", "NOT a real ablation",
-                           "shadows stdlib/pip")
-    )]
+    critical_deep = [w for w in deep_warnings if _is_critical_deep_warning(w)]
     if critical_deep and llm is not None:
         logger.info(
             "Stage 10: %d critical code issues found — triggering repair cycle",
@@ -850,6 +1731,14 @@ def _execute_code_generation(
             f"- Use scipy.special.erf, not np.erf\n"
             f"- Ablation/variant classes must have genuinely different logic\n"
             f"- Every class must have a real implementation, not just `pass`\n"
+            f"- Do NOT ship dummy/placeholder/demo experiment code or comments "
+            f"saying 'replace with actual implementation'\n"
+            f"- Core experiment methods such as evaluate/predict/forward must "
+            f"NOT return fixed constants like 0.2 or 0.5 as a stand-in for "
+            f"real computation\n"
+            f"- Multi-condition experiments MUST include and CALL a startup "
+            f"ablation distinctness self-check that compares outputs on the "
+            f"same probe input and raises/asserts if conditions are identical\n"
             f"- Ablation classes MUST override the parent method that implements "
             f"the component being ablated (e.g., if ablating attention, override "
             f"the attention method with a simpler alternative like mean pooling)\n"
@@ -883,17 +1772,11 @@ def _execute_code_generation(
                     (exp_dir / fname).write_text(code, encoding="utf-8")
                 # Re-check after repair
                 deep_warnings_after = deep_validate_files(files)
+                deep_warnings_after.extend(_find_placeholder_experiment_issues(files))
+                deep_warnings_after.extend(_find_condition_distinctness_issues(files))
                 fixed = len(critical_deep) - len([
                     w for w in deep_warnings_after
-                    if any(kw in w for kw in (
-                        "UnboundLocalError", "unregistered", "does not exist",
-                        "empty or trivial subclass", "does NOT override",
-                        "Import-usage mismatch", "NameError",
-                        "was removed", "ptp()",
-                        "copy-paste", "identical method signatures",
-                        "identical AST", "NOT a real ablation",
-                        "shadows stdlib/pip",
-                    ))
+                    if _is_critical_deep_warning(w)
                 ])
                 logger.info(
                     "Stage 10: Deep repair fixed %d/%d critical issues",
@@ -913,6 +1796,46 @@ def _execute_code_generation(
             json.dumps(health, indent=2), encoding="utf-8"
         )
 
+    # --- Hard gate: reject placeholder/dummy experiment implementations ---
+    unresolved_placeholder_issues = _find_placeholder_experiment_issues(files)
+    if unresolved_placeholder_issues:
+        for issue in unresolved_placeholder_issues:
+            logger.warning("Stage 10 placeholder gate: %s", issue)
+            validation_log.append(f"PLACEHOLDER_IMPL: {issue}")
+        (stage_dir / "validation_report.md").write_text(
+            "# Code Validation Report\n\n"
+            "**Status**: BLOCKED — generated experiment code still contains "
+            "placeholder or demonstration-only implementations\n\n"
+            + "\n".join(f"- {issue}" for issue in unresolved_placeholder_issues),
+            encoding="utf-8",
+        )
+        return StageResult(
+            stage=Stage.CODE_GENERATION,
+            status=StageStatus.FAILED,
+            artifacts=("validation_report.md",),
+            evidence_refs=(),
+        )
+
+    # --- Hard gate: require active condition-distinctness self-checks ---
+    unresolved_distinctness_issues = _find_condition_distinctness_issues(files)
+    if unresolved_distinctness_issues:
+        for issue in unresolved_distinctness_issues:
+            logger.warning("Stage 10 distinctness gate: %s", issue)
+            validation_log.append(f"DISTINCTNESS_IMPL: {issue}")
+        (stage_dir / "validation_report.md").write_text(
+            "# Code Validation Report\n\n"
+            "**Status**: BLOCKED — generated experiment does not prove condition "
+            "wiring is distinct\n\n"
+            + "\n".join(f"- {issue}" for issue in unresolved_distinctness_issues),
+            encoding="utf-8",
+        )
+        return StageResult(
+            stage=Stage.CODE_GENERATION,
+            status=StageStatus.FAILED,
+            artifacts=("validation_report.md",),
+            evidence_refs=(),
+        )
+
     # --- P1.4: LLM Code Review (Stage 10.5) ---
     # Skip when CodeAgent is active — Phase 4 review already covers this.
     if llm is not None and not _code_agent_active:
@@ -925,7 +1848,7 @@ def _execute_code_generation(
             f"You are a senior researcher reviewing experiment code for a "
             f"research submission.\n\n"
             f"TOPIC: {config.research.topic}\n"
-            f"EXPERIMENT PLAN:\n{exp_plan[:3000]}\n\n"
+            f"EXPERIMENT PLAN:\n{exp_plan_prompt[:3000]}\n\n"
             f"CODE:\n```python\n{all_code_review}\n```\n\n"
             f"Review the code and return JSON with this EXACT structure:\n"
             f'{{"score": <1-10>, "issues": ['
@@ -1158,9 +2081,12 @@ def _execute_code_generation(
                         f"when the topic describes a tabular, bandit, or game-theoretic method.\n"
                         f"- Use ONLY lightweight CPU-friendly libraries (numpy, scipy, "
                         f"sklearn) unless the topic EXPLICITLY requires deep learning.\n"
-                        f"- The experiment must be self-contained and runnable without GPU.\n\n"
+                        f"- The experiment must be self-contained and runnable without GPU.\n"
+                        f"- If any file imports a local helper module, return that helper "
+                        f"file too. Do not leave unresolved imports like `from models import ...` "
+                        f"without a generated `models.py`.\n\n"
                         f"{pkg_hint}\n{compute_budget}\n"
-                        f"PLAN:\n{exp_plan}\n\n"
+                        f"PLAN:\n{exp_plan_prompt}\n\n"
                         f"Return multiple files using ```filename:xxx.py format."
                     )
                     regen_resp = _chat_with_prompt(
@@ -1302,7 +2228,64 @@ def _execute_code_generation(
         except Exception as exc:
             logger.debug("Ablation validation skipped: %s", exc)
 
+    # --- Self-contained project gate ---
+    unresolved_local_imports = _find_missing_local_module_imports(files)
+    if unresolved_local_imports:
+        for issue in unresolved_local_imports:
+            logger.warning("Stage 10 self-containment: %s", issue)
+            validation_log.append(f"SELF_CONTAINED: {issue}")
+        if llm is not None:
+            files, unresolved_local_imports = _repair_self_contained_project(
+                llm=llm,
+                prompt_manager=_pm,
+                files=files,
+                issues=unresolved_local_imports,
+                max_tokens=_code_max_tokens,
+                max_repair=max_repair,
+            )
+            for fname, code in files.items():
+                (exp_dir / fname).write_text(code, encoding="utf-8")
+        if unresolved_local_imports:
+            (stage_dir / "validation_report.md").write_text(
+                "# Code Validation Report\n\n"
+                "**Status**: BLOCKED — generated experiment project is not self-contained\n\n"
+                + "\n".join(f"- {issue}" for issue in unresolved_local_imports),
+                encoding="utf-8",
+            )
+            return StageResult(
+                stage=Stage.CODE_GENERATION,
+                status=StageStatus.FAILED,
+                artifacts=("validation_report.md",),
+                evidence_refs=(),
+            )
+
     # --- Write spec ---
+    if getattr(config.experiment, "forbid_synthetic_proxy", False):
+        _proxy_signals = detect_synthetic_proxy_signals(
+            {fname: code for fname, code in files.items() if fname.endswith(".py")}
+        )
+        if should_fail_synthetic_proxy_guard(_proxy_signals):
+            guard_payload = {
+                "status": "failed",
+                "reason": "synthetic_proxy_detected",
+                "signals": _proxy_signals,
+                "timestamp": _utcnow_iso(),
+            }
+            (stage_dir / "real_data_guard.json").write_text(
+                json.dumps(guard_payload, indent=2), encoding="utf-8"
+            )
+            logger.error(
+                "Stage 10: Real-data guard blocked generated experiment code: %s",
+                "; ".join(_proxy_signals),
+            )
+            return StageResult(
+                stage=Stage.CODE_GENERATION,
+                status=StageStatus.FAILED,
+                artifacts=("experiment/", "real_data_guard.json"),
+                evidence_refs=("stage-10/experiment/", "stage-10/real_data_guard.json"),
+                error="Real-data guard blocked synthetic/proxy fallback code generation.",
+            )
+
     file_list = ", ".join(f"`{f}`" for f in sorted(files.keys()))
     main_validation = validate_code(files.get("main.py", ""))
     _align_status = "ALIGNED" if alignment_ok else f"MISALIGNED: {alignment_note}"
@@ -1361,4 +2344,3 @@ Multi-file experiment project with {len(files)} file(s): {file_list}
         artifacts=tuple(artifacts),
         evidence_refs=tuple(f"stage-10/{a}" for a in artifacts),
     )
-
