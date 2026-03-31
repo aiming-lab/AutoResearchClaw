@@ -124,7 +124,70 @@ export OPENAI_API_KEY="sk-..."
 researchclaw run --config config.arc.yaml --topic "Your research idea" --auto-approve
 ```
 
-Output → `artifacts/rc-YYYYMMDD-HHMMSS-<hash>/deliverables/` — compile-ready LaTeX, BibTeX, experiment code, charts.
+Output → `artifacts/rc-YYYYMMDD-HHMMSS-<hash>/deliverables/` - compile-ready LaTeX, BibTeX, experiment code, charts.
+
+## Repair Workflows
+
+AutoResearchClaw already has in-pipeline rollback and auto-repair loops. This repo now also ships a **manual repair companion CLI** for cases where a human wants to take a completed run and:
+
+- patch exported paper artifacts without rerunning the pipeline
+- or create a repair child run that reuses early stages and reruns from a later authoritative stage such as Stage 9, 10, or 12
+
+These workflows are exposed through a second CLI:
+
+```bash
+autoresearchclaw --help
+```
+
+### Paper Repair
+
+Use paper repair when the research run is complete but the exported paper package still needs human cleanup.
+
+```bash
+autoresearchclaw paper-repair-init \
+  --run-dir artifacts/rc-YYYYMMDD-HHMMSS-<hash> \
+  --output-dir artifacts/paper-repair/my-run-v1
+```
+
+Edit files under `workspace/`, then publish them back into the source run:
+
+```bash
+autoresearchclaw paper-repair-apply \
+  --repair-json artifacts/paper-repair/my-run-v1/paper-repair.json \
+  --note "Clarify wording and fix paper packaging"
+```
+
+If needed, roll back the most recent publish:
+
+```bash
+autoresearchclaw paper-repair-rollback \
+  --repair-json artifacts/paper-repair/my-run-v1/paper-repair.json
+```
+
+### Research Repair
+
+Use research repair when the completed run needs more data, more seeds, stronger protocol coverage, or a return to earlier experiment stages.
+
+```bash
+autoresearchclaw research-repair-init \
+  --run-dir artifacts/rc-YYYYMMDD-HHMMSS-<hash> \
+  --output-dir artifacts/research-repair/my-run-v1 \
+  --config config.arc.yaml \
+  --target-stage EXPERIMENT_DESIGN \
+  --reason "Human review found insufficient experiment coverage." \
+  --feedback "Use real local assets only." \
+  --feedback "Increase experiment coverage before claiming results."
+```
+
+Then prepare a child run:
+
+```bash
+autoresearchclaw research-repair-run \
+  --repair-json artifacts/research-repair/my-run-v1/research-repair.json \
+  --skip-preflight
+```
+
+This creates a child-run config, launch script, repair metadata, and a compact repair brief. Add `--execute` when you are ready to launch the rerun.
 
 <details>
 <summary>📝 Minimum required config</summary>

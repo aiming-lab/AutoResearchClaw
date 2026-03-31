@@ -30,9 +30,10 @@ dev = ["pytest>=7.0", "httpx>=0.24"]
 
 [project.scripts]
 researchclaw = "researchclaw.cli:main"
+autoresearchclaw = "autoresearchclaw.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["researchclaw", "sibyl", "arc"]
+packages = ["researchclaw", "sibyl", "arc", "autoresearchclaw"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "researchclaw/templates/styles" = "researchclaw/templates/styles"
