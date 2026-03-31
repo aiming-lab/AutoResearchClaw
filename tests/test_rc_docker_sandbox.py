@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -51,8 +52,9 @@ def test_build_run_command_network_none(tmp_path: Path):
     assert "--memory=8192m" in cmd
     assert "--shm-size=2048m" in cmd
     assert cmd[-1] == "main.py"
-    # Should contain --user (non-root)
-    assert "--user" in cmd
+    # Should contain --user on POSIX (non-root); skipped on Windows
+    if sys.platform != "win32":
+        assert "--user" in cmd
 
 
 def test_build_run_command_setup_only(tmp_path: Path):
@@ -74,8 +76,9 @@ def test_build_run_command_setup_only(tmp_path: Path):
     # Should NOT have --network none (needs network for setup)
     network_indices = [i for i, x in enumerate(cmd) if x == "--network"]
     assert len(network_indices) == 0
-    # Should have --user (runs as host user so experiment can write results.json)
-    assert "--user" in cmd
+    # Should have --user on POSIX (runs as host user so experiment can write results.json)
+    if sys.platform != "win32":
+        assert "--user" in cmd
 
 
 def test_build_run_command_full_network(tmp_path: Path):
@@ -90,8 +93,9 @@ def test_build_run_command_full_network(tmp_path: Path):
     # No --network none
     network_indices = [i for i, x in enumerate(cmd) if x == "--network"]
     assert len(network_indices) == 0
-    # Should have --user (non-root)
-    assert "--user" in cmd
+    # Should have --user on POSIX (non-root)
+    if sys.platform != "win32":
+        assert "--user" in cmd
 
 
 def test_build_run_command_no_gpu(tmp_path: Path):

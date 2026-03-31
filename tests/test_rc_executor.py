@@ -3355,7 +3355,7 @@ class TestValidateDraftQuality:
         rc_executor._validate_draft_quality(draft, stage_dir=tmp_path)
         assert (tmp_path / "draft_quality.json").exists()
         data = json.loads(
-            (tmp_path / "draft_quality.json").read_text()
+            (tmp_path / "draft_quality.json").read_text(encoding="utf-8")
         )
         assert "section_analysis" in data
         assert "overall_warnings" in data

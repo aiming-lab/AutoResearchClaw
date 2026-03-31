@@ -415,8 +415,8 @@ class TestRendererAgent:
         # Use a script that creates a valid PNG without matplotlib
         # (creates a minimal 1x1 PNG file directly)
         script = textwrap.dedent("""\
-            import struct, zlib
-            output_path = "{output_dir}/fig_test.png"
+            import struct, zlib, os
+            output_path = os.path.join(r"{output_dir}", "fig_test.png")
             # Minimal valid PNG: 1x1 white pixel
             def write_png(path):
                 sig = b'\\x89PNG\\r\\n\\x1a\\n'

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +12,8 @@ from researchclaw.experiment.sandbox import (
     validate_entry_point,
     validate_entry_point_resolved,
 )
+
+import pytest
 
 
 # ── Unit tests: validate_entry_point (syntax) ─────────────────────────
@@ -75,6 +79,10 @@ class TestValidateEntryPointResolved:
         (tmp_path / "main.py").write_text("pass")
         assert validate_entry_point_resolved(tmp_path, "main.py") is None
 
+    @pytest.mark.skipif(
+        sys.platform == "win32" and not os.environ.get("CI"),
+        reason="Creating symlinks on Windows requires admin privileges or Developer Mode",
+    )
     def test_symlink_escape_rejected(self, tmp_path: Path) -> None:
         """A symlink pointing outside staging must be caught."""
         escape_target = tmp_path / "outside" / "secret.py"

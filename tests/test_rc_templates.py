@@ -570,7 +570,7 @@ class TestExportConfig:
         import yaml
         from pathlib import Path
 
-        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text())
+        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text(encoding="utf-8"))
         data["export"] = {
             "target_conference": "icml_2025",
             "authors": "Test Author",
@@ -595,7 +595,7 @@ class TestHitlStageValidation:
         import yaml
         from pathlib import Path
 
-        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text())
+        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text(encoding="utf-8"))
         data.setdefault("security", {})["hitl_required_stages"] = [1, 22, 23]
         result = validate_config(data, check_paths=False)
         assert result.ok, f"Errors: {result.errors}"
@@ -622,7 +622,7 @@ class TestHitlStageValidation:
         import yaml
         from pathlib import Path
 
-        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text())
+        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text(encoding="utf-8"))
         data.setdefault("security", {})["hitl_required_stages"] = [24]
         result = validate_config(data, check_paths=False)
         assert not result.ok
