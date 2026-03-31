@@ -53,6 +53,76 @@ _SANDBOX_SAFE_PACKAGES = {
 
 _METACLAW_SKILLS_DIR = str(Path.home() / ".metaclaw" / "skills")
 
+# User-level custom skills directory (cross-project)
+_USER_SKILLS_DIR = Path.home() / ".researchclaw" / "skills"
+
+# Lazy-initialized skill registry (singleton for the process)
+_skill_registry: object | None = None
+
+
+def _get_skill_registry(config: object | None = None) -> object:
+    """Return the global SkillRegistry, creating it on first call.
+
+    Loads skills from (in priority order):
+    1. Built-in skills shipped with the package
+    2. User-level ``~/.researchclaw/skills/``
+    3. Project-level ``.claude/skills/``
+    4. MetaClaw cross-run skills ``~/.metaclaw/skills/``
+    5. User-configured ``config.yaml → skills.custom_dirs``
+    """
+    global _skill_registry  # noqa: PLW0603
+    if _skill_registry is not None:
+        return _skill_registry
+    try:
+        from researchclaw.skills.registry import SkillRegistry
+
+        custom_dirs: list[str] = []
+
+        # User-level skills
+        if _USER_SKILLS_DIR.is_dir():
+            custom_dirs.append(str(_USER_SKILLS_DIR))
+
+        # Project-level .claude/skills/
+        project_skills = Path(__file__).resolve().parent.parent.parent / ".claude" / "skills"
+        if project_skills.is_dir():
+            custom_dirs.append(str(project_skills))
+
+        # MetaClaw skills
+        metaclaw = Path(_METACLAW_SKILLS_DIR)
+        if metaclaw.is_dir():
+            custom_dirs.append(str(metaclaw))
+
+        # Config-specified custom dirs
+        if config is not None:
+            skills_cfg = getattr(config, "skills", None)
+            if skills_cfg:
+                for d in getattr(skills_cfg, "custom_dirs", ()):
+                    if d:
+                        custom_dirs.append(str(d))
+                for d in getattr(skills_cfg, "external_dirs", ()):
+                    if d:
+                        custom_dirs.append(str(d))
+
+        _skill_registry = SkillRegistry(
+            custom_dirs=custom_dirs,
+            auto_match=True,
+            max_skills_per_stage=getattr(
+                getattr(config, "skills", None), "max_skills_per_stage", 3
+            ) if config else 3,
+            fallback_matching=True,
+        )
+        logger.info(
+            "Skill registry initialized: %d skills from %d sources",
+            _skill_registry.count(),
+            1 + len(custom_dirs),
+        )
+    except Exception:  # noqa: BLE001
+        # Fallback: create empty registry so we never crash
+        from researchclaw.skills.registry import SkillRegistry
+        _skill_registry = SkillRegistry(builtin_dir="/dev/null")
+        logger.debug("Skill registry init failed, using empty registry")
+    return _skill_registry
+
 # --- P1-1: Topic keyword extraction for domain pre-filter ---
 _STOP_WORDS = frozenset(
     {
@@ -717,25 +787,54 @@ def _chat_with_prompt(
     raise last_exc  # type: ignore[misc]  # unreachable but satisfies type checker
 
 
-def _get_evolution_overlay(run_dir: Path | None, stage_name: str) -> str:
-    """Load evolution lessons + MetaClaw skills for prompt injection.
+def _get_evolution_overlay(
+    run_dir: Path | None,
+    stage_name: str,
+    *,
+    config: object | None = None,
+    topic: str = "",
+) -> str:
+    """Load evolution lessons + matched skills for prompt injection.
 
-    Combines intra-run lessons (from current run's evolution dir) with
-    cross-run arc-* skills (from ~/.metaclaw/skills/).
+    Combines three sources:
+    1. Intra-run lessons (from current run's evolution dir)
+    2. Cross-run MetaClaw skills (from ~/.metaclaw/skills/)
+    3. Matched skills from the SkillRegistry (builtin + user + external)
+
+    The SkillRegistry automatically matches skills to the current stage
+    using trigger keywords and stage applicability metadata.
 
     Returns empty string if no relevant lessons/skills exist or on any error.
     """
-    if run_dir is None:
-        return ""
-    try:
-        from researchclaw.evolution import EvolutionStore
+    parts: list[str] = []
 
-        store = EvolutionStore(run_dir / "evolution")
-        return store.build_overlay(
-            stage_name, max_lessons=5, skills_dir=_METACLAW_SKILLS_DIR
-        )
+    # --- Section 1: Evolution lessons + MetaClaw arc-* skills ---
+    if run_dir is not None:
+        try:
+            from researchclaw.evolution import EvolutionStore
+
+            store = EvolutionStore(run_dir / "evolution")
+            evo_overlay = store.build_overlay(
+                stage_name, max_lessons=5, skills_dir=_METACLAW_SKILLS_DIR
+            )
+            if evo_overlay:
+                parts.append(evo_overlay)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # --- Section 2: Matched skills from SkillRegistry ---
+    try:
+        registry = _get_skill_registry(config)
+        context = f"{stage_name} {topic}".strip()
+        matched = registry.match(context, stage_name)
+        if matched:
+            skills_text = registry.export_for_prompt(matched, max_chars=4000)
+            if skills_text:
+                parts.append(f"\n## Matched Domain Skills\n{skills_text}")
     except Exception:  # noqa: BLE001
-        return ""
+        pass
+
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

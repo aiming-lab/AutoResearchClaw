@@ -62,6 +62,7 @@
 ---
 
 ## 🔥 News
+- **[03/30/2026]** **Flexible Skill Loading** — AutoResearchClaw now supports loading open-source and custom skills from any discipline to further enhance your research experience. 20 pre-loaded skills are included as ready-to-use references, covering scientific writing, experiment design, chemistry, biology, and more — including an [A-Evolve](https://github.com/A-EVO-Lab/a-evolve) agentic evolution skill contributed by the community. Load your own via `researchclaw skills install` or drop a `SKILL.md` into `.claude/skills/`. See [Skills Library](#-skills-library).
 - **[03/22/2026]** [v0.3.2](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.2) — **Cross-Platform Support + Major Stability** — AutoResearchClaw now runs on any ACP-compatible agent backend (Claude Code, Codex CLI, Copilot CLI, Gemini CLI, Kimi CLI) and supports messaging platforms (Discord, Telegram, Lark, WeChat) via OpenClaw bridge. New CLI-agent code generation backend delegates Stages 10 & 13 to external CLI agents with budget control and timeout management. Also includes anti-fabrication system (VerifiedRegistry + experiment diagnosis & repair loop), 100+ bug fixes, modular executor refactoring, `--resume` auto-detection, LLM retry hardening, and community-reported fixes. 
 - **[03/18/2026]** [v0.3.1](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.1) — **OpenCode Beast Mode + Community Contributions** — New "Beast Mode" routes complex code generation to [OpenCode](https://github.com/anomalyco/opencode) with automatic complexity scoring and graceful fallback. Added Novita AI provider support, thread-safety hardening, improved LLM output parsing robustness, and 20+ bug fixes from community PRs and internal audit.
 - **[03/17/2026]** [v0.3.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.0) — **MetaClaw Integration** — AutoResearchClaw now supports [MetaClaw](https://github.com/aiming-lab/MetaClaw) cross-run learning: pipeline failures → structured lessons → reusable skills, injected into all 23 stages. **+18.3%** robustness in controlled experiments. Opt-in (`metaclaw_bridge.enabled: true`), fully backward-compatible. See [Integration Guide](#-metaclaw-integration).
@@ -388,6 +389,49 @@ In controlled A/B experiments (same topic, same LLM, same configuration):
 - **Default: OFF.** If `metaclaw_bridge` is absent or `enabled: false`, the pipeline behaves exactly as before.
 - **No new dependencies.** MetaClaw is optional — the core pipeline works without it.
 - **All 1,823 existing tests pass** with the integration code present.
+
+---
+
+## 🧩 Skills Library
+
+AutoResearchClaw now supports loading **open-source and custom skills** to further enhance your research experience. We also ship with **19 pre-loaded built-in skills** (scientific writing, literature search, chemistry, biology, and more) as ready-to-use references, offering a high degree of flexibility out of the box. Disable any skill by adding `enabled: false` to its frontmatter.
+
+**Sample built-in skills:**
+
+| Category | Skill | Description |
+|----------|-------|-------------|
+| **Writing** | `scientific-writing` | IMRAD structure, citation formatting, reporting guidelines |
+| **Domain** | `chemistry-rdkit` | Molecular analysis, SMILES, fingerprints, drug discovery |
+| **Experiment** | `literature-search` | Systematic review, PRISMA methodology |
+
+> See all 19 skills with `researchclaw skills list`.
+
+### Load Your Own Skills
+
+```bash
+# Option 1: Install a skill (persists across projects)
+researchclaw skills install /path/to/my-skill/
+
+# Option 2: Drop a SKILL.md into the project
+mkdir -p .claude/skills/my-custom-skill
+# Then create a SKILL.md with YAML frontmatter (name, description, trigger-keywords, applicable-stages)
+
+# Option 3: Configure shared skill directories in config.arc.yaml
+# skills:
+#   custom_dirs:
+#     - /path/to/team-shared-skills
+```
+
+### Using Skills
+
+Skills are loaded and injected into LLM prompts automatically — no manual activation needed. Use the CLI to inspect:
+
+```bash
+researchclaw skills list               # Show all loaded skills with sources
+researchclaw skills validate ./my-skill # Check SKILL.md format
+```
+
+Browse community skills: [K-Dense-AI/claude-scientific-skills](https://github.com/K-Dense-AI/claude-scientific-skills) (150+ scientific skills across multiple disciplines).
 
 ---
 

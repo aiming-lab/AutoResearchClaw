@@ -36,6 +36,43 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Skills directories to scan (project-level .claude/skills/ and repo root)
+_PROJECT_SKILLS_DIRS: tuple[str, ...] = (
+    ".claude/skills",
+)
+
+
+def _load_project_skills() -> list[str]:
+    """Load skill content from project-level ``.claude/skills/`` directories.
+
+    Scans for SKILL.md files in subdirectories (excluding the main
+    ``researchclaw`` skill which is a CLI usage guide, not a pipeline skill).
+    Only loads skills that contain pipeline-relevant content (indicated by
+    ``metadata`` frontmatter or ``arc-`` / ``a-evolve`` in the name).
+    """
+    skills: list[str] = []
+    # Walk up from this file to find project root (contains .claude/)
+    root = Path(__file__).resolve().parent.parent
+    for rel_dir in _PROJECT_SKILLS_DIRS:
+        skills_dir = root / rel_dir
+        if not skills_dir.is_dir():
+            continue
+        for skill_sub in sorted(skills_dir.iterdir()):
+            if not skill_sub.is_dir():
+                continue
+            # Skip the main researchclaw CLI skill — it's not a pipeline overlay
+            if skill_sub.name == "researchclaw":
+                continue
+            skill_file = skill_sub / "SKILL.md"
+            if skill_file.is_file():
+                try:
+                    text = skill_file.read_text(encoding="utf-8").strip()
+                    if text:
+                        skills.append(text)
+                except OSError:
+                    continue
+    return skills
+
 
 class LessonCategory(str, Enum):
     """Issue classification for extracted lessons."""
@@ -427,6 +464,9 @@ class EvolutionStore:
         2. Cross-run MetaClaw ``arc-*`` skills from *skills_dir* (inter-run
            learning via the MetaClaw skill-generation feedback loop).
 
+        Project-level and user-level skills are handled separately by the
+        SkillRegistry in ``_helpers._get_skill_registry()``.
+
         Returns empty string if no relevant lessons or skills exist.
         """
         parts: list[str] = []
@@ -447,12 +487,12 @@ class EvolutionStore:
             )
 
         # --- Section 2: cross-run MetaClaw arc-* skills ---
+        arc_skills: list[str] = []
         if skills_dir:
             from pathlib import Path as _Path
 
             sd = _Path(skills_dir).expanduser()
             if sd.is_dir():
-                arc_skills: list[str] = []
                 for skill_dir in sorted(sd.iterdir()):
                     if skill_dir.is_dir() and skill_dir.name.startswith("arc-"):
                         skill_file = skill_dir / "SKILL.md"
@@ -463,13 +503,14 @@ class EvolutionStore:
                                     arc_skills.append(text)
                             except OSError:
                                 continue
-                if arc_skills:
-                    parts.append("\n## Learned Skills from Prior Runs")
-                    for skill_text in arc_skills[:5]:
-                        parts.append(skill_text)
-                    parts.append(
-                        "\nApply these skills proactively to improve quality."
-                    )
+
+        if arc_skills:
+            parts.append("\n## Learned Skills from Prior Runs")
+            for skill_text in arc_skills[:5]:
+                parts.append(skill_text)
+            parts.append(
+                "\nApply these skills proactively to improve quality."
+            )
 
         return "\n".join(parts)
 

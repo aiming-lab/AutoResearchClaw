@@ -490,12 +490,12 @@ class TestFormatSkills:
 class TestSkillRegistry:
     def test_registry_loads_builtins(self) -> None:
         registry = SkillRegistry()
-        assert registry.count() >= 12  # builtin skills (SKILL.md format)
+        assert registry.count() >= 19  # builtin skills (SKILL.md format)
 
     def test_builtin_skillmd_count(self) -> None:
         """All builtin skills should load from SKILL.md."""
         registry = SkillRegistry()
-        assert registry.count() == 12
+        assert registry.count() == 19
 
     def test_register_custom(self, sample_skill: Skill) -> None:
         registry = SkillRegistry()
@@ -561,7 +561,7 @@ class TestSkillRegistry:
 
     def test_registry_external_dirs(self, external_skillmd_dir: Path) -> None:
         registry = SkillRegistry(external_dirs=[str(external_skillmd_dir)])
-        assert registry.count() == 13  # 12 builtin + 1 external
+        assert registry.count() == 20  # 19 builtin + 1 external
         skill = registry.get("hep-feynrules")
         assert skill is not None
         assert skill.category == "domain"

@@ -35,7 +35,13 @@ class TestValidateEntryPoint:
         assert validate_entry_point("a/b/c/d/main.py") is None
 
     def test_rejects_absolute_path(self) -> None:
-        err = validate_entry_point("/etc/passwd")
+        import sys
+        # Use a platform-appropriate absolute path
+        if sys.platform == "win32":
+            abs_path = "C:\\Windows\\System32\\cmd.exe"
+        else:
+            abs_path = "/etc/passwd"
+        err = validate_entry_point(abs_path)
         assert err is not None
         assert "relative" in err.lower() or "absolute" in err.lower()
 
@@ -128,8 +134,10 @@ class TestExperimentSandboxEntryPointValidation:
 
         sandbox = self._make_sandbox(tmp_path)
 
+        import sys
+        abs_entry = "C:\\Windows\\cmd.exe" if sys.platform == "win32" else "/etc/passwd"
         with patch("subprocess.run") as mock_run:
-            result = sandbox.run_project(project, entry_point="/etc/passwd")
+            result = sandbox.run_project(project, entry_point=abs_entry)
 
         assert result.returncode == -1
         assert "relative" in result.stderr.lower() or "absolute" in result.stderr.lower()

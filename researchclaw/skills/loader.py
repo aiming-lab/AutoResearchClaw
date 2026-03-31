@@ -58,6 +58,11 @@ def load_skill_from_skillmd(path: Path) -> Skill | None:
         logger.warning("Frontmatter is not a dict in %s", path)
         return None
 
+    # Support `enabled: false` to let users disable a recommended skill
+    if header.get("enabled") is False or str(header.get("enabled", "")).lower() == "false":
+        logger.debug("Skill disabled via frontmatter: %s", path)
+        return None
+
     name = str(header.get("name", ""))
     if not name:
         logger.warning("SKILL.md missing 'name' field: %s", path)

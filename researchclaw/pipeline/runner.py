@@ -646,6 +646,34 @@ def execute_pipeline(
     except Exception:  # noqa: BLE001
         logger.warning("MetaClaw post-pipeline hook failed (non-blocking)")
 
+    # --- A-Evolve: structured diagnosis + gated skill generation ---
+    _has_failures = any(
+        "failed" in str(getattr(r, "status", "")).lower() for r in results
+    )
+    if lessons or _has_failures:
+        try:
+            from researchclaw.evolution_aevolve import run_aevolve_cycle
+            from researchclaw.llm.client import LLMClient
+
+            _aevolve_llm = LLMClient.from_rc_config(config)
+            _skills_dir = Path(
+                getattr(
+                    getattr(config, "metaclaw_bridge", None),
+                    "skills_dir",
+                    "~/.metaclaw/skills",
+                )
+            ).expanduser()
+            _aevolve_skills = run_aevolve_cycle(
+                lessons, results, _aevolve_llm, _skills_dir, run_dir,
+            )
+            if _aevolve_skills:
+                logger.info(
+                    "A-Evolve: generated %d skills: %s",
+                    len(_aevolve_skills), _aevolve_skills,
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("A-Evolve cycle skipped (non-blocking)", exc_info=True)
+
     # --- Package deliverables into a single folder ---
     try:
         deliverables_dir = _package_deliverables(run_dir, run_id, config)

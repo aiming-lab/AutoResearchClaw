@@ -800,6 +800,112 @@ def cmd_calendar(args: argparse.Namespace) -> int:
     print("Usage: researchclaw calendar --upcoming|--plan <venue>")
     return 0
 
+
+def cmd_skills(args: argparse.Namespace) -> int:
+    """List, validate, or install skills."""
+    from researchclaw.skills.loader import load_skill_from_skillmd, load_skills_from_directory
+    from researchclaw.skills.registry import SkillRegistry
+
+    action = args.skills_action or "list"
+    user_dir = Path.home() / ".researchclaw" / "skills"
+
+    if action == "list":
+        # Build full registry to show all available skills
+        custom_dirs: list[str] = []
+        if user_dir.is_dir():
+            custom_dirs.append(str(user_dir))
+        project_skills = Path.cwd() / ".claude" / "skills"
+        if project_skills.is_dir():
+            custom_dirs.append(str(project_skills))
+
+        registry = SkillRegistry(custom_dirs=custom_dirs)
+        skills = registry.list_all()
+        if not skills:
+            print("No skills loaded.")
+            return 0
+
+        # Group by category
+        by_cat: dict[str, list] = {}
+        for s in skills:
+            by_cat.setdefault(s.category, []).append(s)
+        for cat in sorted(by_cat):
+            print(f"\n[{cat}]")
+            for s in sorted(by_cat[cat], key=lambda x: x.name):
+                stages = ",".join(str(x) for x in s.applicable_stages) if s.applicable_stages else "all"
+                src = "builtin"
+                if s.source_dir:
+                    sd = str(s.source_dir)
+                    if ".researchclaw" in sd:
+                        src = "user"
+                    elif ".claude" in sd:
+                        src = "project"
+                    elif ".metaclaw" in sd:
+                        src = "metaclaw"
+                print(f"  {s.name:<35} stages={stages:<12} ({src})")
+
+        print(f"\nTotal: {len(skills)} skills")
+        print(f"\nSkill directories:")
+        print(f"  builtin:  researchclaw/skills/builtin/")
+        print(f"  user:     {user_dir}/")
+        print(f"  project:  .claude/skills/")
+        return 0
+
+    elif action == "install":
+        # Install a skill from a directory or URL
+        source = getattr(args, "source", None)
+        if not source:
+            print("Usage: researchclaw skills install <path-to-skill-dir>")
+            return 1
+        source_path = Path(source).expanduser().resolve()
+        skill_md = source_path / "SKILL.md"
+        if not skill_md.exists():
+            # Maybe the path IS the SKILL.md
+            if source_path.name == "SKILL.md" and source_path.exists():
+                source_path = source_path.parent
+                skill_md = source_path / "SKILL.md"
+            else:
+                print(f"Error: no SKILL.md found in {source_path}")
+                return 1
+
+        skill = load_skill_from_skillmd(skill_md)
+        if not skill:
+            print(f"Error: failed to parse {skill_md}")
+            return 1
+
+        # Copy to user skills directory
+        target = user_dir / skill.name
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_path, target, dirs_exist_ok=True)
+        print(f"Installed skill '{skill.name}' -> {target}")
+        return 0
+
+    elif action == "validate":
+        source = getattr(args, "source", None)
+        if not source:
+            print("Usage: researchclaw skills validate <path-to-SKILL.md>")
+            return 1
+        path = Path(source).expanduser().resolve()
+        if path.is_dir():
+            path = path / "SKILL.md"
+        if not path.exists():
+            print(f"Error: {path} not found")
+            return 1
+        skill = load_skill_from_skillmd(path)
+        if not skill:
+            print(f"FAIL: Could not parse {path}")
+            return 1
+        print(f"OK: {skill.name}")
+        print(f"  description: {skill.description[:80]}")
+        print(f"  category:    {skill.category}")
+        print(f"  stages:      {skill.applicable_stages or 'all'}")
+        print(f"  keywords:    {skill.trigger_keywords[:5]}")
+        print(f"  body:        {len(skill.body)} chars")
+        return 0
+
+    print("Usage: researchclaw skills [list|install|validate]")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="researchclaw",
@@ -918,6 +1024,14 @@ def main(argv: list[str] | None = None) -> int:
     _ = trends_p.add_argument("--config", "-c", default="config.yaml", help="Config file path")
     _ = trends_p.add_argument("--domains", nargs="+", help="Override domains")
 
+    # Skills management
+    sk_p = sub.add_parser("skills", help="List, install, or validate skills")
+    _ = sk_p.add_argument("skills_action", nargs="?", default="list",
+                          choices=["list", "install", "validate"],
+                          help="Action to perform (default: list)")
+    _ = sk_p.add_argument("source", nargs="?", default=None,
+                          help="Path for install/validate")
+
     # D4: Conference deadline calendar
     cal_p = sub.add_parser("calendar", help="Conference deadline calendar")
     _ = cal_p.add_argument("--upcoming", action="store_true", help="Show upcoming deadlines")
@@ -956,6 +1070,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_trends(args)
     elif command == "calendar":
         return cmd_calendar(args)
+    elif command == "skills":
+        return cmd_skills(args)
     else:
         parser.print_help()
         return 0
