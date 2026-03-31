@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,22 @@ def _generate_run_id(topic: str) -> str:
     return f"rc-{ts}-{topic_hash}"
 
 
+def _find_latest_run(artifacts_dir: str = "artifacts") -> Path | None:
+    """Find the most recent run directory that contains a checkpoint."""
+    base = Path(artifacts_dir)
+    if not base.is_dir():
+        return None
+    candidates = sorted(
+        (d for d in base.iterdir() if d.is_dir() and d.name.startswith("rc-")),
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    for d in candidates:
+        if (d / "checkpoint.json").exists():
+            return d
+    return None
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     resolved = _resolve_config_or_exit(args)
     if resolved is None:
@@ -82,28 +99,54 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"FAILED — {msg}", file=sys.stderr)
             return 1
 
-    run_id = _generate_run_id(config.research.topic)
-    run_dir = Path(output or f"artifacts/{run_id}")
-    run_dir.mkdir(parents=True, exist_ok=True)
+    from researchclaw.pipeline.runner import execute_pipeline, read_checkpoint
+    from researchclaw.pipeline.stages import Stage
+
+    # --- Resolve run directory and start stage ---
+    from_stage = Stage.TOPIC_INIT
+
+    if resume:
+        # Resolve existing run directory
+        if output:
+            run_dir = Path(output)
+        else:
+            run_dir = _find_latest_run()  # type: ignore[assignment]
+            if run_dir is None:
+                print(
+                    "No resumable run found in artifacts/. "
+                    "Use --output to specify a run directory.",
+                    file=sys.stderr,
+                )
+                return 1
+
+        if not run_dir.exists():
+            print(f"Run directory not found: {run_dir}", file=sys.stderr)
+            return 1
+
+        resumed = read_checkpoint(run_dir)
+        if resumed is None:
+            print(f"No checkpoint found in {run_dir}", file=sys.stderr)
+            return 1
+
+        from_stage = resumed
+        # Read run_id from checkpoint instead of generating a new one
+        cp_data = json.loads(
+            (run_dir / "checkpoint.json").read_text(encoding="utf-8")
+        )
+        run_id = cp_data.get("run_id", run_dir.name)
+        print(f"Resuming from checkpoint: Stage {int(from_stage)}: {from_stage.name}")
+    else:
+        if from_stage_name:
+            from_stage = Stage[from_stage_name.upper()]
+        run_id = _generate_run_id(config.research.topic)
+        run_dir = Path(output or f"artifacts/{run_id}")
+        run_dir.mkdir(parents=True, exist_ok=True)
 
     if config.knowledge_base.root:
         kb_root_path = Path(config.knowledge_base.root)
         kb_root_path.mkdir(parents=True, exist_ok=True)
 
     adapters = AdapterBundle()
-
-    from researchclaw.pipeline.runner import execute_pipeline, read_checkpoint
-    from researchclaw.pipeline.stages import Stage
-
-    # --- Determine start stage ---
-    from_stage = Stage.TOPIC_INIT
-    if from_stage_name:
-        from_stage = Stage[from_stage_name.upper()]
-    elif resume:
-        resumed = read_checkpoint(run_dir)
-        if resumed is not None:
-            from_stage = resumed
-            print(f"Resuming from checkpoint: Stage {int(from_stage)}: {from_stage.name}")
 
     print(f"ResearchClaw v0.1.0 — Starting pipeline")
     print(f"  Run ID:  {run_id}")

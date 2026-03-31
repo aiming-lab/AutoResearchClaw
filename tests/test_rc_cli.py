@@ -299,3 +299,70 @@ def test_main_dispatches_init(monkeypatch: pytest.MonkeyPatch) -> None:
     code = rc_cli.main(["init", "--force"])
     assert code == 0
     assert captured["args"].force is True
+
+
+# --- _find_latest_run tests ---
+
+
+def _make_checkpoint(run_dir: Path, stage: int = 4, run_id: str = "test") -> None:
+    """Write a minimal checkpoint.json."""
+    import json
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "checkpoint.json").write_text(
+        json.dumps({"last_completed_stage": stage, "run_id": run_id}),
+        encoding="utf-8",
+    )
+
+
+def test_find_latest_run_returns_newest(tmp_path: Path) -> None:
+    import time
+
+    old_run = tmp_path / "rc-20260101-000000-aaaaaa"
+    _make_checkpoint(old_run, stage=3, run_id="old")
+    time.sleep(0.05)  # ensure different mtime
+    new_run = tmp_path / "rc-20260102-000000-bbbbbb"
+    _make_checkpoint(new_run, stage=6, run_id="new")
+
+    result = rc_cli._find_latest_run(str(tmp_path))
+    assert result == new_run
+
+
+def test_find_latest_run_skips_dirs_without_checkpoint(tmp_path: Path) -> None:
+    no_cp = tmp_path / "rc-20260103-000000-cccccc"
+    no_cp.mkdir()
+    with_cp = tmp_path / "rc-20260101-000000-aaaaaa"
+    _make_checkpoint(with_cp, stage=3, run_id="ok")
+
+    result = rc_cli._find_latest_run(str(tmp_path))
+    assert result == with_cp
+
+
+def test_find_latest_run_no_runs_returns_none(tmp_path: Path) -> None:
+    assert rc_cli._find_latest_run(str(tmp_path)) is None
+
+
+def test_find_latest_run_missing_dir_returns_none() -> None:
+    assert rc_cli._find_latest_run("/nonexistent/path") is None
+
+
+def test_cmd_run_resume_no_run_returns_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_valid_config(config_path)
+    # Point _find_latest_run at an empty directory
+    monkeypatch.setattr(rc_cli, "_find_latest_run", lambda artifacts_dir="artifacts": None)
+    args = argparse.Namespace(
+        config=str(config_path),
+        topic=None,
+        output=None,
+        from_stage=None,
+        auto_approve=False,
+        skip_preflight=True,
+        resume=True,
+        skip_noncritical_stage=False,
+    )
+    code = rc_cli.cmd_run(args)
+    assert code == 1
+    assert "No resumable run found" in capsys.readouterr().err
