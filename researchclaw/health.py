@@ -177,7 +177,10 @@ def check_llm_connectivity(base_url: str, api_key: str = "") -> CheckResult:
     req = urllib.request.Request(url, headers=headers, method="HEAD")
 
     try:
-        with urllib.request.urlopen(req, timeout=5):
+        with urllib.request.urlopen(
+            urllib.request.Request(url, headers=headers),
+            timeout=5,
+        ):
             return CheckResult(
                 name="llm_connectivity",
                 status="pass",
@@ -595,7 +598,7 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
     if provider == "acp":
         checks.append(check_acp_agent(acp_agent_command))
     else:
-        checks.append(check_llm_connectivity(base_url))
+        checks.append(check_llm_connectivity(base_url, api_key))
         checks.append(check_api_key_valid(base_url, api_key))
         checks.append(check_model_chain(base_url, api_key, model, fallback_models))
     checks.append(check_sandbox_python(sandbox_python_path))
