@@ -9,7 +9,7 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Protocol
 
 from researchclaw.config import SandboxConfig
@@ -27,7 +27,9 @@ def validate_entry_point(entry_point: str) -> str | None:
     if not entry_point or not entry_point.strip():
         return "Entry point is empty"
     ep = Path(entry_point)
-    if ep.is_absolute():
+    posix_ep = PurePosixPath(entry_point)
+    windows_ep = PureWindowsPath(entry_point)
+    if ep.is_absolute() or posix_ep.is_absolute() or windows_ep.is_absolute():
         return f"Entry point must be a relative path, got: {entry_point}"
     if ".." in ep.parts:
         return f"Entry point must not contain '..': {entry_point}"
