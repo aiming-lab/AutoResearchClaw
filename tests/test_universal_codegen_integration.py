@@ -364,7 +364,7 @@ class TestDockerProfileMapping:
         if not profiles_path.exists():
             pytest.skip("docker_profiles.yaml not found")
 
-        with profiles_path.open() as f:
+        with profiles_path.open(encoding="utf-8") as f:
             docker_config = yaml.safe_load(f)
 
         domain_map = docker_config.get("domain_map", {})
@@ -384,7 +384,7 @@ class TestDockerProfileMapping:
         if not profiles_path.exists():
             pytest.skip("docker_profiles.yaml not found")
 
-        with profiles_path.open() as f:
+        with profiles_path.open(encoding="utf-8") as f:
             docker_config = yaml.safe_load(f)
 
         domain_map = docker_config.get("domain_map", {})

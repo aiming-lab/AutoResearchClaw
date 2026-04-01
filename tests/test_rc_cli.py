@@ -253,7 +253,7 @@ def test_resolve_config_returns_none_when_missing(
 def test_resolve_config_explicit_path_no_search() -> None:
     result = resolve_config_path("/some/explicit/path.yaml")
     assert result is not None
-    assert str(result) == "/some/explicit/path.yaml"
+    assert result == Path("/some/explicit/path.yaml")
 
 
 # --- cmd_init tests ---
@@ -289,7 +289,7 @@ def test_cmd_init_creates_config(
     assert code == 0
     created = tmp_path / "config.arc.yaml"
     assert created.exists()
-    content = created.read_text()
+    content = created.read_text(encoding="utf-8")
     assert 'provider: "openai"' in content
     assert "Created config.arc.yaml" in capsys.readouterr().out
 
@@ -317,7 +317,7 @@ def test_cmd_init_force_overwrites(
     args = argparse.Namespace(force=True)
     code = rc_cli.cmd_init(args)
     assert code == 0
-    assert (tmp_path / "config.arc.yaml").read_text() != "old\n"
+    assert (tmp_path / "config.arc.yaml").read_text(encoding="utf-8") != "old\n"
 
 
 def test_cmd_run_missing_config_shows_init_hint(

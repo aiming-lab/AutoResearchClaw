@@ -117,7 +117,7 @@ class TestSentinelScript:
 
     def test_sentinel_script_has_shebang(self) -> None:
         script = Path(__file__).parent.parent / "sentinel.sh"
-        first_line = script.read_text().splitlines()[0]
+        first_line = script.read_text(encoding="utf-8").splitlines()[0]
         assert first_line.startswith("#!/")
 
     def test_sentinel_prints_usage_on_no_args(self) -> None:
