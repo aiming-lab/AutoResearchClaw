@@ -116,6 +116,8 @@ class ExperimentGitManager:
                 cwd=self.repo_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=False,
             )
         except Exception as exc:  # noqa: BLE001

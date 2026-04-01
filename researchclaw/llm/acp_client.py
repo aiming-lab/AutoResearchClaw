@@ -137,7 +137,8 @@ class ACPClient:
                 [acpx, "--cwd", self._abs_cwd(),
                  self.config.agent, "sessions", "close",
                  self.config.session_name],
-                capture_output=True, timeout=15,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=15,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -177,7 +178,8 @@ class ACPClient:
             [acpx, "--cwd", self._abs_cwd(),
              self.config.agent, "sessions", "ensure",
              "--name", self.config.session_name],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30,
         )
         if result.returncode != 0:
             # Fall back to 'new'
@@ -185,7 +187,8 @@ class ACPClient:
                 [acpx, "--cwd", self._abs_cwd(),
                  self.config.agent, "sessions", "new",
                  "--name", self.config.session_name],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30,
             )
             if result.returncode != 0:
                 raise RuntimeError(
@@ -205,8 +208,8 @@ class ACPClient:
             [acpx, "--approve-all", "--cwd", self._abs_cwd(),
              self.config.agent, "-s", self.config.session_name,
              prompt],
-            capture_output=True, text=True,
-            timeout=self.config.timeout_sec,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=self.config.timeout_sec,
         )
 
         if result.returncode != 0:

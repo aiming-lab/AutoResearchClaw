@@ -81,6 +81,8 @@ def compile_latex(
                 cwd=work_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
@@ -106,6 +108,8 @@ def compile_latex(
                 cwd=work_dir,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
             logger.info("IMP-18: LaTeX compiled successfully on attempt %d", attempt)
@@ -236,6 +240,8 @@ def _run_bibtex(work_dir: Path, stem: str, timeout: int = 60) -> bool:
             cwd=work_dir,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         return proc.returncode == 0

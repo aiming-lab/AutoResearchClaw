@@ -160,7 +160,7 @@ def _is_timeout(exc: BaseException) -> bool:
     return isinstance(reason, (TimeoutError, socket.timeout))
 
 
-def check_llm_connectivity(base_url: str) -> CheckResult:
+def check_llm_connectivity(base_url: str, api_key: str = "") -> CheckResult:
     if not base_url.strip():
         return CheckResult(
             name="llm_connectivity",
@@ -170,7 +170,10 @@ def check_llm_connectivity(base_url: str) -> CheckResult:
         )
 
     url = _models_url(base_url)
-    req = urllib.request.Request(url, method="HEAD")
+    headers: dict[str, str] = {}
+    if api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, headers=headers, method="HEAD")
 
     try:
         with urllib.request.urlopen(req, timeout=5):
@@ -182,7 +185,8 @@ def check_llm_connectivity(base_url: str) -> CheckResult:
     except urllib.error.HTTPError as exc:
         if exc.code == 405:
             try:
-                with urllib.request.urlopen(url, timeout=5):
+                get_req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(get_req, timeout=5):
                     return CheckResult(
                         name="llm_connectivity",
                         status="pass",
@@ -567,7 +571,7 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
     except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
         logger.debug("Could not fully load config for doctor checks: %s", exc)
 
-    checks.append(check_llm_connectivity(base_url))
+    checks.append(check_llm_connectivity(base_url, api_key))
     checks.append(check_api_key_valid(base_url, api_key))
     checks.append(check_model_chain(base_url, api_key, model, fallback_models))
     checks.append(check_sandbox_python(sandbox_python_path))

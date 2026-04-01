@@ -102,14 +102,16 @@ def _ensure_sandbox_deps(code: str, python_path: str) -> list[str]:
         try:
             r = _sp.run(
                 [str(py_path), "-c", f"import {pkg}"],
-                capture_output=True, timeout=10,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=10,
             )
             if r.returncode != 0:
                 pip_name = "scikit-learn" if pkg == "sklearn" else pkg
                 logger.info("Sandbox: installing missing dependency '%s'", pip_name)
                 _sp.run(
                     [str(py_path), "-m", "pip", "install", pip_name, "--quiet"],
-                    capture_output=True, timeout=120,
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=120,
                 )
                 installed.append(pip_name)
         except Exception as exc:
@@ -170,6 +172,100 @@ def _safe_json_loads(text: str, default: Any) -> Any:
         return json.loads(text)
     except Exception:  # noqa: BLE001
         return default
+
+
+def _topic_is_literature_first(config: RCConfig) -> bool:
+    """Return True when the run should succeed without experiment metrics.
+
+    This is the right default for survey/review-style topics and for the
+    explicit ``docs-first`` project mode.
+    """
+    if config.project.mode == "docs-first":
+        return True
+    topic = config.research.topic.lower()
+    markers = (
+        "survey",
+        "review",
+        "literature review",
+        "systematic review",
+        "critical review",
+        "critical survey",
+        "mapping study",
+        "benchmarking",
+        "evaluation gap",
+        "meta-analysis",
+    )
+    return any(marker in topic for marker in markers)
+
+
+def _extract_search_terms(text: str) -> list[str]:
+    """Extract de-duplicated content terms for search query generation."""
+    stop = {
+        "a", "an", "the", "of", "for", "in", "on", "and", "or", "with",
+        "to", "by", "from", "its", "is", "are", "was", "be", "as", "at",
+        "via", "using", "based", "study", "analysis", "empirical",
+        "towards", "toward", "into", "exploring", "comparison", "tasks",
+        "effectiveness", "investigation", "comprehensive", "novel",
+        "challenge", "gaps", "gap", "critical", "survey", "review",
+    }
+    seen: set[str] = set()
+    terms: list[str] = []
+    for word in re.split(r"[^a-zA-Z0-9]+", text):
+        lowered = word.lower().strip()
+        if len(lowered) < 2 or lowered in stop or lowered in seen:
+            continue
+        seen.add(lowered)
+        terms.append(word)
+    return terms
+
+
+def _build_default_search_queries(topic: str, problem_tree: str = "") -> list[str]:
+    """Generate concept-style search queries instead of title copies."""
+    topic_terms = _extract_search_terms(topic)
+    tree_terms = _extract_search_terms(problem_tree)
+    core = topic_terms[:4]
+    secondary = [t for t in topic_terms[4:8] if t.lower() not in {c.lower() for c in core}]
+    context = [t for t in tree_terms[:4] if t.lower() not in {x.lower() for x in core + secondary}]
+
+    base_chunks: list[str] = []
+    if core:
+        base_chunks.append(" ".join(core[:4]))
+    if core and secondary:
+        base_chunks.append(" ".join((core[:2] + secondary[:2])[:4]))
+    if secondary:
+        base_chunks.append(" ".join(secondary[:4]))
+    if core and context:
+        base_chunks.append(" ".join((core[:2] + context[:2])[:4]))
+
+    if not base_chunks:
+        base_chunks = [" ".join(topic.split()[:4]).strip() or topic]
+
+    suffixes = (
+        "",
+        "survey",
+        "benchmark",
+        "evaluation",
+        "dataset",
+        "baseline",
+        "review",
+        "systematic review",
+    )
+
+    queries: list[str] = []
+    seen: set[str] = set()
+    for chunk in base_chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        for suffix in suffixes:
+            q = f"{chunk} {suffix}".strip()
+            q_norm = q.lower()
+            if q_norm not in seen:
+                seen.add(q_norm)
+                queries.append(q)
+            if len(queries) >= 8:
+                return queries
+    return queries
 
 
 def _chat_with_prompt(
@@ -1217,13 +1313,14 @@ def _execute_search_strategy(
             "search_strategies": [
                 {
                     "name": "keyword_core",
-                    "queries": [topic, f"{topic} benchmark", f"{topic} survey"],
+                    "queries": _build_default_search_queries(topic, problem_tree)[:4],
                     "sources": ["arxiv", "semantic_scholar", "openreview"],
                     "max_results_per_query": 60,
                 },
                 {
                     "name": "backward_forward_citation",
-                    "queries": [f"{topic} seminal", f"{topic} state of the art"],
+                    "queries": _build_default_search_queries(topic, problem_tree)[4:8]
+                    or [f"{' '.join(_extract_search_terms(topic)[:4])} seminal".strip()],
                     "sources": ["semantic_scholar", "google_scholar"],
                     "depth": 1,
                 },
@@ -1301,21 +1398,6 @@ def _execute_search_strategy(
     # --- Sanitize queries: shorten overly long queries ---
     # LLMs often produce the full topic title as a query, which is too long for
     # arXiv and Semantic Scholar (they work best with 3-8 keyword queries).
-    _stop = {
-        "a", "an", "the", "of", "for", "in", "on", "and", "or", "with",
-        "to", "by", "from", "its", "is", "are", "was", "be", "as", "at",
-        "via", "using", "based", "study", "analysis", "empirical",
-        "towards", "toward", "into", "exploring", "comparison", "tasks",
-        "effectiveness", "investigation", "comprehensive", "novel",
-    }
-
-    def _extract_keywords(text: str) -> list[str]:
-        """Extract meaningful keywords from text, removing stop words."""
-        return [
-            w for w in re.split(r"[^a-zA-Z0-9]+", text)
-            if w.lower() not in _stop and len(w) > 1
-        ]
-
     _MAX_QUERY_LEN = 60  # characters — beyond this, shorten to keywords
     _SEARCH_SUFFIXES = ["benchmark", "survey", "seminal", "state of the art"]
 
@@ -1331,7 +1413,7 @@ def _execute_search_strategy(
                 q_core = q_stripped[: -len(sfx)].strip()
                 break
         # Extract keywords from the core part
-        kws = _extract_keywords(q_core)
+        kws = _extract_search_terms(q_core)
         shortened = " ".join(kws[:max_kw])
         if suffix:
             shortened = f"{shortened} {suffix}"
@@ -1349,18 +1431,10 @@ def _execute_search_strategy(
         queries_list = sanitized
 
     if not queries_list:
-        # Build diverse keyword queries from the topic
-        _words = _extract_keywords(topic)
-        kw_primary = " ".join(_words[:6])
-        kw_short = " ".join(_words[:4])
-        queries_list = [
-            kw_primary,
-            f"{kw_short} benchmark",
-            f"{kw_short} survey",
-        ]
+        queries_list = _build_default_search_queries(topic, problem_tree)
 
     # Ensure minimum query diversity — if dedup leaves too few, add variants
-    _all_kw = _extract_keywords(topic)
+    _all_kw = _extract_search_terms(topic)
     _seen_q: set[str] = set()
     unique_queries: list[str] = []
     for q in queries_list:
@@ -1412,9 +1486,7 @@ def _expand_search_queries(queries: list[str], topic: str) -> list[str]:
     expanded = list(queries)  # keep originals
     seen = {q.lower().strip() for q in queries}
 
-    # Extract key phrases from topic by splitting on common delimiters
-    # e.g. "Comparing A, B, and C on X with Y" → ["A", "B", "C", "X", "Y"]
-    topic_words = topic.split()
+    topic_words = _extract_search_terms(topic) or topic.split()
 
     # Generate shorter, broader queries from the topic
     if len(topic_words) > 5:
@@ -1621,13 +1693,20 @@ def _execute_literature_screen(
     )
     filtered_rows: list[dict[str, Any]] = []
     dropped_count = 0
+    _MAX_ABSTRACT_LEN = 800  # truncate long abstracts to reduce token usage
     for raw_line in candidates_text.strip().splitlines():
         row = _safe_json_loads(raw_line, {})
         if not isinstance(row, dict):
             continue
+        # Strip authors list (can be very large) to reduce context size
+        row.pop("authors", None)
+        # Truncate overly long abstracts
+        abstract = str(row.get("abstract", ""))
+        if len(abstract) > _MAX_ABSTRACT_LEN:
+            row["abstract"] = abstract[:_MAX_ABSTRACT_LEN] + "..."
         title = str(row.get("title", "")).lower()
-        abstract = str(row.get("abstract", "")).lower()
-        text_blob = f"{title} {abstract}"
+        abstract_check = str(row.get("abstract", "")).lower()
+        text_blob = f"{title} {abstract_check}"
         overlap = sum(1 for kw in topic_keywords if kw in text_blob)
         # Require at least 2 keyword hits to survive pre-filter.
         # A single hit (e.g. "network" in an unrelated field) is too permissive.
@@ -1643,6 +1722,15 @@ def _execute_literature_screen(
     candidates_text = "\n".join(
         json.dumps(r, ensure_ascii=False) for r in filtered_rows
     )
+    # Cap total candidates text size to avoid exceeding LLM token limits
+    _MAX_CANDIDATES_CHARS = 30_000
+    if len(candidates_text) > _MAX_CANDIDATES_CHARS:
+        candidates_text = candidates_text[:_MAX_CANDIDATES_CHARS] + "\n... [truncated]"
+        logger.info(
+            "Truncated candidates_text from %d to %d chars to fit LLM context",
+            len("\n".join(json.dumps(r, ensure_ascii=False) for r in filtered_rows)),
+            _MAX_CANDIDATES_CHARS,
+        )
     logger.info(
         "Domain pre-filter: kept %d, dropped %d (keywords: %s)",
         len(filtered_rows),
@@ -4996,6 +5084,7 @@ def _execute_paper_draft(
         exp_summary_text = _read_prior_artifact(run_dir, "experiment_summary.json")
     exp_metrics_instruction = ""
     has_real_metrics = False
+    literature_only_mode = _topic_is_literature_first(config)
     if exp_summary_text:
         exp_summary = _safe_json_loads(exp_summary_text, {})
         if isinstance(exp_summary, dict) and exp_summary.get("metrics_summary"):
@@ -5201,7 +5290,7 @@ def _execute_paper_draft(
         if not all_simulated:
             break
 
-    if all_simulated:
+    if all_simulated and not literature_only_mode:
         logger.error(
             "BLOCKED: All experiment data is simulated (mode='simulated'). "
             "Cannot write a paper based on formulaic fake data. "
@@ -5224,7 +5313,7 @@ def _execute_paper_draft(
         )
 
     # R4-2: HARD BLOCK — refuse to write paper with no real data
-    if not has_real_metrics:
+    if not has_real_metrics and not literature_only_mode:
         logger.error(
             "BLOCKED: Cannot write paper — experiment produced NO metrics. "
             "The pipeline will not fabricate results."
@@ -5241,6 +5330,19 @@ def _execute_paper_draft(
             status=StageStatus.FAILED,
             artifacts=("paper_draft.md",),
             evidence_refs=(),
+        )
+
+    if literature_only_mode:
+        exp_metrics_instruction += (
+            "\n\n## LITERATURE-FIRST MODE\n"
+            "- This run is a literature-first research synthesis, not an empirical benchmark paper.\n"
+            "- Do NOT invent experiment sections, metric tables, or claimed quantitative wins.\n"
+            "- If experimental artifacts are weak or missing, pivot the paper toward: "
+            "problem framing, literature synthesis, evaluation critique, taxonomy, and future work.\n"
+            "- The contribution should come from synthesis, comparison, methodological critique, "
+            "dataset/metric analysis, or identification of open problems.\n"
+            "- You may include a 'Proposed Evaluation Framework' or 'Research Agenda' section, "
+            "but clearly label it as proposed future work rather than completed experimentation.\n"
         )
 
     # R11-5: Experiment quality minimum threshold before paper writing
@@ -6703,12 +6805,7 @@ def execute_stage(
 
     llm = None
     try:
-        if config.llm.provider == "acp":
-            llm = create_llm_client(config)
-        else:
-            candidate = LLMClient.from_rc_config(config)
-            if candidate.config.base_url and candidate.config.api_key:
-                llm = candidate
+        llm = create_llm_client(config)
     except Exception:  # noqa: BLE001
         llm = None
 
