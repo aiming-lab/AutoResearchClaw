@@ -41,15 +41,37 @@ class HardwareProfile:
         return asdict(self)
 
 
-def detect_hardware() -> HardwareProfile:
-    """Detect local GPU hardware and return a HardwareProfile.
+def detect_hardware(ssh_config: object | None = None) -> HardwareProfile:
+    """Detect GPU hardware and return a HardwareProfile.
+
+    When *ssh_config* is provided (an ``SshRemoteConfig`` with ``host`` set),
+    hardware detection runs on the remote machine via SSH instead of locally.
 
     Detection order:
-    1. NVIDIA GPU via ``nvidia-smi``
-    2. macOS Apple Silicon (MPS) via platform check
+    1. NVIDIA GPU via ``nvidia-smi`` (remote or local)
+    2. macOS Apple Silicon (MPS) via platform check (local only)
     3. Fallback to CPU-only
     """
-    # --- Try NVIDIA ---
+    # --- Remote detection via SSH ---
+    if ssh_config is not None:
+        host = getattr(ssh_config, "host", "")
+        if host:
+            profile = _detect_nvidia_remote(ssh_config)
+            if profile is not None:
+                return profile
+            return HardwareProfile(
+                has_gpu=False,
+                gpu_type="cpu",
+                gpu_name=f"Remote ({host}) — no GPU detected",
+                vram_mb=None,
+                tier="cpu_only",
+                warning=(
+                    f"No GPU detected on remote host {host}. "
+                    "Only CPU-based experiments are supported."
+                ),
+            )
+
+    # --- Try local NVIDIA ---
     profile = _detect_nvidia()
     if profile is not None:
         return profile
@@ -71,6 +93,61 @@ def detect_hardware() -> HardwareProfile:
             "For deep learning research ideas, please use a machine with a GPU or a remote GPU server."
         ),
     )
+
+
+def _detect_nvidia_remote(ssh_config: object) -> HardwareProfile | None:
+    """Detect NVIDIA GPU on a remote host via SSH."""
+    host = getattr(ssh_config, "host", "")
+    user = getattr(ssh_config, "user", "")
+    port = getattr(ssh_config, "port", 22)
+    key_path = getattr(ssh_config, "key_path", "")
+
+    ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
+    if key_path:
+        ssh_cmd.extend(["-i", key_path])
+    if port and port != 22:
+        ssh_cmd.extend(["-p", str(port)])
+    target = f"{user}@{host}" if user else host
+    ssh_cmd.append(target)
+    ssh_cmd.append("nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits")
+
+    try:
+        result = subprocess.run(
+            ssh_cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+
+        line = result.stdout.strip().splitlines()[0].strip()
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 2:
+            return None
+
+        gpu_name = parts[0]
+        try:
+            vram_mb = int(float(parts[1]))
+        except (ValueError, IndexError):
+            vram_mb = 0
+
+        tier = "high" if vram_mb >= _HIGH_VRAM_THRESHOLD_MB else "limited"
+        warning = "" if tier == "high" else (
+            f"Remote GPU ({gpu_name}, {vram_mb} MB VRAM) has limited memory."
+        )
+        return HardwareProfile(
+            has_gpu=True,
+            gpu_type="cuda",
+            gpu_name=f"{gpu_name} (remote: {host})",
+            vram_mb=vram_mb,
+            tier=tier,
+            warning=warning,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("Remote hardware detection failed for %s: %s", host, exc)
+        return None
 
 
 def _detect_nvidia() -> HardwareProfile | None:

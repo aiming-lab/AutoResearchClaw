@@ -118,7 +118,7 @@ class ExperimentRunner:
         # Git integration (Phase 3)
         self._git: _GitManager | None = None
         if git_repo_dir is not None:
-            from arc.experiment_git import ExperimentGitManager
+            from researchclaw.experiment.git_manager import ExperimentGitManager
             mgr = ExperimentGitManager(git_repo_dir)
             if mgr.is_git_repo():
                 self._git = mgr

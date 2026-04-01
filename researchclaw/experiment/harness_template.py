@@ -97,7 +97,7 @@ class ExperimentHarness:
             output["results"] = self._partial_results
 
         try:
-            with open("results.json", "w") as f:
+            with open("results.json", "w", encoding="utf-8") as f:
                 json.dump(output, f, indent=2, default=str)
         except OSError as e:
             print(f"WARNING: Could not write results.json: {e}", file=sys.stderr)

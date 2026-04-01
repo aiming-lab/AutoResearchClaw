@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Get Started &mdash; AutoResearchClaw</title>
+  <meta name="description" content="Quick start guide for AutoResearchClaw: installation, configuration, and running your first autonomous research paper.">
+  <link rel="icon" href="assets/logo.png" type="image/png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Nav -->
+<nav class="navbar">
+  <div class="container">
+    <a href="index.html" class="nav-brand"><img src="assets/logo.png" alt="Logo">AutoResearchClaw</a>
+    <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')">&#9776;</button>
+    <ul class="nav-links">
+      <li><a href="index.html">Home</a></li>
+      <li><a href="pipeline.html">Pipeline</a></li>
+      <li><a href="features.html">Features</a></li>
+      <li><a href="papers.html">Papers</a></li>
+      <li><a href="getting-started.html" class="active">Get Started</a></li>
+      <li><a href="https://github.com/aiming-lab/AutoResearchClaw" class="nav-github" target="_blank">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- Header -->
+<section class="hero" style="padding-bottom: 2rem;">
+  <div class="container">
+    <h1>Get <span class="gradient">Started</span></h1>
+    <p class="tagline">From zero to your first autonomous research paper in minutes.</p>
+  </div>
+</section>
+
+<!-- Steps -->
+<section class="section" style="padding-top: 1rem;">
+  <div class="container getting-started-content">
+
+    <!-- Prerequisites -->
+    <div class="step-block">
+      <h3><span class="step-num">0</span> Prerequisites</h3>
+      <ul style="list-style: none; padding: 0; margin: 0.5rem 0; font-size: 0.9rem; line-height: 2;">
+        <li>&#9745; Python 3.10+</li>
+        <li>&#9745; Docker with NVIDIA Container Toolkit (for GPU experiments)</li>
+        <li>&#9745; An OpenAI-compatible API key (Azure OpenAI, OpenAI, or local LLM)</li>
+        <li>&#9745; NVIDIA GPU with 8GB+ VRAM (optional, for Docker sandbox)</li>
+      </ul>
+    </div>
+
+    <!-- Step 1 -->
+    <div class="step-block">
+      <h3><span class="step-num">1</span> Clone the Repository</h3>
+      <div class="code-block">
+git clone https://github.com/aiming-lab/AutoResearchClaw.git<br>
+cd AutoResearchClaw
+      </div>
+    </div>
+
+    <!-- Step 2 -->
+    <div class="step-block">
+      <h3><span class="step-num">2</span> Install Dependencies</h3>
+      <div class="code-block">
+pip install -e .
+      </div>
+      <p style="margin-top: 0.5rem; font-size: 0.85rem; color: var(--color-text-muted);">
+        This installs the <code>researchclaw</code> package and all required dependencies.
+      </p>
+    </div>
+
+    <!-- Step 3 -->
+    <div class="step-block">
+      <h3><span class="step-num">3</span> Configure Your LLM</h3>
+      <p style="font-size: 0.9rem; margin-bottom: 0.5rem;">
+        Create a YAML config file (e.g., <code>config.yaml</code>) with your LLM settings:
+      </p>
+      <div class="code-block">
+<span class="comment"># config.yaml</span><br>
+project:<br>
+&nbsp;&nbsp;name: "my-first-paper"<br>
+&nbsp;&nbsp;mode: "docs-first"<br>
+<br>
+research:<br>
+&nbsp;&nbsp;topic: "Your research topic here"<br>
+<br>
+llm:<br>
+&nbsp;&nbsp;provider: "openai-compatible"<br>
+&nbsp;&nbsp;base_url: "https://api.openai.com/v1"<br>
+&nbsp;&nbsp;api_key_env: "OPENAI_API_KEY"<br>
+<br>
+experiment:<br>
+&nbsp;&nbsp;backend: "docker"   <span class="comment"># or "subprocess" for local</span><br>
+&nbsp;&nbsp;timeout_sec: 1800
+      </div>
+    </div>
+
+    <!-- Step 4 -->
+    <div class="step-block">
+      <h3><span class="step-num">4</span> Set Your API Key</h3>
+      <div class="code-block">
+export OPENAI_API_KEY="sk-your-key-here"
+      </div>
+    </div>
+
+    <!-- Step 5 -->
+    <div class="step-block">
+      <h3><span class="step-num">5</span> Build the Docker Image (Optional)</h3>
+      <p style="font-size: 0.9rem; margin-bottom: 0.5rem;">
+        If using the Docker sandbox backend for GPU-accelerated experiments:
+      </p>
+      <div class="code-block">
+docker build -t researchclaw-sandbox -f researchclaw/docker/Dockerfile .
+      </div>
+    </div>
+
+    <!-- Step 6 -->
+    <div class="step-block">
+      <h3><span class="step-num">6</span> Run Your First Paper</h3>
+      <div class="code-block">
+python -m researchclaw run --config config.yaml
+      </div>
+      <p style="margin-top: 0.5rem; font-size: 0.85rem; color: var(--color-text-muted);">
+        The pipeline will execute all 23 stages autonomously. Output will be saved
+        to the <code>output/</code> directory including the paper PDF, LaTeX source,
+        experiment code, and charts.
+      </p>
+    </div>
+
+    <!-- Step 7 -->
+    <div class="step-block">
+      <h3><span class="step-num">7</span> Review Your Paper</h3>
+      <p style="font-size: 0.9rem;">
+        After the pipeline completes, find your generated paper at:
+      </p>
+      <div class="code-block">
+output/&lt;run-id&gt;/<br>
+&nbsp;&nbsp;paper.pdf&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment"># Final PDF</span><br>
+&nbsp;&nbsp;paper.tex&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment"># LaTeX source</span><br>
+&nbsp;&nbsp;references.bib&nbsp;&nbsp;&nbsp;<span class="comment"># Bibliography</span><br>
+&nbsp;&nbsp;code/main.py&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment"># Experiment code</span><br>
+&nbsp;&nbsp;charts/&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment"># Generated figures</span><br>
+&nbsp;&nbsp;results.json&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment"># Experiment metrics</span>
+      </div>
+    </div>
+
+    <!-- Tips -->
+    <div class="step-block" style="border-color: var(--color-primary);">
+      <h3 style="color: var(--color-primary);">Tips</h3>
+      <ul style="list-style: disc; padding-left: 1.25rem; font-size: 0.9rem; line-height: 1.8; color: var(--color-text-muted);">
+        <li>Use GPT-4.1 or newer for best paper quality</li>
+        <li>Set <code>timeout_sec: 3600</code> for complex experiments</li>
+        <li>For Azure OpenAI, set <code>provider: "azure_openai"</code> and configure your endpoint</li>
+        <li>The pipeline caches literature results, so re-runs with the same topic are faster</li>
+        <li>Run <code>python -m pytest tests/ -v</code> to verify your installation</li>
+      </ul>
+    </div>
+
+    <div class="text-center mt-8">
+      <a href="https://github.com/aiming-lab/AutoResearchClaw#readme" class="btn btn-primary" target="_blank">View Full Documentation on GitHub</a>
+    </div>
+
+  </div>
+</section>
+
+<!-- Footer -->
+<footer class="footer">
+  <ul class="footer-links">
+    <li><a href="index.html">Home</a></li>
+    <li><a href="pipeline.html">Pipeline</a></li>
+    <li><a href="features.html">Features</a></li>
+    <li><a href="papers.html">Papers</a></li>
+    <li><a href="getting-started.html">Get Started</a></li>
+    <li><a href="https://github.com/aiming-lab/AutoResearchClaw" target="_blank">GitHub</a></li>
+  </ul>
+  <p>AutoResearchClaw &mdash; Autonomous Research Paper Generation Pipeline</p>
+</footer>
+
+</body>
+</html>

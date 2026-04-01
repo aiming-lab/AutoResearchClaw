@@ -1,0 +1,70 @@
+domain_id: biology_singlecell
+display_name: Single-Cell Analysis
+parent_domain: biology
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: standard pipeline
+  proposed: proposed method
+  variant: sensitivity analysis
+  input: dataset
+  metric: ARI / NMI
+
+typical_file_structure:
+  config.py: "Analysis parameters"
+  data.py: "Data loading and preprocessing (QC, normalization, HVG)"
+  methods.py: "Clustering/analysis method implementations"
+  evaluation.py: "Evaluation metrics (ARI, NMI, silhouette)"
+  main.py: "Entry point: load → preprocess → cluster → evaluate → report"
+
+entry_point: main.py
+
+core_libraries:
+  - scanpy
+  - anndata
+  - numpy
+  - scikit-learn
+
+docker_image: researchclaw/sandbox-biology:latest
+gpu_required: false
+
+pip_packages:
+  - scanpy
+  - anndata
+  - leidenalg
+  - numpy
+  - scikit-learn
+  - matplotlib
+  - pandas
+
+metric_types:
+  - scalar
+  - table
+
+standard_baselines:
+  - Leiden clustering
+  - Louvain clustering
+  - K-means
+  - Spectral clustering
+
+evaluation_protocol: "Apply clustering methods, evaluate against known cell types. Report ARI, NMI, silhouette score."
+statistical_tests:
+  - wilcoxon_rank_sum
+  - fdr_correction
+
+github_search_terms:
+  - scanpy tutorial
+  - single cell clustering
+  - scRNA-seq analysis python
+
+paper_keywords:
+  - single-cell RNA-seq
+  - cell clustering
+  - differential expression
+
+dataset_guidance: |
+  Single-cell analysis datasets:
+  - Generate synthetic data with scanpy.datasets or simulate with splatter
+  - Use small reference datasets: PBMC3k, Paul15
+  - Format: AnnData (h5ad)
+  - Preprocessing: QC → normalize → log1p → HVG selection → PCA → neighbors

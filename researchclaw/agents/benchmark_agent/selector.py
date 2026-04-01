@@ -7,11 +7,16 @@ priorities to select the optimal combination of datasets and baselines.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from researchclaw.agents.base import AgentStepResult, BaseAgent
 
 logger = logging.getLogger(__name__)
+
+_KNOWLEDGE_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "benchmark_knowledge.yaml"
 
 # Maximum dataset size (MB) by tier and network policy
 _SIZE_LIMITS: dict[str, int] = {
@@ -133,13 +138,13 @@ class SelectorAgent(BaseAgent):
     ) -> dict[str, Any]:
         """Ask LLM to make final selection from filtered candidates."""
         bench_summary = "\n".join(
-            f"- {b['name']} (tier {b.get('tier', '?')}, "
+            f"- {b.get('name', 'Unknown')} (tier {b.get('tier', '?')}, "
             f"origin: {b.get('origin', '?')}, "
             f"metrics: {b.get('metrics', [])})"
             for b in benchmarks[:15]
         )
         base_summary = "\n".join(
-            f"- {bl['name']}: {bl.get('paper', 'N/A')}"
+            f"- {bl.get('name', 'Unknown')}: {bl.get('paper', 'N/A')}"
             for bl in baselines[:10]
         )
 
@@ -160,7 +165,13 @@ class SelectorAgent(BaseAgent):
             "- Select 2-4 baselines (must include at least 1 classic + 1 recent)\n"
             "- Primary benchmark MUST be the domain standard\n"
             "- Prefer benchmarks that top-venue papers commonly use\n"
-            "- Consider dataset size vs time budget"
+            "- Consider dataset size vs time budget\n"
+            "- CRITICAL: Only select benchmarks that are RELEVANT to the research "
+            "topic's domain. Do NOT select image classification datasets (CIFAR, "
+            "MNIST) for non-image tasks like PDE solvers, RL, or optimization.\n"
+            "- CRITICAL: Baselines must be COMPETING METHODS, not optimizers. "
+            "SGD/Adam/AdamW/Cosine LR are NOT baselines — they are training "
+            "tools. Baselines must be alternative approaches to the same problem."
         )
         user = (
             f"Research Topic: {topic}\n\n"
@@ -181,20 +192,18 @@ class SelectorAgent(BaseAgent):
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Resolve LLM-selected names back to full benchmark/baseline dicts."""
         # Build name lookup
-        bench_map = {b["name"]: b for b in benchmarks}
-        base_map = {bl["name"]: bl for bl in baselines}
+        bench_map = {b.get("name", f"bench_{i}"): b for i, b in enumerate(benchmarks)}
+        base_map = {bl.get("name", f"base_{i}"): bl for i, bl in enumerate(baselines)}
 
         selected_bench: list[dict[str, Any]] = []
         primary = selection.get("primary_benchmark", "")
         if primary and primary in bench_map:
-            entry = bench_map[primary]
-            entry["role"] = "primary"
+            entry = {**bench_map[primary], "role": "primary"}
             selected_bench.append(entry)
 
         for name in selection.get("secondary_benchmarks", []):
             if name in bench_map and name != primary:
-                entry = bench_map[name]
-                entry["role"] = "secondary"
+                entry = {**bench_map[name], "role": "secondary"}
                 selected_bench.append(entry)
 
         selected_base: list[dict[str, Any]] = []
@@ -203,6 +212,54 @@ class SelectorAgent(BaseAgent):
                 selected_base.append(base_map[name])
 
         return selected_bench, selected_base
+
+    # -- Required baselines injection --------------------------------------
+
+    def _inject_required_baselines(
+        self,
+        topic: str,
+        selected: list[dict[str, Any]],
+        ranked: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Load required_baselines from knowledge base and inject missing ones.
+
+        Returns the list of newly injected baseline dicts.
+        """
+        try:
+            kb = yaml.safe_load(_KNOWLEDGE_PATH.read_text(encoding="utf-8"))
+            domains = kb.get("domains", {}) if isinstance(kb, dict) else {}
+        except Exception:  # noqa: BLE001
+            return []
+
+        topic_lower = topic.lower()
+        injected: list[dict[str, Any]] = []
+        selected_names = {b.get("name", "").lower() for b in selected}
+
+        for _domain_id, domain_data in domains.items():
+            if not isinstance(domain_data, dict):
+                continue
+            keywords = domain_data.get("keywords", [])
+            if not any(kw.lower() in topic_lower for kw in keywords):
+                continue
+            required = domain_data.get("required_baselines", [])
+            if not required:
+                continue
+            # Find each required baseline in ranked list or create stub
+            all_baselines = domain_data.get("common_baselines", [])
+            bl_by_name = {b.get("name", ""): b for b in all_baselines}
+            for req_name in required:
+                if req_name.lower() in selected_names:
+                    continue
+                # Try to find full entry from knowledge base
+                if req_name in bl_by_name:
+                    entry = {**bl_by_name[req_name], "origin": "required_baseline"}
+                else:
+                    entry = {"name": req_name, "origin": "required_baseline", "pip": []}
+                selected.append(entry)
+                selected_names.add(req_name.lower())
+                injected.append(entry)
+
+        return injected
 
     # -- Main entry point --------------------------------------------------
 
@@ -244,11 +301,9 @@ class SelectorAgent(BaseAgent):
             )
         else:
             # Not enough to warrant LLM call — use top ranked
-            selected_bench = ranked_bench[:3]
-            if selected_bench:
-                selected_bench[0]["role"] = "primary"
-                for b in selected_bench[1:]:
-                    b["role"] = "secondary"
+            # BUG-DA6-06: Create copies to avoid mutating input dicts
+            selected_bench = [{**b, "role": "primary"} if i == 0 else {**b, "role": "secondary"}
+                              for i, b in enumerate(ranked_bench[:3])]
             selected_base = ranked_base[:self._min_base]
             selection = {}
 
@@ -256,8 +311,7 @@ class SelectorAgent(BaseAgent):
         if len(selected_bench) < self._min_bench and ranked_bench:
             for b in ranked_bench:
                 if b not in selected_bench:
-                    b["role"] = "secondary"
-                    selected_bench.append(b)
+                    selected_bench.append({**b, "role": "secondary"})
                 if len(selected_bench) >= self._min_bench:
                     break
 
@@ -267,6 +321,17 @@ class SelectorAgent(BaseAgent):
                     selected_base.append(bl)
                 if len(selected_base) >= self._min_base:
                     break
+
+        # 4b. Improvement E: Inject required baselines from knowledge base
+        _injected_required = self._inject_required_baselines(
+            topic, selected_base, ranked_base,
+        )
+        if _injected_required:
+            self.logger.info(
+                "Injected %d required baselines: %s",
+                len(_injected_required),
+                [b.get("name") for b in _injected_required],
+            )
 
         # 5. Collect required pip packages
         required_pip: list[str] = []

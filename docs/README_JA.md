@@ -1,21 +1,27 @@
 <p align="center">
-  <img src="../image/logo.png" width="800" alt="AutoResearchClaw Logo">
+  <img src="../image/logo.png" width="700" alt="AutoResearchClaw Logo">
 </p>
 
-<h2 align="center"><b>アイデアを話す。論文を手に入れる。完全自動。</b></h2>
+<h2 align="center"><b>アイデアを話す。論文を手に入れる。完全自動 & 自己進化。</b></h2>
 
 
 
 <p align="center">
-  <i><a href="#openclaw-integration">OpenClaw</a> にチャットするだけ：「Xを研究して」→ 完了。</i>
+  <b><i><font size="5"><a href="#openclaw-統合">OpenClaw</a> にチャットするだけ：「Xを研究して」→ 完了。</font></i></b>
 </p>
+
+<p align="center">
+  <img src="../image/framework_v2.png" width="100%" alt="AutoResearchClaw Framework">
+</p>
+
 
 <p align="center">
   <a href="../LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License"></a>
   <a href="https://python.org"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+"></a>
-  <a href="#testing"><img src="https://img.shields.io/badge/Tests-1128%20passed-brightgreen?logo=pytest&logoColor=white" alt="1128 Tests Passed"></a>
-  <a href="https://github.com/Jiaaqiliu/AutoResearchClaw"><img src="https://img.shields.io/badge/GitHub-AutoResearchClaw-181717?logo=github" alt="GitHub"></a>
-  <a href="#openclaw-integration"><img src="https://img.shields.io/badge/OpenClaw-Compatible-ff4444?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==" alt="OpenClaw Compatible"></a>
+  <a href="#テスト"><img src="https://img.shields.io/badge/Tests-1823%20passed-brightgreen?logo=pytest&logoColor=white" alt="1823 Tests Passed"></a>
+  <a href="https://github.com/aiming-lab/AutoResearchClaw"><img src="https://img.shields.io/badge/GitHub-AutoResearchClaw-181717?logo=github" alt="GitHub"></a>
+  <a href="#openclaw-統合"><img src="https://img.shields.io/badge/OpenClaw-Compatible-ff4444?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZD0iTTEyIDJDNi40OCAyIDIgNi40OCAyIDEyczQuNDggMTAgMTAgMTAgMTAtNC40OCAxMC0xMFMxNy41MiAyIDEyIDJ6IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==" alt="OpenClaw Compatible"></a>
+  <a href="https://discord.gg/u4ksqW5P"><img src="https://img.shields.io/badge/Discord-Join%20Community-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 <p align="center">
@@ -32,98 +38,130 @@
 </p>
 
 <p align="center">
-  <a href="integration-guide.md">📖 統合ガイド</a>
+  <a href="showcase/SHOWCASE.md">🏆 論文ショーケース</a> · <a href="integration-guide.md">📖 統合ガイド</a> · <a href="https://discord.gg/u4ksqW5P">💬 Discordコミュニティ</a>
 </p>
 
 ---
 
-## ⚡ ワンライナー
+<table>
+<tr>
+<td width="18%">
+<a href="showcase/SHOWCASE.md"><img src="showcase/thumbnails/paper_I_random_matrix-01.png" width="120" alt="Sample Paper"/></a>
+</td>
+<td valign="middle">
+<b>🏆 生成論文ショーケース</b><br><br>
+<b>8つの分野にわたる8本の論文</b> — 数学、統計、生物学、コンピューティング、NLP、RL、ビジョン、ロバスト性 — 人間の介入なしに完全自律生成。<br><br>
+<a href="showcase/SHOWCASE.md"><img src="https://img.shields.io/badge/View_Full_Showcase_→-All_8_Papers-d73a49?style=for-the-badge" alt="View Showcase"></a>
+</td>
+</tr>
+</table>
+
+---
+
+> **🧪 テスターを募集しています！** あなた自身の研究アイデアで — どの分野からでも — パイプラインをお試しください。[ご意見をお聞かせください](TESTER_GUIDE.md)。あなたのフィードバックが次のバージョンに直接反映されます。 **[→ Testing Guide](TESTER_GUIDE.md)** | **[→ 中文测试指南](TESTER_GUIDE_CN.md)** | **[→ 日本語テストガイド](TESTER_GUIDE_JA.md)**
+
+---
+
+## 🔥 News
+- **[03/22/2026]** [v0.3.2](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.2) — **クロスプラットフォーム対応 + 安定性大幅向上** — ACP互換AIエージェントバックエンド（Claude Code、Codex CLI、Copilot CLI、Gemini CLI、Kimi CLI）に対応し、OpenClawブリッジ経由でメッセージングプラットフォーム（Discord、Telegram、Lark、WeChat）もサポート。新しいCLIエージェントコード生成バックエンドにより、ステージ10と13を外部CLIエージェントに委任し、予算制御とタイムアウト管理に対応。反データ捏造システム（VerifiedRegistry + 実験診断・修復ループ）、100件以上のバグ修正、モジュラーexecutorリファクタリング、`--resume`自動検出、LLMリトライ強化、コミュニティ報告の修正を含む。
+- **[03/18/2026]** [v0.3.1](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.1) — **OpenCode Beast Mode + Community Contributions** — New "Beast Mode" routes complex code generation to [OpenCode](https://github.com/anomalyco/opencode) with automatic complexity scoring and graceful fallback. Added Novita AI provider support, thread-safety hardening, improved LLM output parsing robustness, and 20+ bug fixes from community PRs and internal audit.
+- **[03/17/2026]** [v0.3.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.3.0) — **MetaClaw Integration** — AutoResearchClaw now supports [MetaClaw](https://github.com/aiming-lab/MetaClaw) cross-run learning: pipeline failures → structured lessons → reusable skills, injected into all 23 stages. **+18.3%** robustness in controlled experiments. Opt-in (`metaclaw_bridge.enabled: true`), fully backward-compatible. See [Integration Guide](#-metaclaw-integration).
+- **[03/16/2026]** [v0.2.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.2.0) — Three multi-agent subsystems (CodeAgent, BenchmarkAgent, FigureAgent), hardened Docker sandbox with network-policy-aware execution, 4-round paper quality audit (AI-slop detection, 7-dim review scoring, NeurIPS checklist), and 15+ bug fixes from production runs.
+- **[03/15/2026]** [v0.1.0](https://github.com/aiming-lab/AutoResearchClaw/releases/tag/v0.1.0) — We release AutoResearchClaw: a fully autonomous 23-stage research pipeline that turns a single research idea into a conference-ready paper. No human intervention required.
+
+---
+
+## ⚡ ワンコマンド。ワンペーパー。
 
 ```bash
-pip install -e . && researchclaw run --topic "Your research idea here" --auto-approve
+pip install -e . && researchclaw setup && researchclaw init && researchclaw run --topic "Your research idea here" --auto-approve
 ```
+
 
 ---
 
 ## 🤔 これは何？
 
-アイデアがある。論文が欲しい。**それだけです。**
+**あなたが考える。AutoResearchClawが書く。**
 
-AutoResearchClawは研究トピックを受け取り、完全な学術論文を自律的に生成します — arXivとSemantic Scholar（マルチソース、レート制限回避のためarXiv優先）からの実際の文献検索、ハードウェア対応のサンドボックス実験（GPU/MPS/CPUを自動検出）、統計分析、査読、学会対応のLaTeX（NeurIPS/ICML/ICLR向け5,000〜6,500語）まで含みます。手動作業も、ツール間のコピペも不要です。
+研究トピックを入力するだけで — OpenAlex、Semantic Scholar、arXivからの実際の文献、ハードウェア対応のサンドボックス実験（GPU/MPS/CPUを自動検出）、統計分析、マルチエージェント査読、NeurIPS/ICML/ICLR対応の学会グレードLaTeXを含む完全な学術論文が得られます。監視不要。コピペ不要。幻覚された参考文献なし。
 
 <table>
 <tr><td>📄</td><td><code>paper_draft.md</code></td><td>完全な学術論文（序論、関連研究、手法、実験、結果、結論）</td></tr>
 <tr><td>📐</td><td><code>paper.tex</code></td><td>学会対応LaTeX（NeurIPS / ICLR / ICMLテンプレート）</td></tr>
-<tr><td>📚</td><td><code>references.bib</code></td><td>Semantic ScholarとarXivからの実際のBibTeX参考文献 — 本文中の引用に合わせて自動整理</td></tr>
-<tr><td>🔍</td><td><code>verification_report.json</code></td><td>4層の引用整合性＋関連性検証（arXiv、CrossRef、DataCite、LLM）</td></tr>
-<tr><td>🧪</td><td><code>experiment runs/</code></td><td>生成されたコード＋サンドボックス実行結果＋構造化JSONメトリクス</td></tr>
+<tr><td>📚</td><td><code>references.bib</code></td><td>OpenAlex、Semantic Scholar、arXivからの実際のBibTeX参考文献 — 本文中の引用に合わせて自動整理</td></tr>
+<tr><td>🔍</td><td><code>verification_report.json</code></td><td>4層の引用整合性 + 関連性検証（arXiv、CrossRef、DataCite、LLM）</td></tr>
+<tr><td>🧪</td><td><code>experiment runs/</code></td><td>生成されたコード + サンドボックス実行結果 + 構造化JSONメトリクス</td></tr>
 <tr><td>📊</td><td><code>charts/</code></td><td>誤差棒と信頼区間付きの条件比較チャートを自動生成</td></tr>
 <tr><td>📝</td><td><code>reviews.md</code></td><td>手法-証拠の一貫性チェック付きマルチエージェント査読</td></tr>
 <tr><td>🧬</td><td><code>evolution/</code></td><td>各実行から抽出された自己学習の教訓</td></tr>
 <tr><td>📦</td><td><code>deliverables/</code></td><td>すべての最終成果物を1フォルダに集約 — Overleafですぐにコンパイル可能</td></tr>
 </table>
 
-パイプラインは**人手の介入なしにエンドツーエンドで実行**されます（手動レビュー用のゲートステージを設定しない限り）。実験が失敗すれば自己修復し、仮説が成り立たなければ方向転換します。
+パイプラインは**人手の介入なしにエンドツーエンドで実行**されます。実験が失敗すれば自己修復します。仮説が成り立たなければ方向転換します。引用が偽物なら削除します。
 
-### 🎯 試してみよう
+🌍 **どこでも実行可能。** AutoResearchClaw は特定のプラットフォームに縛られません。CLI でスタンドアロン実行、[OpenClaw](https://github.com/openclaw/openclaw) に接続、または ACP 互換の AI エージェント —— 🤖 Claude Code、💻 Codex CLI、🐙 Copilot CLI、♊ Gemini CLI、🌙 Kimi CLI など —— と連携できます。さらに OpenClaw のメッセージブリッジにより、💬 Discord、✈️ Telegram、🐦 Lark（飛書）、💚 WeChat など、チームが普段使っているプラットフォームから研究を開始できます。トピックを入力すれば、論文が出力されます —— どこからでも。
+
+---
+
+## 🚀 クイックスタート
 
 ```bash
-researchclaw run --topic "Agent-based Reinforcement Learning for Automated Scientific Discovery" --auto-approve
+# 1. クローン & インストール
+git clone https://github.com/aiming-lab/AutoResearchClaw.git
+cd AutoResearchClaw
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .
+
+# 2. セットアップ（対話式 — OpenCode Beast Modeのインストール、Docker/LaTeXの確認）
+researchclaw setup
+
+# 3. 設定
+researchclaw init          # 対話式：LLMプロバイダーを選択、config.arc.yamlを作成
+# または手動：cp config.researchclaw.example.yaml config.arc.yaml
+
+# 4. 実行
+export OPENAI_API_KEY="sk-..."
+researchclaw run --config config.arc.yaml --topic "Your research idea" --auto-approve
 ```
+
+出力先 → `artifacts/rc-YYYYMMDD-HHMMSS-<hash>/deliverables/` — コンパイル可能なLaTeX、BibTeX、実験コード、チャート。
+
+<details>
+<summary>📝 最小限の必要設定</summary>
+
+```yaml
+project:
+  name: "my-research"
+
+research:
+  topic: "Your research topic here"
+
+llm:
+  base_url: "https://api.openai.com/v1"
+  api_key_env: "OPENAI_API_KEY"
+  primary_model: "gpt-4o"
+  fallback_models: ["gpt-4o-mini"]
+
+experiment:
+  mode: "sandbox"
+  sandbox:
+    python_path: ".venv/bin/python"
+```
+
+</details>
 
 ---
 
 ## 🧠 他と何が違うのか
 
-### 🔄 PIVOT / REFINE 判定ループ
-
-パイプラインは単に直線的に実行されるわけではありません。ステージ15（RESEARCH_DECISION）は実験結果を仮説と照合し、自律的に判定を行います：
-
-- **PROCEED** — 結果が仮説を支持しているため、論文執筆に進む
-- **REFINE** — 結果は有望だが改善が必要なため、コード/パラメータの改良にループバック
-- **PIVOT** — 根本的な問題が検出されたため、新しい方向で仮説生成からやり直す
-
-各PIVOT/REFINEサイクルでは**以前の成果物がバージョン管理**され（`stage-08_v1/`、`stage-08_v2/`、...）、作業が失われることなく判定の推移を完全に追跡できます。
-
-### 🤖 マルチエージェント討論
-
-重要なステージでは、複数のLLM視点による構造化された討論プロトコルを使用します：
-
-- **仮説生成** — 多様なエージェントがアイデアを提案し、互いに検証
-- **結果分析** — 楽観派、懐疑派、実用派が結果を分析
-- **査読** — 手法-証拠の一貫性チェック（論文が50回の試行を主張しているが、コードは5回しか実行していないかどうか）
-
-### 🧬 進化：実行間の自己学習
-
-パイプラインの各実行から詳細な教訓を抽出します — 単に「失敗した」だけでなく、*なぜ*失敗したかを記録：
-
-- PIVOT/REFINE判定の根拠
-- 実験のstderrからのランタイム警告（例: `RuntimeWarning: division by zero`）
-- メトリクスの異常（NaN、Inf、同一の収束速度）
-
-これらの教訓はJSONLストアに保持され、**30日の半減期による時間減衰重み付け**が適用され、将来の実行にプロンプトオーバーレイとして注入されます。パイプラインは文字通り自分のミスから学びます。
-
-### 📚 知識ベース
-
-各実行で6カテゴリの構造化された知識ベース（`docs/kb/`に保存）を構築します：
-
-- **decisions/** — 実験設計、品質ゲート、研究判定、リソース計画、検索戦略、知識アーカイブ
-- **experiments/** — コード生成ログ、実験実行、反復的改良
-- **findings/** — 引用検証、結果分析、統合レポート
-- **literature/** — 知識抽出、文献収集、スクリーニング結果
-- **questions/** — 仮説生成、問題分解、トピック初期化
-- **reviews/** — エクスポート/出版レポート、論文草稿、アウトライン、改訂、査読
-
-### 🛡️ Sentinel Watchdog
-
-メインパイプラインが見逃す可能性のある問題を検出するバックグラウンド品質モニター：
-
-- **ランタイムバグ検出** — メトリクスのNaN/Inf、stderrの警告をLLMにフィードバックして的確な修復
-- **論文-証拠の一貫性** — 実際の実験コード、実行結果、改良ログを査読に注入
-- **引用関連性スコアリング** — 存在確認だけでなく、各参考文献のトピック関連性をLLMが評価
-- **収束条件の強制** — 固定反復回数の実験を検出し、適切な早期終了を要求
-- **アブレーション検証** — 重複/同一のアブレーション条件を検出し、壊れた比較にフラグ
-- **捏造防止ガード** — 実験がメトリクスを生成しない場合、論文執筆を完全にブロック
+| 機能 | 仕組み |
+|------|--------|
+| **🔄 PIVOT / REFINE ループ** | ステージ15が自律的に判定：PROCEED、REFINE（パラメータ調整）、またはPIVOT（新方向）。成果物は自動バージョン管理。 |
+| **🤖 マルチエージェント討論** | 仮説生成、結果分析、査読のそれぞれで構造化された多視点討論を実施。 |
+| **🧬 自己学習** | 各実行から教訓を抽出（判定根拠、ランタイム警告、メトリクス異常）、30日の時間減衰付き。将来の実行が過去のミスから学習。 |
+| **📚 知識ベース** | 各実行で6カテゴリ（判定、実験、発見、文献、質問、レビュー）にわたる構造化知識ベースを構築。 |
+| **🛡️ Sentinel Watchdog** | バックグラウンド品質モニター：NaN/Inf検出、論文-証拠の一貫性、引用関連性スコアリング、捏造防止ガード。 |
 
 ---
 
@@ -131,12 +169,9 @@ researchclaw run --topic "Agent-based Reinforcement Learning for Automated Scien
 
 <table>
 <tr>
-<td width="60">🦞</td>
-<td>
 
-**AutoResearchClawは[OpenClaw](https://github.com/openclaw/openclaw)互換サービスです。** OpenClawにインストールして、メッセージ1つで自律研究を開始できます。CLI、Claude Code、その他のAIコーディングアシスタントを使ってスタンドアロンでも利用可能です。
+**AutoResearchClawは[OpenClaw](https://github.com/openclaw/openclaw)互換サービスです。** OpenClawにインストールして、メッセージ1つで自律研究を開始できます — CLI、Claude Code、その他のAIコーディングアシスタントを使ってスタンドアロンでも利用可能です。
 
-</td>
 </tr>
 </table>
 
@@ -182,13 +217,42 @@ openclaw_bridge:
 
 各フラグは型付きアダプタープロトコルをアクティブにします。OpenClawがこれらの機能を提供する場合、アダプターはコード変更なしにそれらを利用します。詳細は[`integration-guide.md`](integration-guide.md)をご覧ください。
 
+### ACP (Agent Client Protocol)
+
+AutoResearchClawは**任意のACP互換コーディングエージェント**をLLMバックエンドとして使用できます — APIキーは不要です。エージェントは[acpx](https://github.com/openclaw/acpx)を介して通信し、全23パイプラインステージにわたって単一の永続セッションを維持します。
+
+| エージェント | コマンド | 備考 |
+|-------------|---------|------|
+| Claude Code | `claude` | Anthropic |
+| Codex CLI | `codex` | OpenAI |
+| Copilot CLI | `gh` | GitHub |
+| Gemini CLI | `gemini` | Google |
+| OpenCode | `opencode` | SST |
+| Kimi CLI | `kimi` | Moonshot |
+
+```yaml
+# config.yaml — ACP例
+llm:
+  provider: "acp"
+  acp:
+    agent: "claude"   # 任意のACP互換エージェントCLIコマンド
+    cwd: "."          # エージェントの作業ディレクトリ
+  # base_urlやapi_keyは不要 — エージェントが独自の認証を処理します。
+```
+
+```bash
+# そのまま実行 — エージェントは独自の認証情報を使用
+researchclaw run --config config.yaml --topic "Your research idea" --auto-approve
+```
+
 ### 🛠️ その他の実行方法
 
 | 方法 | 手順 |
-|--------|-----|
-| **スタンドアロンCLI** | `researchclaw run --topic "..." --auto-approve` |
+|------|------|
+| **スタンドアロンCLI** | `researchclaw setup` → `researchclaw init` → `researchclaw run --topic "..." --auto-approve` |
 | **Python API** | `from researchclaw.pipeline import Runner; Runner(config).run()` |
 | **Claude Code** | `RESEARCHCLAW_CLAUDE.md`を読み取り — *「Run research on [トピック]」*と言うだけ |
+| **Copilot CLI** | `researchclaw run --topic "..."` で `llm.acp.agent: "gh"` を使用 |
 | **OpenCode** | `.claude/skills/`を読み取り — 同じ自然言語インターフェース |
 | **任意のAI CLI** | `RESEARCHCLAW_AGENTS.md`をコンテキストとして提供 → エージェントが自動ブートストラップ |
 
@@ -226,213 +290,104 @@ openclaw_bridge:
 <summary>📋 各フェーズの詳細</summary>
 
 | フェーズ | 処理内容 |
-|-------|-------------|
+|---------|----------|
 | **A: スコーピング** | LLMがトピックを研究質問を含む構造化された問題ツリーに分解 |
 | **A+: ハードウェア** | GPU（NVIDIA CUDA / Apple MPS / CPUのみ）を自動検出、ローカルハードウェアが限定的な場合は警告、コード生成を適応 |
-| **B: 文献** | マルチソース検索（arXiv優先、次にSemantic Scholar）で実際の論文を取得、関連性でスクリーニング、知識カードを抽出 |
+| **B: 文献** | マルチソース検索（OpenAlex → Semantic Scholar → arXiv）で実際の論文を取得、関連性でスクリーニング、知識カードを抽出 |
 | **C: 統合** | 発見事項をクラスタリング、研究ギャップを特定、マルチエージェント討論で検証可能な仮説を生成 |
 | **D: 設計** | 実験計画を設計、ハードウェア対応の実行可能Python（GPUティア→パッケージ選択）を生成、リソース需要を推定 |
 | **E: 実行** | サンドボックスで実験を実行、NaN/Infとランタイムバグを検出、LLMによる的確な修復で自己修復 |
 | **F: 分析** | マルチエージェントによる結果分析；根拠付きの自律的PROCEED / REFINE / PIVOT判定 |
 | **G: 執筆** | アウトライン → セクション別ドラフト（5,000〜6,500語）→ 査読（手法-証拠の一貫性付き）→ 文字数ガード付き改訂 |
-| **H: 最終処理** | 品質ゲート、知識アーカイブ、学会テンプレート付きLaTeXエクスポート、引用の整合性＋関連性検証 |
+| **H: 最終処理** | 品質ゲート、知識アーカイブ、学会テンプレート付きLaTeXエクスポート、引用の整合性 + 関連性検証 |
 
 </details>
-
----
-
-## 🚀 クイックスタート
-
-### 前提条件
-
-- 🐍 Python 3.11+
-- 🔑 OpenAI互換のLLM APIエンドポイント（GPT-4o、GPT-5.x、またはその他の互換プロバイダー）
-
-### インストール
-
-```bash
-git clone https://github.com/Jiaaqiliu/AutoResearchClaw.git
-cd AutoResearchClaw
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-```
-
-### 設定
-
-```bash
-cp config.researchclaw.example.yaml config.arc.yaml
-```
-
-<details>
-<summary>📝 最小限の必要設定</summary>
-
-```yaml
-project:
-  name: "my-research"
-
-research:
-  topic: "Your research topic here"
-
-llm:
-  base_url: "https://api.openai.com/v1"     # 任意のOpenAI互換エンドポイント
-  api_key_env: "OPENAI_API_KEY"              # APIキーを含む環境変数名
-  primary_model: "gpt-4o"                    # エンドポイントがサポートする任意のモデル
-  fallback_models: ["gpt-4o-mini"]
-  s2_api_key: ""                             # オプション: レート制限緩和のためのSemantic Scholar APIキー
-
-experiment:
-  mode: "sandbox"
-  sandbox:
-    python_path: ".venv/bin/python"
-```
-
-</details>
-
-### 実行
-
-```bash
-# APIキーを設定
-export OPENAI_API_KEY="sk-..."
-
-# 🚀 フルパイプラインを実行
-researchclaw run --config config.arc.yaml --auto-approve
-
-# 🎯 トピックをインラインで指定
-researchclaw run --config config.arc.yaml --topic "Transformer attention for time series" --auto-approve
-
-# ✅ 設定を検証
-researchclaw validate --config config.arc.yaml
-
-# ⏩ 特定のステージから再開
-researchclaw run --config config.arc.yaml --from-stage PAPER_OUTLINE --auto-approve
-```
-
-出力先 → `artifacts/rc-YYYYMMDD-HHMMSS-<hash>/`（ステージごとに1つのサブディレクトリ）。
-
-ユーザー向けの全成果物は自動的に1つの**`deliverables/`**フォルダに集約されます：
-
-```
-artifacts/rc-YYYYMMDD-HHMMSS-<hash>/deliverables/
-├── paper_final.md             # 最終論文（Markdown）
-├── paper.tex                  # 学会対応LaTeX
-├── references.bib             # 検証済みBibTeX参考文献（自動整理済み）
-├── neurips_2025.sty           # 学会スタイルファイル（自動選択）
-├── code/                      # 実験コード + requirements.txt
-├── verification_report.json   # 引用整合性レポート
-├── charts/                    # 結果の可視化（条件比較、誤差棒）
-└── manifest.json              # メタデータ付き成果物インデックス
-```
-
-`deliverables/`フォルダは**コンパイル可能な状態**です — 学会の`.sty`と`.bst`ファイルが含まれているため、`pdflatex` + `bibtex`で`paper.tex`を直接コンパイルするか、追加ダウンロードなしでOverleafにアップロードできます。
 
 ---
 
 ## ✨ 主な機能
 
-### 📚 マルチソース文献検索
+| 機能 | 説明 |
+|------|------|
+| **📚 マルチソース文献** | OpenAlex、Semantic Scholar、arXivからの実際の論文 — クエリ拡張、重複排除、三状態サーキットブレーカーとグレースフルデグラデーション |
+| **🔍 4層引用検証** | arXiv IDチェック → CrossRef/DataCite DOI → Semantic Scholarタイトルマッチ → LLM関連性スコアリング。幻覚された参考文献は自動削除。 |
+| **🖥️ ハードウェア対応実行** | GPU（NVIDIA CUDA / Apple MPS / CPUのみ）を自動検出し、コード生成、インポート、実験スケールを適応 |
+| **🦾 OpenCode Beast Mode** | 複雑な実験を自動的に[OpenCode](https://github.com/anomalyco/opencode)にルーティング — カスタムアーキテクチャ、トレーニングループ、アブレーション研究を含むマルチファイルプロジェクトを生成。`researchclaw setup`でインストール。 |
+| **🧪 サンドボックス実験** | AST検証済みコード、不変ハーネス、NaN/Inf早期停止、自己修復、反復的改良（最大10ラウンド）、部分結果の保持 |
+| **📝 学会グレード執筆** | NeurIPS/ICML/ICLRテンプレート、セクション別ドラフト（5,000〜6,500語）、捏造防止ガード、改訂文字数ガード、免責事項抑制 |
+| **📐 テンプレート切り替え** | `neurips_2025`、`iclr_2026`、`icml_2026` — Markdown → LaTeX（数式、表、図、相互参照、`\cite{}`対応） |
+| **🚦 品質ゲート** | 3つのHuman-in-the-loopゲート（ステージ5, 9, 20）、ロールバック対応。`--auto-approve`でスキップ。 |
 
-ステージ4は**実際の学術API**に問い合わせます — LLMが幻覚した論文ではありません。Semantic Scholarのレート制限を回避するため、**arXiv優先**戦略を採用。
+---
 
-- **arXiv API**（プライマリ） — 実際のarXiv IDとメタデータを持つプレプリント、レート制限なし
-- **Semantic Scholar API**（セカンダリ） — タイトル、アブストラクト、掲載誌、被引用数、DOIを持つ実際の論文
-- **クエリ拡張** — 包括的なカバレッジ（30〜60件の参考文献）のため、より広いクエリ（サーベイ、ベンチマーク、比較バリアント）を自動生成
-- **自動重複排除** — DOI → arXiv ID → ファジータイトルマッチング
-- **BibTeX生成** — 実際のメタデータを含む有効な`@article{cite_key, ...}`エントリ
-- **三状態サーキットブレーカー** — CLOSED → OPEN → HALF_OPEN の指数バックオフ冷却期間による回復（永久無効化なし）
-- **グレースフルデグラデーション** — S2の障害がarXivの結果をブロックしない；すべてのAPIが失敗した場合はLLM拡張結果にフォールバック
+## 🧠 MetaClaw統合
 
-```python
-from researchclaw.literature import search_papers
+**AutoResearchClaw + [MetaClaw](https://github.com/aiming-lab/MetaClaw) = すべての実行から学習するパイプライン。**
 
-papers = search_papers("transformer attention mechanisms", limit=20)
-for p in papers:
-    print(f"{p.title} ({p.year}) — cited {p.citation_count}x")
-    print(p.to_bibtex())
+MetaClawはAutoResearchClawに**クロスラン知識転移**を追加します。有効にすると、パイプラインは失敗や警告から自動的に教訓を抽出し、再利用可能なスキルに変換し、後続の実行で全23ステージに注入します — 同じ過ちを二度と繰り返しません。
+
+### 仕組み
+
+```
+Run N executes → failures/warnings captured as Lessons
+                      ↓
+          MetaClaw Lesson → Skill conversion
+                      ↓
+          arc-* Skill files stored in ~/.metaclaw/skills/
+                      ↓
+Run N+1 → build_overlay() injects skills into every LLM prompt
+                      ↓
+          LLM avoids known pitfalls → higher quality, fewer retries
 ```
 
-### 🔍 引用検証（ステージ23）
+### クイックセットアップ
 
-論文執筆後、ステージ23がすべての参考文献の**整合性と関連性の両方をファクトチェック**します：
+```bash
+# 1. MetaClawをインストール（未インストールの場合）
+pip install metaclaw
 
-| レイヤー | 方法 | チェック内容 |
-|-------|--------|----------------|
-| L1 | arXiv API `id_list` | arXiv IDを持つ論文 — そのIDが実際に存在するか検証 |
-| L2 | CrossRef `/works/{doi}` + DataCiteフォールバック | DOIを持つ論文 — DOIが解決でき、タイトルが一致するか検証（DataCiteがarXivの`10.48550` DOIに対応） |
-| L3 | Semantic Scholar + arXivタイトル検索 | その他すべて — ファジータイトルマッチング（類似度≥0.80） |
-| L4 | LLM関連性スコアリング | 検証済み全参考文献 — 研究に対するトピック関連性を評価 |
-
-各参考文献 → **VERIFIED** ✅ · **SUSPICIOUS** ⚠️ · **HALLUCINATED** ❌ · **SKIPPED** ⏭️ · **LOW_RELEVANCE** 📉
-
-**自動クリーンアップ**: 幻覚された引用は論文テキストから静かに削除されます（`[HALLUCINATED]`タグなし）。引用されていない参考文献エントリは整理されます。最終的な`references.bib`には検証済みの引用された参考文献のみが含まれます。
-
-### 🖥️ ハードウェア対応実行
-
-ステージ1がローカルのGPU性能を自動検出し、パイプライン全体を適応させます：
-
-| ティア | 検出方法 | 動作 |
-|------|-----------|----------|
-| **High** | 8GB以上のVRAMを持つNVIDIA GPU | フルPyTorch/GPUコード生成、torchが未インストールの場合は自動インストール |
-| **Limited** | 8GB未満のNVIDIAまたはApple MPS | 軽量実験（パラメータ100万未満、20エポック以下）、ユーザーへ警告 |
-| **CPU-only** | GPUが検出されない | NumPy/sklearnのみ、torchインポートなし、リモートGPU推奨の警告 |
-
-ハードウェアプロファイルは`stage-01/hardware_profile.json`に保存され、コード生成、サンドボックスのインポート、プロンプトの制約に影響します。
-
-### 🧪 サンドボックス実験実行
-
-- **コード検証** — AST解析、インポートホワイトリスト、サンドボックス外のファイルI/O禁止
-- **計算バジェットガード** — コード生成プロンプトに時間予算（設定可能、デフォルト600秒）を注入；LLMはサンドボックスのタイムアウト内に収まる実験を設計する必要あり
-- **実験ハーネス** — `should_stop()`タイムガード、`report_metric()`のNaN/Inf拒否、`finalize()`の結果書き出しを含む不変の`experiment_harness.py`をサンドボックスに注入（karpathy/autoresearchの不変evalパターンに着想）
-- **構造化出力** — 実験は型付きメトリクスを含む`results.json`を生成（stdout解析だけではない）
-- **スマートメトリクス解析** — キーワード検出（`is_metric_name()`）を使用してログ行をメトリクスからフィルタリング
-- **NaN/発散早期停止** — メトリクスからNaN/Inf値をフィルタリング；発散するloss（>100）を検出しフラグ
-- **収束条件の強制** — 生成コードには早期終了条件を含める必要あり（固定反復回数ではない）
-- **ランタイムバグ検出** — NaN/Infメトリクスとstderr警告（ゼロ除算、オーバーフロー）を自動検出
-- **自己修復** — ランタイムの問題をLLMにフィードバックし、根本原因の修正を実施（応急措置のtry/exceptではない）
-- **反復的改良** — ステージ13が結果を分析し、改良されたコード/パラメータで再実行（最大10回の反復、タイムアウト対応プロンプト付き）
-- **部分結果の保持** — タイムアウトしたがメトリクスが取得できた実験は「failed」ではなく「partial」ステータスとなり、利用可能なデータを保持
-- **トピック-実験の整合性** — LLMベースの生成後チェックにより、実験コードが指定された研究トピックを実際にテストしていることを確認
-
-### 📝 学会グレードの論文執筆
-
-執筆パイプラインはNeurIPS/ICML/ICLR基準（9ページ以上、5,000〜6,500語）を目標としています：
-
-- **データ整合性の強制** — 実験がメトリクスを生成しない場合、論文執筆を完全にブロック（LLMによる結果の捏造を防止）；ドラフトと改訂の両方のプロンプトに捏造防止指示を注入
-- **学会グレードのプロンプト** — 採択論文の分析から得た主要原則をシステムプロンプトに含む：新規性、ナラティブ、強力なベースライン、アブレーション、誠実さ、再現性；一般的な却下理由にフラグ
-- **タイトルとフレーミングのガイドライン** — 新規性のシグナリング、ミーム性テスト、5文アブストラクト構造、汎用的なタイトルの検出と再生成
-- **セクション別ドラフト** — 3回の逐次LLM呼び出し（序論+関連研究 → 手法+実験 → 結果+結論）で出力の切り詰めを回避
-- **セクション別目標語数** — Abstract（150-250）、Introduction（800-1000）、Related Work（600-800）、Method（1000-1500）、Experiments（800-1200）、Results（600-800）、Discussion（400-600）
-- **改訂時の文字数ガード** — 改訂版がドラフトより短い場合、より強い強制で自動リトライ；必要に応じてドラフト+注釈にフォールバック
-- **免責事項の抑制** — 「計算リソースの制約により」を最大1回に制限；改訂プロンプトで繰り返しのヘッジを積極的に削除
-- **統計的厳密性** — 結果テーブルに信頼区間、p値、効果量を必須化；壊れたアブレーションにフラグを立て、主張から除外
-- **学会ルーブリック付き査読** — NeurIPS/ICMLルーブリック（新規性、ベースライン、アブレーション、主張vs証拠、限界）に従い1〜10で採点
-
-### 📐 学会テンプレートの切り替え
+# 2. 設定で有効化
+```
 
 ```yaml
-export:
-  target_conference: "neurips_2025"   # または "iclr_2026" または "icml_2026"
+# config.arc.yaml
+metaclaw_bridge:
+  enabled: true
+  proxy_url: "http://localhost:30000"        # MetaClawプロキシ（オプション）
+  skills_dir: "~/.metaclaw/skills"          # スキルの保存場所
+  fallback_url: "https://api.openai.com/v1" # 直接LLMフォールバック
+  fallback_api_key: ""                      # フォールバックURLのAPIキー
+  lesson_to_skill:
+    enabled: true
+    min_severity: "warning"                 # warning + errorを変換
+    max_skills_per_run: 3
 ```
 
-| 学会 | スタイルパッケージ | カラム数 |
-|------------|--------------|---------|
-| NeurIPS 2025 | `neurips_2025` | 1 |
-| ICLR 2026 | `iclr2026_conference` | 1 |
-| ICML 2026 | `icml2026` | 2 |
-| NeurIPS 2024 | `neurips_2024` | 1 |
-| ICLR 2025 | `iclr2025_conference` | 1 |
-| ICML 2025 | `icml2025` | 2 |
+```bash
+# 3. 通常通り実行 — MetaClawは透過的に動作
+researchclaw run --config config.arc.yaml --topic "Your idea" --auto-approve
+```
 
-Markdown → LaTeXコンバーターが処理する内容：セクション見出し（自動番号振り重複排除付き）、インライン/ディスプレイ数式、太字/斜体、リスト、テーブル（`\caption`/`\label`付き）、図（`\includegraphics`）、コードブロック（Unicode安全）、相互参照、`\cite{}`参照。
+各実行後、`~/.metaclaw/skills/arc-*/SKILL.md`を確認して、パイプラインが学習したスキルを確認できます。
 
-### 🚦 品質ゲート
+### 実験結果
 
-| ゲート | ステージ | 却下時のロールバック先 |
-|------|-------|---------------------------|
-| 文献スクリーニング | 5 | 文献の再収集（ステージ4） |
-| 実験設計 | 9 | 仮説の再生成（ステージ8） |
-| 品質ゲート | 20 | アウトラインからの論文再執筆（ステージ16） |
+対照A/B実験（同じトピック、同じLLM、同じ設定）：
 
-`--auto-approve`ですべてのゲートをスキップするか、`security.hitl_required_stages`で特定のステージを設定できます。
+| メトリクス | ベースライン | MetaClaw使用時 | 改善 |
+|-----------|------------|---------------|------|
+| ステージリトライ率 | 10.5% | 7.9% | **-24.8%** |
+| Refineサイクル数 | 2.0 | 1.2 | **-40.0%** |
+| パイプラインステージ完了率 | 18/19 | 19/19 | **+5.3%** |
+| 総合ロバスト性スコア（複合） | 0.714 | 0.845 | **+18.3%** |
+
+> 複合ロバスト性スコアは、ステージ完了率（40%）、リトライ削減（30%）、Refineサイクル効率（30%）の加重平均です。
+
+### 後方互換性
+
+- **デフォルト: オフ。** `metaclaw_bridge`が存在しないか`enabled: false`の場合、パイプラインは以前と全く同じように動作します。
+- **新しい依存関係なし。** MetaClawはオプションです — コアパイプラインはMetaClawなしで動作します。
+- **既存の1,823テストすべてがパス**（統合コードを含む）。
 
 ---
 
@@ -463,18 +418,21 @@ runtime:
 
 # === LLM ===
 llm:
-  provider: "openai-compatible"    # プロバイダータイプ
-  base_url: "https://..."          # APIエンドポイント（必須）
-  api_key_env: "OPENAI_API_KEY"    # APIキーの環境変数（必須）
+  provider: "openai-compatible"    # openai | openrouter | deepseek | minimax | acp | openai-compatible
+  base_url: "https://..."          # APIエンドポイント（openai-compatible必須）
+  api_key_env: "OPENAI_API_KEY"    # APIキーの環境変数（openai-compatible必須）
   api_key: ""                      # またはここにキーを直接記入
   primary_model: "gpt-4o"          # プライマリモデル
   fallback_models: ["gpt-4o-mini"] # フォールバックチェーン
   s2_api_key: ""                   # Semantic Scholar APIキー（オプション、レート制限緩和）
+  acp:                             # provider: "acp" の場合のみ使用
+    agent: "claude"                # ACP Agent CLIコマンド（claude, codex, gemini等）
+    cwd: "."                       # エージェントの作業ディレクトリ
 
 # === 実験 ===
 experiment:
   mode: "sandbox"                  # simulated | sandbox | docker | ssh_remote
-  time_budget_sec: 600             # 実行あたりの最大実行時間（デフォルト: 600秒）
+  time_budget_sec: 300             # 実行あたりの最大実行時間（デフォルト: 300秒）
   max_iterations: 10               # 最大最適化反復回数
   metric_key: "val_loss"           # プライマリメトリクス名
   metric_direction: "minimize"     # minimize | maximize
@@ -493,6 +451,14 @@ experiment:
     host: ""                       # GPUサーバーのホスト名
     gpu_ids: []                    # 利用可能なGPU ID
     remote_workdir: "/tmp/researchclaw_experiments"
+  opencode:                          # OpenCode Beast Mode（`researchclaw setup`で自動インストール）
+    enabled: true                    # マスタースイッチ（デフォルト: true）
+    auto: true                       # 確認なしで自動トリガー（デフォルト: true）
+    complexity_threshold: 0.2        # 0.0-1.0 — 高い = 複雑な実験のみトリガー
+    model: ""                        # モデルのオーバーライド（空 = llm.primary_modelを使用）
+    timeout_sec: 600                 # OpenCode生成の最大秒数
+    max_retries: 1                   # 失敗時のリトライ回数
+    workspace_cleanup: true          # 収集後に一時ワークスペースを削除
 
 # === エクスポート ===
 export:
@@ -519,6 +485,18 @@ knowledge_base:
 notifications:
   channel: "console"               # console | discord | slack
   target: ""
+
+# === MetaClaw Bridge（オプション）===
+metaclaw_bridge:
+  enabled: false                   # trueに設定してクロスラン学習を有効化
+  proxy_url: "http://localhost:30000"  # MetaClawプロキシURL
+  skills_dir: "~/.metaclaw/skills" # arc-*スキルの保存場所
+  fallback_url: ""                 # プロキシがダウン時の直接LLMフォールバック
+  fallback_api_key: ""             # フォールバックエンドポイントのAPIキー
+  lesson_to_skill:
+    enabled: true                  # 教訓をスキルに自動変換
+    min_severity: "warning"        # 変換する最小重大度
+    max_skills_per_run: 3          # パイプラン実行あたりの最大新規スキル数
 
 # === OpenClaw Bridge ===
 openclaw_bridge:
@@ -547,6 +525,22 @@ openclaw_bridge:
 ## 📄 ライセンス
 
 MIT — 詳細は[LICENSE](../LICENSE)をご覧ください。
+
+---
+
+## 📌 引用
+
+AutoResearchClawが役に立った場合は、以下を引用してください：
+
+```bibtex
+@misc{liu2026autoresearchclaw,
+  author       = {Liu, Jiaqi and Xia, Peng and Han, Siwei and Qiu, Shi and Zhang, Letian and Chen, Guiming  and Tu, Haoqin and Yang, Xinyu and and Zhou, Jiawei and Zhu, Hongtu and Li, Yun and Zhou, Yuyin and Zheng, Zeyu and Xie, Cihang and Ding, Mingyu and Yao, Huaxiu},
+  title        = {AutoResearchClaw: Fully Autonomous Research from Idea to Paper},
+  year         = {2026},
+  organization = {GitHub},
+  url          = {https://github.com/aiming-lab/AutoResearchClaw},
+}
+```
 
 <p align="center">
   <sub>Built with 🦞 by the AutoResearchClaw team</sub>

@@ -1,0 +1,120 @@
+domain_id: neuroscience_computational
+display_name: Computational Neuroscience
+parent_domain: neuroscience
+
+experiment_paradigm: simulation
+condition_terminology:
+  baseline: reference model
+  proposed: proposed model
+  variant: ablation / parameter variant
+  input: neural data / stimulus protocol
+  metric: firing rate / spike correlation / decoding accuracy
+
+typical_file_structure:
+  config.py: "Simulation parameters (neuron count, connectivity, time constants)"
+  network.py: "Neural network/circuit model definition"
+  neuron.py: "Single-neuron model (LIF, Hodgkin-Huxley, Izhikevich)"
+  stimulus.py: "Input stimulus generation (Poisson spikes, current injection)"
+  analysis.py: "Spike train analysis, firing rate, correlation, decoding"
+  main.py: "Entry point: setup → simulate → analyze → report"
+
+entry_point: main.py
+
+core_libraries:
+  - numpy
+  - scipy
+  - brian2
+  - neo
+  - matplotlib
+
+docker_image: researchclaw/sandbox-generic:latest
+gpu_required: false
+
+pip_packages:
+  - numpy
+  - scipy
+  - brian2
+  - neo
+  - elephant
+  - matplotlib
+  - mne
+  - nilearn
+
+metric_types:
+  - scalar
+  - learning_curve
+  - convergence
+
+standard_baselines:
+  - Leaky Integrate-and-Fire (LIF)
+  - Hodgkin-Huxley
+  - Izhikevich model
+  - Rate-coded network
+
+evaluation_protocol: "Run neural simulation for specified duration. Compare spike statistics (firing rate, CV of ISI, pairwise correlation). For decoding tasks, report accuracy with cross-validation."
+statistical_tests:
+  - paired_t_test
+  - ks_test
+  - permutation_test
+
+output_formats:
+  - latex_table
+  - raster_plot
+  - firing_rate_plot
+
+figure_types:
+  - raster_plot
+  - firing_rate_histogram
+  - membrane_potential_trace
+  - connectivity_matrix
+  - tuning_curve
+  - spike_correlation_matrix
+
+github_search_terms:
+  - spiking neural network python
+  - brian2 simulation
+  - computational neuroscience model
+  - neural population dynamics
+  - neural decoding python
+
+paper_keywords:
+  - spiking neural network
+  - neural dynamics
+  - population coding
+  - neural circuit model
+  - brain-inspired computing
+
+compute_budget_guidance: |
+  Time budget for neuroscience simulations:
+  - Single-neuron models: fast, can run thousands of trials
+  - Small networks (< 1000 neurons): seconds per trial
+  - Large networks (> 10000 neurons): use Brian2 or vectorized NumPy
+  - Keep simulation duration reasonable (100ms–10s biological time)
+  - Reduce network size if simulations exceed time budget
+
+dataset_guidance: |
+  Computational neuroscience experiments generate synthetic data:
+  - Define neuron models and connectivity in code
+  - Generate input stimuli programmatically (Poisson spike trains, step currents)
+  - Use standard benchmark circuits (E/I balanced network, winner-take-all)
+  - Do NOT download external neural datasets
+  - For brain imaging analysis, generate synthetic fMRI/EEG signals
+
+code_generation_hints: |
+  Neuroscience simulation code requirements:
+  1. Implement neuron models with biologically plausible parameters
+  2. Use standard time integration (Euler for LIF, RK4 for Hodgkin-Huxley)
+  3. Generate spike trains and compute standard statistics
+  4. Compare models on same stimulus and initial conditions
+  5. Report: firing rate (Hz), CV of ISI, pairwise correlation, Fano factor
+  6. For decoding: train decoder on spike counts, report accuracy with k-fold CV
+  7. Output all results to results.json
+
+result_analysis_hints: |
+  Neuroscience result analysis:
+  - Firing rate: mean and std across neurons and trials
+  - Regularity: coefficient of variation of inter-spike intervals (CV ISI)
+  - Synchrony: pairwise spike-count correlation
+  - Population: Fano factor, dimensionality of population activity
+  - Decoding: accuracy, confusion matrix, information content (bits)
+  - Use raster plots and PSTHs for qualitative assessment

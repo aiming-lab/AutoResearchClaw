@@ -1,0 +1,99 @@
+domain_id: economics_empirical
+display_name: Empirical Economics
+parent_domain: economics
+
+experiment_paradigm: progressive_spec
+condition_terminology:
+  baseline: "specification (1)"
+  proposed: full specification
+  variant: robustness check
+  input: sample
+  metric: coefficient estimate
+
+typical_file_structure:
+  config.py: "Specification definitions and variable lists"
+  data_prep.py: "Data cleaning, variable construction, panel setup"
+  models.py: "Regression specifications (OLS, FE, IV)"
+  robustness.py: "Robustness checks and sensitivity analysis"
+  main.py: "Entry point: load → estimate → robustness → tables"
+
+entry_point: main.py
+
+core_libraries:
+  - statsmodels
+  - linearmodels
+  - pandas
+  - numpy
+  - scipy
+
+docker_image: researchclaw/sandbox-economics:latest
+gpu_required: false
+
+pip_packages:
+  - statsmodels
+  - linearmodels
+  - pandas
+  - numpy
+  - scipy
+  - matplotlib
+
+metric_types:
+  - table
+  - scalar
+
+standard_baselines:
+  - OLS
+  - OLS + controls
+  - Fixed Effects
+  - 2SLS / IV
+
+evaluation_protocol: "Progressive specification: OLS → +controls → +FE → +IV. Report regression table with coefficients, SE, R², N."
+statistical_tests:
+  - hausman_test
+  - robust_se
+  - cluster_se
+  - f_test
+
+output_formats:
+  - regression_table
+  - latex_table
+
+figure_types:
+  - coefficient_plot
+  - scatter_plot
+  - residual_plot
+
+github_search_terms:
+  - statsmodels regression example
+  - panel data python
+  - instrumental variable python
+  - econometrics python
+
+paper_keywords:
+  - causal inference
+  - instrumental variables
+  - panel data
+  - regression analysis
+
+compute_budget_guidance: |
+  Economics regressions are fast. Focus on:
+  - Multiple specifications (4-6 columns in regression table)
+  - Bootstrap for standard errors if needed (100-500 replications)
+  - Cluster-robust SE for panel data
+
+dataset_guidance: |
+  Economics data:
+  - Generate synthetic panel/cross-section data in code
+  - Simulate treatment effects with known DGP
+  - Include controls, fixed effects structure
+  - Standard test: wage equation, returns to education
+  - Do NOT download external datasets
+
+code_generation_hints: |
+  Economics regression code:
+  1. Generate synthetic data with known treatment effect
+  2. Implement progressive specifications (OLS → +controls → +FE → +IV)
+  3. Report coefficient, SE, p-value, R², N for each spec
+  4. Use robust/clustered standard errors
+  5. Output regression table to results.json:
+     {"regression_table": {"spec_1_ols": {"coeff": 0.15, "se": 0.03, ...}}}

@@ -113,7 +113,7 @@ has_active_children() {
 restart_pipeline() {
     log "Attempting pipeline restart (attempt $((retry_count + 1))/${MAX_RETRIES})"
 
-    $PYTHON_PATH -m researchclaw resume --run-dir "$RUN_DIR" &
+    $PYTHON_PATH -m researchclaw run --resume --output "$RUN_DIR" &
     local new_pid=$!
     echo "$new_pid" > "${RUN_DIR}/pipeline.pid"
 

@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import importlib
 import logging
+import os
 import shutil
+import tempfile
 import time as _time
 from pathlib import Path
 
@@ -45,12 +47,16 @@ def _build_pipeline_summary(
         "run_id": run_id,
         "stages_executed": len(results),
         "stages_done": sum(1 for item in results if item.status == StageStatus.DONE),
+        "stages_paused": sum(
+            1 for item in results if item.status == StageStatus.PAUSED
+        ),
         "stages_blocked": sum(
             1 for item in results if item.status == StageStatus.BLOCKED_APPROVAL
         ),
         "stages_failed": sum(
             1 for item in results if item.status == StageStatus.FAILED
         ),
+        "degraded": any(r.decision == "degraded" for r in results),
         "from_stage": int(from_stage),
         "final_stage": int(results[-1].stage) if results else int(from_stage),
         "final_status": results[-1].status.value if results else "no_stages",
@@ -68,16 +74,23 @@ def _write_pipeline_summary(run_dir: Path, summary: dict[str, object]) -> None:
 
 
 def _write_checkpoint(run_dir: Path, stage: Stage, run_id: str) -> None:
-    """Write checkpoint after successful stage completion."""
+    """Write checkpoint atomically via temp file + rename to prevent corruption."""
     checkpoint = {
         "last_completed_stage": int(stage),
         "last_completed_name": stage.name,
         "run_id": run_id,
         "timestamp": _utcnow_iso(),
     }
-    (run_dir / "checkpoint.json").write_text(
-        json.dumps(checkpoint, indent=2), encoding="utf-8"
-    )
+    target = run_dir / "checkpoint.json"
+    fd, tmp_path = tempfile.mkstemp(dir=run_dir, suffix=".tmp", prefix="checkpoint_")
+    os.close(fd)
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(checkpoint, indent=2))
+        Path(tmp_path).replace(target)
+    except BaseException:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
 
 
 def _write_heartbeat(run_dir: Path, stage: Stage, run_id: str) -> None:
@@ -159,9 +172,8 @@ def _collect_content_metrics(run_dir: Path | None) -> dict[str, object]:
             vdata = json.loads(verify_path.read_text(encoding="utf-8"))
             if isinstance(vdata, dict):
                 summary = vdata.get("summary", vdata)
-                if isinstance(summary, dict):
-                    total = summary.get("total", 0)
-                    verified = summary.get("verified", 0)
+                total = summary.get("total", 0) if isinstance(summary, dict) else None
+                verified = summary.get("verified", 0) if isinstance(summary, dict) else None
                 if isinstance(total, int | float) and isinstance(verified, int | float):
                     total_num = int(total)
                     verified_num = int(verified)
@@ -175,6 +187,224 @@ def _collect_content_metrics(run_dir: Path | None) -> dict[str, object]:
             pass
 
     return metrics
+
+
+logger = logging.getLogger(__name__)
+
+
+def _run_experiment_diagnosis(run_dir: Path, config: RCConfig, run_id: str) -> None:
+    """Run experiment diagnosis after Stage 14 and save reports.
+
+    Produces:
+    - ``run_dir/experiment_diagnosis.json`` — structured diagnosis + quality assessment
+    - ``run_dir/repair_prompt.txt`` — repair instructions (if quality is insufficient)
+    """
+    try:
+        from researchclaw.pipeline.experiment_diagnosis import (
+            diagnose_experiment,
+            assess_experiment_quality,
+        )
+
+        # Find the most recent stage-14 experiment_summary.json
+        summary_path = None
+        for candidate in sorted(run_dir.glob("stage-14*/experiment_summary.json")):
+            summary_path = candidate
+        if not summary_path or not summary_path.exists():
+            return
+
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+        # Collect stdout/stderr from experiment runs
+        stdout, stderr = "", ""
+        runs_dir = summary_path.parent / "runs"
+        if runs_dir.is_dir():
+            for run_file in sorted(runs_dir.glob("*.json"))[:5]:
+                try:
+                    run_data = json.loads(run_file.read_text(encoding="utf-8"))
+                    if isinstance(run_data, dict):
+                        stdout += run_data.get("stdout", "") + "\n"
+                        stderr += run_data.get("stderr", "") + "\n"
+                except (json.JSONDecodeError, OSError):
+                    continue
+
+        # Load experiment plan from stage-09
+        plan = None
+        for candidate in sorted(run_dir.glob("stage-09*/exp_plan.yaml")):
+            try:
+                import yaml as _yaml_diag
+                plan = _yaml_diag.safe_load(candidate.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        if plan is None:
+            for candidate in sorted(run_dir.glob("stage-09*/experiment_design.json")):
+                try:
+                    plan = json.loads(candidate.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+        # Load refinement log if available
+        ref_log = None
+        for candidate in sorted(run_dir.glob("stage-13*/refinement_log.json")):
+            try:
+                ref_log = json.loads(candidate.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Run diagnosis
+        diag = diagnose_experiment(
+            experiment_summary=summary,
+            experiment_plan=plan,
+            refinement_log=ref_log,
+            stdout=stdout.strip(),
+            stderr=stderr.strip(),
+        )
+
+        # Run quality assessment
+        qa = assess_experiment_quality(summary, ref_log)
+
+        # Save diagnosis report
+        diag_report = {
+            "diagnosis": diag.to_dict(),
+            "quality_assessment": {
+                "mode": qa.mode.value,
+                "sufficient": qa.sufficient,
+                "repair_possible": qa.repair_possible,
+                "deficiency_types": [d.type.value for d in qa.deficiencies],
+            },
+            "repair_needed": not qa.sufficient,
+            "generated": _utcnow_iso(),
+        }
+        (run_dir / "experiment_diagnosis.json").write_text(
+            json.dumps(diag_report, indent=2), encoding="utf-8"
+        )
+
+        if not qa.sufficient:
+            # Generate repair prompt for the REFINE loop
+            from researchclaw.pipeline.experiment_repair import build_repair_prompt
+
+            code: dict[str, str] = {}
+            # Try refined code first, then stage-10 experiment dir, then raw stage-10
+            for _glob_pat in (
+                "stage-13*/experiment_final/*.py",
+                "stage-10*/experiment/*.py",
+                "stage-10*/*.py",
+            ):
+                for candidate in sorted(run_dir.glob(_glob_pat)):
+                    try:
+                        code[candidate.name] = candidate.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        pass
+                if code:
+                    break
+
+            repair_prompt = build_repair_prompt(
+                diag, code, time_budget_sec=config.experiment.time_budget_sec
+            )
+            (run_dir / "repair_prompt.txt").write_text(
+                repair_prompt, encoding="utf-8"
+            )
+            logger.info(
+                "[%s] Experiment diagnosis: mode=%s, deficiencies=%d — repair prompt saved",
+                run_id, qa.mode.value, len(diag.deficiencies),
+            )
+            print(
+                f"[{run_id}] Experiment diagnosis: {qa.mode.value} "
+                f"({len(diag.deficiencies)} issues found, repair needed)"
+            )
+        else:
+            logger.info(
+                "[%s] Experiment diagnosis: mode=%s, sufficient=True — quality OK",
+                run_id, qa.mode.value,
+            )
+            print(f"[{run_id}] Experiment diagnosis: {qa.mode.value} — quality OK")
+
+    except Exception as exc:
+        logger.warning("Experiment diagnosis failed: %s", exc)
+
+
+def _run_experiment_repair(run_dir: Path, config: RCConfig, run_id: str) -> None:
+    """Execute the experiment repair loop when diagnosis finds quality issues.
+
+    Calls the repair loop from ``experiment_repair.py`` which:
+    1. Loads experiment code and diagnosis
+    2. Gets fixes from LLM or OpenCode
+    3. Re-runs experiment in sandbox
+    4. Re-assesses quality
+    5. Repeats up to max_cycles
+    """
+    try:
+        from researchclaw.pipeline.experiment_repair import run_repair_loop
+
+        repair_result = run_repair_loop(
+            run_dir=run_dir,
+            config=config,
+            run_id=run_id,
+        )
+
+        # Save repair result
+        (run_dir / "experiment_repair_result.json").write_text(
+            json.dumps(repair_result.to_dict(), indent=2), encoding="utf-8"
+        )
+
+        # BUG-186: Promote best experiment summary to stage-14/ so
+        # downstream stages (sanitizer, paper_verifier) see it.
+        # BUG-198: Only promote if the repair summary is RICHER than
+        # the existing stage-14 summary.  The repair loop can produce
+        # empty summaries (metrics: {}, 0 conditions) which would
+        # overwrite enriched data from the analysis stage.
+        if repair_result.best_experiment_summary:
+            from researchclaw.pipeline.experiment_repair import (
+                _summary_quality_score,
+            )
+
+            best_path = run_dir / "stage-14" / "experiment_summary.json"
+            existing_score = 0.0
+            if best_path.exists():
+                try:
+                    existing = json.loads(
+                        best_path.read_text(encoding="utf-8")
+                    )
+                    existing_score = _summary_quality_score(existing)
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            repair_score = _summary_quality_score(
+                repair_result.best_experiment_summary
+            )
+
+            if repair_score > existing_score:
+                best_path.write_text(
+                    json.dumps(
+                        repair_result.best_experiment_summary, indent=2
+                    ),
+                    encoding="utf-8",
+                )
+                logger.info(
+                    "[%s] Promoted repair results to stage-14 "
+                    "(score %.1f > %.1f, success=%s)",
+                    run_id, repair_score, existing_score,
+                    repair_result.success,
+                )
+            else:
+                logger.info(
+                    "[%s] Kept existing stage-14 summary (score %.1f >= "
+                    "repair score %.1f)",
+                    run_id, existing_score, repair_score,
+                )
+
+        if repair_result.success:
+            # Re-run diagnosis with updated results
+            _run_experiment_diagnosis(run_dir, config, run_id)
+        else:
+            logger.info(
+                "[%s] Repair loop completed without reaching full_paper quality "
+                "(best mode: %s, %d cycles)",
+                run_id, repair_result.final_mode.value, repair_result.total_cycles,
+            )
+
+    except Exception as exc:
+        logger.warning("[%s] Experiment repair failed: %s", run_id, exc)
+        print(f"[{run_id}] Experiment repair failed: {exc}")
 
 
 def execute_pipeline(
@@ -203,6 +433,16 @@ def execute_pipeline(
         stage_num = int(stage)
         prefix = f"[{run_id}] Stage {stage_num:02d}/{total_stages}"
         print(f"{prefix} {stage.name} — running...")
+
+        # BUG-218: Ensure the best stage-14 experiment data is promoted
+        # BEFORE paper writing begins.  Without this, the recursive REFINE
+        # path writes the paper using the latest (potentially worse)
+        # iteration's data, because the post-recursion promotion at line
+        # ~547 runs only after the recursive call—i.e. after the paper
+        # has already been written.
+        if stage == Stage.PAPER_OUTLINE:
+            _promote_best_stage14(run_dir, config)
+
         t0 = _time.monotonic()
 
         result = execute_stage(
@@ -216,12 +456,21 @@ def execute_pipeline(
         elapsed = _time.monotonic() - t0
         if result.status == StageStatus.DONE:
             arts = ", ".join(result.artifacts) if result.artifacts else "none"
-            print(f"{prefix} {stage.name} — done ({elapsed:.1f}s) → {arts}")
+            if result.decision == "degraded":
+                print(
+                    f"{prefix} {stage.name} — DEGRADED ({elapsed:.1f}s) "
+                    f"— continuing with sanitization -> {arts}"
+                )
+            else:
+                print(f"{prefix} {stage.name} — done ({elapsed:.1f}s) -> {arts}")
         elif result.status == StageStatus.FAILED:
             err = result.error or "unknown error"
             print(f"{prefix} {stage.name} — FAILED ({elapsed:.1f}s) — {err}")
         elif result.status == StageStatus.BLOCKED_APPROVAL:
             print(f"{prefix} {stage.name} — blocked (awaiting approval)")
+        elif result.status == StageStatus.PAUSED:
+            err = result.error or "paused"
+            print(f"{prefix} {stage.name} -- PAUSED ({elapsed:.1f}s) -- {err}")
         results.append(result)
 
         if kb_root is not None and result.status == StageStatus.DONE:
@@ -243,6 +492,24 @@ def execute_pipeline(
         if result.status == StageStatus.DONE:
             _write_checkpoint(run_dir, stage, run_id)
 
+        # --- Experiment diagnosis + repair after Stage 14 (result_analysis) ---
+        if (
+            stage == Stage.RESULT_ANALYSIS
+            and result.status == StageStatus.DONE
+            and config.experiment.repair.enabled
+        ):
+            _run_experiment_diagnosis(run_dir, config, run_id)
+
+            # Check if repair loop should run
+            _diag_path = run_dir / "experiment_diagnosis.json"
+            if _diag_path.exists():
+                try:
+                    _diag_data = json.loads(_diag_path.read_text(encoding="utf-8"))
+                    if _diag_data.get("repair_needed"):
+                        _run_experiment_repair(run_dir, config, run_id)
+                except (json.JSONDecodeError, OSError):
+                    pass
+
         # --- Heartbeat for sentinel watchdog ---
         _write_heartbeat(run_dir, stage, run_id)
 
@@ -261,6 +528,9 @@ def execute_pipeline(
                 print(
                     f"[{run_id}] Consecutive empty metrics across REFINE cycles — forcing PROCEED"
                 )
+                # BUG-211: Promote best stage-14 before proceeding with
+                # empty data — an earlier iteration may have real metrics.
+                _promote_best_stage14(run_dir, config)
             elif pivot_count < MAX_DECISION_PIVOTS:
                 rollback_target = DECISION_ROLLBACK[result.decision]
                 _record_decision_history(
@@ -295,6 +565,9 @@ def execute_pipeline(
                     kb_root=kb_root,
                 )
                 results.extend(pivot_results)
+                # BUG-211: Promote best stage-14 after REFINE completes so
+                # downstream stages use the best data, not just the latest.
+                _promote_best_stage14(run_dir, config)
                 break  # Exit current loop; recursive call handles the rest
             else:
                 # Quality gate: check if experiment results are actually usable
@@ -328,11 +601,23 @@ def execute_pipeline(
                     f"[{run_id}] Max pivot attempts reached — forcing PROCEED"
                 )
 
+                # BUG-205: After forced PROCEED, promote the BEST stage-14
+                # experiment summary across all REFINE iterations.
+                _promote_best_stage14(run_dir, config)
+
         if result.status == StageStatus.FAILED:
             if skip_noncritical and stage in NONCRITICAL_STAGES:
                 logger.warning("Noncritical stage %s failed - skipping", stage.name)
             else:
                 break
+        if result.status == StageStatus.PAUSED:
+            logger.warning(
+                "[%s] Pipeline paused at %s: %s",
+                run_id,
+                stage.name,
+                result.error or result.decision,
+            )
+            break
         if result.status == StageStatus.BLOCKED_APPROVAL and stop_on_gate:
             break
 
@@ -345,6 +630,7 @@ def execute_pipeline(
     _write_pipeline_summary(run_dir, summary)
 
     # --- Evolution: extract and store lessons ---
+    lessons: list[object] = []
     try:
         lessons = extract_lessons(results, run_id=run_id, run_dir=run_dir)
         if lessons:
@@ -354,11 +640,45 @@ def execute_pipeline(
     except Exception:  # noqa: BLE001
         logger.warning("Evolution lesson extraction failed (non-blocking)")
 
+    # --- MetaClaw bridge: convert high-severity lessons to skills ---
+    try:
+        _metaclaw_post_pipeline(config, results, lessons, run_id, run_dir)
+    except Exception:  # noqa: BLE001
+        logger.warning("MetaClaw post-pipeline hook failed (non-blocking)")
+
+    # --- A-Evolve: structured diagnosis + gated skill generation ---
+    _has_failures = any(
+        "failed" in str(getattr(r, "status", "")).lower() for r in results
+    )
+    if lessons or _has_failures:
+        try:
+            from researchclaw.evolution_aevolve import run_aevolve_cycle
+            from researchclaw.llm.client import LLMClient
+
+            _aevolve_llm = LLMClient.from_rc_config(config)
+            _skills_dir = Path(
+                getattr(
+                    getattr(config, "metaclaw_bridge", None),
+                    "skills_dir",
+                    "~/.metaclaw/skills",
+                )
+            ).expanduser()
+            _aevolve_skills = run_aevolve_cycle(
+                lessons, results, _aevolve_llm, _skills_dir, run_dir,
+            )
+            if _aevolve_skills:
+                logger.info(
+                    "A-Evolve: generated %d skills: %s",
+                    len(_aevolve_skills), _aevolve_skills,
+                )
+        except Exception:  # noqa: BLE001
+            logger.debug("A-Evolve cycle skipped (non-blocking)", exc_info=True)
+
     # --- Package deliverables into a single folder ---
     try:
         deliverables_dir = _package_deliverables(run_dir, run_id, config)
         if deliverables_dir is not None:
-            print(f"[{run_id}] Deliverables packaged → {deliverables_dir}")
+            print(f"[{run_id}] Deliverables packaged -> {deliverables_dir}")
     except Exception:  # noqa: BLE001
         logger.warning("Deliverables packaging failed (non-blocking)")
 
@@ -401,13 +721,18 @@ def _package_deliverables(
         packaged.append("paper_final.md")
 
     # --- 2. LaTeX paper ---
-    # IMP-13: If Stage 23 produced verified markdown, regenerate paper.tex
-    # from it so that hallucinated citations removed in Stage 23 are also
-    # absent from the LaTeX.  Fall back to the Stage 22 .tex otherwise.
+    # BUG-183: Stage 22's paper.tex has been sanitized (fabricated numbers
+    # replaced with ---).  Regenerating from Markdown would undo this because
+    # the Markdown was never sanitized.  Prefer Stage-22 paper.tex when a
+    # sanitization report exists.  Only regenerate from verified Markdown if
+    # no sanitization was performed (i.e., the run was clean).
     tex_regenerated = False
+    _sanitization_report = run_dir / "stage-22" / "sanitization_report.json"
+    _was_sanitized = _sanitization_report.exists()
     verified_md = run_dir / "stage-23" / "paper_final_verified.md"
     if (
-        paper_md is not None
+        not _was_sanitized
+        and paper_md is not None
         and paper_md == verified_md
         and verified_md.exists()
         and verified_md.stat().st_size > 0
@@ -450,6 +775,11 @@ def _package_deliverables(
                 )
         except Exception:  # noqa: BLE001
             logger.debug("paper.tex regeneration from verified md failed")
+    elif _was_sanitized:
+        logger.info(
+            "Deliverables: using Stage 22 paper.tex (sanitized) — "
+            "skipping markdown regeneration to preserve sanitization"
+        )
 
     if not tex_regenerated:
         tex_src = run_dir / "stage-22" / "paper.tex"
@@ -485,6 +815,12 @@ def _package_deliverables(
     if verify_src.exists() and verify_src.stat().st_size > 0:
         shutil.copy2(verify_src, dest / "verification_report.json")
         packaged.append("verification_report.json")
+
+    # --- 5b. Sanitization report (degraded mode) ---
+    san_src = run_dir / "stage-22" / "sanitization_report.json"
+    if san_src.exists() and san_src.stat().st_size > 0:
+        shutil.copy2(san_src, dest / "sanitization_report.json")
+        packaged.append("sanitization_report.json")
 
     # --- 6. Charts (optional) ---
     charts_src = run_dir / "stage-22" / "charts"
@@ -672,8 +1008,17 @@ def _version_rollback_stages(
 
 def _consecutive_empty_metrics(run_dir: Path, pivot_count: int) -> bool:
     """R6-4: Check if the current and previous REFINE cycles both produced empty metrics."""
-    # Check the most recent experiment_summary.json (stage-14) and its versioned predecessor
+    # Check the most recent experiment_summary.json (stage-14) and its versioned predecessor.
+    # BUG-215: When stage-14/ doesn't exist (renamed to stage-14_v{N} without
+    # promotion), fall back to the latest versioned directory as "current".
     current = run_dir / "stage-14" / "experiment_summary.json"
+    if not current.exists():
+        # Try the latest versioned directory
+        for _v in range(pivot_count + 1, 0, -1):
+            alt = run_dir / f"stage-14_v{_v}" / "experiment_summary.json"
+            if alt.exists():
+                current = alt
+                break
     prev = run_dir / f"stage-14_v{pivot_count}" / "experiment_summary.json"
     for path in (current, prev):
         if not path.exists():
@@ -695,6 +1040,122 @@ def _consecutive_empty_metrics(run_dir: Path, pivot_count: int) -> bool:
     return True  # Both cycles had empty metrics
 
 
+def _promote_best_stage14(run_dir: Path, config: RCConfig) -> None:
+    """BUG-205: After forced PROCEED, promote the best stage-14 experiment.
+
+    Scans all ``stage-14*`` directories, scores them by primary metric,
+    and copies the best experiment_summary.json into ``stage-14/`` if the
+    current ``stage-14/`` is not already the best.
+    """
+    import shutil
+
+    metric_key = config.experiment.metric_key or "primary_metric"
+    metric_dir = config.experiment.metric_direction or "maximize"
+
+    candidates: list[tuple[float, Path]] = []
+    for d in sorted(run_dir.glob("stage-14*")):
+        summary_path = d / "experiment_summary.json"
+        if not summary_path.exists():
+            continue
+        try:
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        ms = data.get("metrics_summary", {})
+        pm_val: float | None = None
+        # BUG-DA8-03: Exact match first, then substring fallback
+        # (avoids "accuracy" matching "balanced_accuracy")
+        if metric_key in ms:
+            _v = ms[metric_key]
+            try:
+                pm_val = float(_v["mean"] if isinstance(_v, dict) else _v)
+            except (TypeError, ValueError, KeyError):
+                pass
+        if pm_val is None:
+            for k, v in ms.items():
+                if metric_key in k:
+                    try:
+                        pm_val = float(v["mean"] if isinstance(v, dict) else v)
+                    except (TypeError, ValueError, KeyError):
+                        pass
+                    break
+        if pm_val is not None:
+            candidates.append((pm_val, d))
+
+    if not candidates:
+        return  # nothing to promote
+
+    current_dir = run_dir / "stage-14"
+
+    # Sort: best first
+    candidates.sort(key=lambda x: x[0], reverse=(metric_dir == "maximize"))
+
+    # BUG-226: Detect degenerate near-zero metrics (broken normalization or
+    # collapsed training).  When minimising, a value >1000x smaller than the
+    # second-best almost certainly comes from a degenerate iteration.
+    if metric_dir == "minimize" and len(candidates) > 1:
+        _bv, _bd = candidates[0]
+        _sv = candidates[1][0]
+        if 0 < _bv < _sv * 1e-3:
+            logger.warning(
+                "BUG-226: Degenerate best value %.6g is >1000× smaller than "
+                "second-best %.6g — skipping degenerate iteration %s",
+                _bv, _sv, _bd.name,
+            )
+            candidates.pop(0)
+
+    best_val, best_dir = candidates[0]
+
+    # BUG-223: Always write canonical best summary at run root BEFORE any
+    # early return, so downstream consumers (Stage 17, Stage 20, Stage 22,
+    # VerifiedRegistry) always find experiment_summary_best.json.
+    _best_src = best_dir / "experiment_summary.json"
+    if _best_src.exists():
+        shutil.copy2(_best_src, run_dir / "experiment_summary_best.json")
+        logger.info(
+            "BUG-223: Wrote experiment_summary_best.json from %s (%.4f)",
+            best_dir.name, best_val,
+        )
+        # BUG-225: Also copy analysis.md from the best iteration so Stage 17
+        # doesn't read stale analysis from a degenerate non-versioned stage-14.
+        _best_analysis = best_dir / "analysis.md"
+        if _best_analysis.exists():
+            shutil.copy2(_best_analysis, run_dir / "analysis_best.md")
+
+    if best_dir == current_dir:
+        logger.info("BUG-205: stage-14/ already has the best result (%.4f)", best_val)
+        return
+
+    # Promote: copy best summary into stage-14/
+    current_summary = current_dir / "experiment_summary.json"
+    best_summary = best_dir / "experiment_summary.json"
+    # BUG-213: Also promote when stage-14/ is missing or empty
+    if best_summary.exists():
+        current_dir.mkdir(parents=True, exist_ok=True)
+        logger.warning(
+            "BUG-205: Promoting %s (%.4f) over stage-14/",
+            best_dir.name, best_val,
+        )
+        shutil.copy2(best_summary, current_summary)
+        # Also copy charts, analysis, and figure plans if they exist
+        for fname in [
+            "analysis.md",
+            "results_table.tex",
+            "figure_plan.json",           # BUG-213: must travel with metrics
+            "figure_plan_final.json",     # BUG-213: ditto
+        ]:
+            src = best_dir / fname
+            if src.exists():
+                shutil.copy2(src, current_dir / fname)
+        # Copy charts directory
+        best_charts = best_dir / "charts"
+        current_charts = current_dir / "charts"
+        if best_charts.is_dir():
+            if current_charts.is_dir():
+                shutil.rmtree(current_charts)
+            shutil.copytree(best_charts, current_charts)
+
+
 def _check_experiment_quality(
     run_dir: Path, pivot_count: int
 ) -> tuple[bool, str]:
@@ -703,8 +1164,10 @@ def _check_experiment_quality(
     Returns (ok, message). ok=False means experiment results have critical
     quality issues and the forced-PROCEED paper will likely be poor.
     """
-    # Find most recent experiment summary
-    summary_path = run_dir / "stage-14" / "experiment_summary.json"
+    # BUG-DA8-18: Check experiment_summary_best.json first (repair-promoted)
+    summary_path = run_dir / "experiment_summary_best.json"
+    if not summary_path.exists():
+        summary_path = run_dir / "stage-14" / "experiment_summary.json"
     if not summary_path.exists():
         for v in range(pivot_count, 0, -1):
             alt = run_dir / f"stage-14_v{v}" / "experiment_summary.json"
@@ -723,24 +1186,37 @@ def _check_experiment_quality(
     # Check 1: Are all metrics zero?
     ms = data.get("metrics_summary", {})
     if isinstance(ms, dict):
-        values = []
+        values: list[float] = []
         for k, v in ms.items():
             if isinstance(v, (int, float)):
-                values.append(v)
+                values.append(float(v))
+            # BUG-212: metrics_summary values are often dicts {min,max,mean,count}
+            elif isinstance(v, dict) and "mean" in v:
+                _mv = v["mean"]
+                if isinstance(_mv, (int, float)):
+                    values.append(float(_mv))
         if values and all(v == 0.0 for v in values):
             return False, "All experiment metrics are zero — experiments likely failed"
 
     # Check 2: Zero variance across conditions (R13-1)
     # Look for ablation_warnings or condition comparison data
     ablation_warnings = data.get("ablation_warnings", [])
-    conditions = data.get("conditions", data.get("condition_metrics", {}))
+    # BUG-212: Key is "condition_summaries", not "conditions"
+    conditions = data.get(
+        "condition_summaries", data.get("condition_metrics", {})
+    )
     if isinstance(conditions, dict) and len(conditions) >= 2:
-        primary_values = []
+        primary_values: list[float] = []
         for cond_name, cond_data in conditions.items():
             if isinstance(cond_data, dict):
-                pm = cond_data.get("primary_metric", cond_data.get("primary_metric_mean"))
+                # BUG-212: Primary metric lives inside cond_data["metrics"]
+                _metrics = cond_data.get("metrics", cond_data)
+                pm = _metrics.get(
+                    "primary_metric",
+                    _metrics.get("primary_metric_mean"),
+                )
                 if isinstance(pm, (int, float)):
-                    primary_values.append(pm)
+                    primary_values.append(float(pm))
         if len(primary_values) >= 2 and len(set(primary_values)) == 1:
             return False, (
                 f"All {len(primary_values)} conditions have identical primary_metric "
@@ -955,8 +1431,120 @@ def execute_iterative_pipeline(
     try:
         deliverables_dir = _package_deliverables(run_dir, run_id, config)
         if deliverables_dir is not None:
-            print(f"[{run_id}] Deliverables packaged → {deliverables_dir}")
+            print(f"[{run_id}] Deliverables packaged -> {deliverables_dir}")
     except Exception:  # noqa: BLE001
         logger.warning("Deliverables packaging failed (non-blocking)")
 
     return summary
+
+
+def _metaclaw_post_pipeline(
+    config: RCConfig,
+    results: list[StageResult],
+    lessons: list[object],
+    run_id: str,
+    run_dir: Path,
+) -> None:
+    """MetaClaw bridge: post-pipeline hook.
+
+    1. Convert high-severity lessons into MetaClaw skills.
+    2. Record skill effectiveness feedback.
+    3. Signal session end to MetaClaw proxy.
+    """
+    bridge = getattr(config, "metaclaw_bridge", None)
+    if not bridge or not getattr(bridge, "enabled", False):
+        return
+
+    from researchclaw.llm.client import LLMClient
+
+    # 1. Lesson-to-skill conversion
+    l2s = getattr(bridge, "lesson_to_skill", None)
+    if l2s and getattr(l2s, "enabled", False) and lessons:
+        try:
+            from researchclaw.metaclaw_bridge.lesson_to_skill import (
+                convert_lessons_to_skills,
+            )
+
+            min_sev = getattr(l2s, "min_severity", "warning")
+            llm = LLMClient.from_rc_config(config)
+            new_skills = convert_lessons_to_skills(
+                lessons,
+                llm,
+                getattr(bridge, "skills_dir", "~/.metaclaw/skills"),
+                min_severity=min_sev,
+                max_skills=getattr(l2s, "max_skills_per_run", 3),
+            )
+            if new_skills:
+                logger.info(
+                    "MetaClaw: generated %d new skills from lessons: %s",
+                    len(new_skills),
+                    new_skills,
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning("MetaClaw lesson-to-skill conversion failed", exc_info=True)
+
+    # 2. Skill effectiveness feedback
+    try:
+        from researchclaw.metaclaw_bridge.skill_feedback import (
+            SkillFeedbackStore,
+            record_stage_skills,
+        )
+        from researchclaw.metaclaw_bridge.stage_skill_map import get_stage_config
+
+        feedback_store = SkillFeedbackStore(run_dir / "evolution" / "skill_effectiveness.jsonl")
+        for result in results:
+            stage_num = int(getattr(result, "stage", 0))
+            stage_name = {
+                1: "topic_init", 2: "problem_decompose", 3: "search_strategy",
+                4: "literature_collect", 5: "literature_screen", 6: "knowledge_extract",
+                7: "synthesis", 8: "hypothesis_gen", 9: "experiment_design",
+                10: "code_generation", 11: "resource_planning", 12: "experiment_run",
+                13: "iterative_refine", 14: "result_analysis", 15: "research_decision",
+                16: "paper_outline", 17: "paper_draft", 18: "peer_review",
+                19: "paper_revision", 20: "quality_gate", 21: "knowledge_archive",
+                22: "export_publish", 23: "citation_verify",
+            }.get(stage_num, "")
+            if not stage_name:
+                continue
+
+            stage_config = get_stage_config(stage_name)
+            active_skills = stage_config.get("skills", [])
+            status = str(getattr(result, "status", ""))
+            success = "done" in status.lower()
+
+            if active_skills:
+                record_stage_skills(
+                    feedback_store,
+                    stage_name,
+                    run_id,
+                    success,
+                    active_skills,
+                )
+    except Exception:  # noqa: BLE001
+        logger.warning("MetaClaw skill feedback recording failed")
+
+    # 3. Signal session end (fire-and-forget)
+    try:
+        from researchclaw.metaclaw_bridge.session import MetaClawSession
+        import json as _json
+        import urllib.request as _urllib_req
+
+        session = MetaClawSession(run_id)
+        end_headers = session.end()
+        # Send a minimal request to signal session end
+        proxy_url = getattr(bridge, "proxy_url", "http://localhost:30000")
+        url = f"{proxy_url.rstrip('/')}/v1/chat/completions"
+        body = _json.dumps({
+            "model": "session-end",
+            "messages": [{"role": "user", "content": "session complete"}],
+            "max_tokens": 1,
+        }).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        headers.update(end_headers)
+        req = _urllib_req.Request(url, data=body, headers=headers)
+        try:
+            _urllib_req.urlopen(req, timeout=5)
+        except Exception:  # noqa: BLE001
+            pass  # Best-effort signal
+    except Exception:  # noqa: BLE001
+        pass

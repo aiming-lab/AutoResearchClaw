@@ -385,6 +385,7 @@ class TestPhase4Review:
             config=CodeAgentConfig(
                 architecture_planning=False,
                 review_max_rounds=3,
+                hard_validation=False,  # Test focuses on review, not validation
             ),
             stage_dir=stage_dir,
         )
@@ -406,6 +407,7 @@ class TestPhase4Review:
             config=CodeAgentConfig(
                 architecture_planning=False,
                 review_max_rounds=0,
+                hard_validation=False,  # Test focuses on review, not validation
             ),
             stage_dir=stage_dir,
         )

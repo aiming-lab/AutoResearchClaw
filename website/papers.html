@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Showcase Papers &mdash; AutoResearchClaw</title>
+  <meta name="description" content="Papers generated entirely by AutoResearchClaw's autonomous pipeline, from topic to camera-ready PDF.">
+  <link rel="icon" href="assets/logo.png" type="image/png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Nav -->
+<nav class="navbar">
+  <div class="container">
+    <a href="index.html" class="nav-brand"><img src="assets/logo.png" alt="Logo">AutoResearchClaw</a>
+    <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')">&#9776;</button>
+    <ul class="nav-links">
+      <li><a href="index.html">Home</a></li>
+      <li><a href="pipeline.html">Pipeline</a></li>
+      <li><a href="features.html">Features</a></li>
+      <li><a href="papers.html" class="active">Papers</a></li>
+      <li><a href="getting-started.html">Get Started</a></li>
+      <li><a href="https://github.com/aiming-lab/AutoResearchClaw" class="nav-github" target="_blank">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- Header -->
+<section class="hero" style="padding-bottom: 2rem;">
+  <div class="container">
+    <h1>Showcase <span class="gradient">Papers</span></h1>
+    <p class="tagline">Every paper below was generated entirely by AutoResearchClaw &mdash; from a single topic prompt to a complete research manuscript with real experiments.</p>
+  </div>
+</section>
+
+<!-- Paper Gallery -->
+<section class="section" style="padding-top: 1rem;">
+  <div class="container">
+
+    <!-- Filter bar (future) -->
+    <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 2rem;">
+      <button class="btn btn-outline" style="padding: 0.4rem 1rem; font-size: 0.82rem;" onclick="filterPapers('all')">All</button>
+      <button class="btn btn-outline" style="padding: 0.4rem 1rem; font-size: 0.82rem;" onclick="filterPapers('cv')">Computer Vision</button>
+      <button class="btn btn-outline" style="padding: 0.4rem 1rem; font-size: 0.82rem;" onclick="filterPapers('nlp')">NLP</button>
+      <button class="btn btn-outline" style="padding: 0.4rem 1rem; font-size: 0.82rem;" onclick="filterPapers('rl')">Reinforcement Learning</button>
+      <button class="btn btn-outline" style="padding: 0.4rem 1rem; font-size: 0.82rem;" onclick="filterPapers('gen')">Generative Models</button>
+    </div>
+
+    <div class="paper-grid">
+
+      <!-- Paper S1 -->
+      <div class="paper-card" data-domain="cv">
+        <div class="paper-thumb">&#128202;</div>
+        <div class="paper-body">
+          <h3>Curriculum Learning with Adaptive Difficulty Scheduling for Image Classification</h3>
+          <div class="paper-meta">
+            <span class="badge badge-domain">Computer Vision</span>
+            <span class="badge badge-pending">Coming Soon</span>
+          </div>
+          <p class="paper-abstract">
+            Investigates adaptive curriculum learning strategies on CIFAR-10/100 benchmarks.
+            Proposes a difficulty-aware scheduling mechanism that dynamically adjusts training
+            sample ordering to improve convergence speed and final accuracy.
+          </p>
+        </div>
+      </div>
+
+      <!-- Paper S2 -->
+      <div class="paper-card" data-domain="nlp">
+        <div class="paper-thumb">&#128172;</div>
+        <div class="paper-body">
+          <h3>Prompt-Length-Aware Routing for Mixture-of-LoRA Experts in Instruction-Following</h3>
+          <div class="paper-meta">
+            <span class="badge badge-domain">NLP / PEFT</span>
+            <span class="badge badge-pending">Coming Soon</span>
+          </div>
+          <p class="paper-abstract">
+            Proposes a routing mechanism for Mixture-of-LoRA experts that considers prompt
+            length characteristics. Fine-tunes Qwen-2.5-3B with QLoRA to demonstrate
+            improved instruction-following across varying input lengths.
+          </p>
+        </div>
+      </div>
+
+      <!-- Paper S3 -->
+      <div class="paper-card" data-domain="cv">
+        <div class="paper-thumb">&#129516;</div>
+        <div class="paper-body">
+          <h3>Graph Attention Networks with Learnable Edge Features for Molecular Property Prediction</h3>
+          <div class="paper-meta">
+            <span class="badge badge-domain">GNN / Chemistry</span>
+            <span class="badge badge-pending">Coming Soon</span>
+          </div>
+          <p class="paper-abstract">
+            Extends graph attention networks with learnable edge feature transformations
+            for molecular property prediction on the OGB-MolHIV benchmark, achieving
+            competitive performance with existing specialized architectures.
+          </p>
+        </div>
+      </div>
+
+      <!-- Paper S4 -->
+      <div class="paper-card" data-domain="rl">
+        <div class="paper-thumb">&#127918;</div>
+        <div class="paper-body">
+          <h3>Entropy-Guided Exploration Bonuses for Sparse-Reward Continuous Control</h3>
+          <div class="paper-meta">
+            <span class="badge badge-domain">Reinforcement Learning</span>
+            <span class="badge badge-pending">Coming Soon</span>
+          </div>
+          <p class="paper-abstract">
+            Proposes entropy-guided intrinsic reward bonuses to improve exploration
+            efficiency in sparse-reward MuJoCo locomotion environments. Demonstrates
+            improved sample efficiency over baseline algorithms.
+          </p>
+        </div>
+      </div>
+
+      <!-- Paper S5 -->
+      <div class="paper-card" data-domain="gen">
+        <div class="paper-thumb">&#127912;</div>
+        <div class="paper-body">
+          <h3>Spectral Normalization Effects on Mode Collapse in Conditional GANs for CIFAR-10</h3>
+          <div class="paper-meta">
+            <span class="badge badge-domain">Generative Models</span>
+            <span class="badge badge-pending">Coming Soon</span>
+          </div>
+          <p class="paper-abstract">
+            Systematically studies the effect of spectral normalization on mode collapse
+            in conditional GANs trained on CIFAR-10, providing both visual and quantitative
+            analysis (FID, IS) of generation diversity.
+          </p>
+        </div>
+      </div>
+
+      <!-- Paper S6 -->
+      <div class="paper-card" data-domain="cv">
+        <div class="paper-thumb">&#128260;</div>
+        <div class="paper-body">
+          <h3>Test-Time Adaptation via Batch Normalization Statistics for Distribution Shift</h3>
+          <div class="paper-meta">
+            <span class="badge badge-domain">Domain Adaptation</span>
+            <span class="badge badge-pending">Coming Soon</span>
+          </div>
+          <p class="paper-abstract">
+            Explores lightweight test-time adaptation methods that update batch normalization
+            statistics to handle distribution shift on CIFAR-10-C corruption benchmarks,
+            demonstrating practical robustness improvements.
+          </p>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Coming soon notice -->
+    <div class="coming-soon mt-8">
+      <div class="cs-icon">&#128640;</div>
+      <h3>Papers Coming Soon</h3>
+      <p>We're generating showcase papers across diverse ML subfields. Each paper will include a downloadable PDF, LaTeX source, experiment code, and quality assessment. Check back soon!</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- Footer -->
+<footer class="footer">
+  <ul class="footer-links">
+    <li><a href="index.html">Home</a></li>
+    <li><a href="pipeline.html">Pipeline</a></li>
+    <li><a href="features.html">Features</a></li>
+    <li><a href="papers.html">Papers</a></li>
+    <li><a href="getting-started.html">Get Started</a></li>
+    <li><a href="https://github.com/aiming-lab/AutoResearchClaw" target="_blank">GitHub</a></li>
+  </ul>
+  <p>AutoResearchClaw &mdash; Autonomous Research Paper Generation Pipeline</p>
+</footer>
+
+<script>
+function filterPapers(domain) {
+  const cards = document.querySelectorAll('.paper-card');
+  cards.forEach(card => {
+    if (domain === 'all' || card.dataset.domain === domain) {
+      card.style.display = '';
+    } else {
+      card.style.display = 'none';
+    }
+  });
+}
+</script>
+
+</body>
+</html>

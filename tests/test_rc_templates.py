@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from researchclaw.templates.conference import (
@@ -23,12 +25,18 @@ from researchclaw.templates.converter import (
     _extract_abstract,
     _convert_inline,
     _escape_latex,
+    _escape_algo_line,
+    _render_code_block,
     _build_body,
     _render_table,
     _parse_table_row,
     _parse_alignments,
     _render_itemize,
     _render_enumerate,
+    _reset_render_counters,
+    _next_table_num,
+    _next_figure_num,
+    check_paper_completeness,  # noqa: F401
 )
 
 
@@ -103,7 +111,7 @@ class TestRenderPreamble:
 
     def test_icml_preamble_extra(self) -> None:
         tex = ICML_2025.render_preamble("Title", "Author", "Abstract")
-        assert r"\icmltitlerunning{Running Title}" in tex
+        assert r"\icmltitlerunning{Title}" in tex
 
 
 class TestRenderFooter:
@@ -157,8 +165,8 @@ class TestListConferences:
         assert "neurips_2025" in names
         assert "iclr_2026" in names
         assert "icml_2026" in names
-        # Should be deduplicated — no aliases
-        assert len(names) == 6
+        # Should be deduplicated — no aliases (6 conference + 1 generic)
+        assert len(names) == 7
 
     def test_sorted(self) -> None:
         names = list_conferences()
@@ -286,6 +294,27 @@ class TestConvertInline:
         result = _convert_inline("the value $x^2$ is")
         assert "$x^2$" in result
 
+    def test_pre_escaped_underscore_not_doubled(self) -> None:
+        """BUG-182: LLM pre-escapes underscores → must NOT double-escape to \\\\_."""
+        result = _convert_inline(r"RawObservation\_PPO\_WithNorm")
+        assert r"\\_" not in result, f"Double-escaped: {result}"
+        assert r"\_" in result
+
+    def test_pre_escaped_underscore_near_math(self) -> None:
+        """BUG-182: Pre-escaped underscore adjacent to math must not break."""
+        result = _convert_inline(
+            r"RawObs\_PPO. Statistics \(\mu_t\) are given"
+        )
+        assert r"\\_" not in result
+        assert r"\_" in result
+        assert r"\(\mu_t\)" in result
+
+    def test_pre_escaped_hash_not_doubled(self) -> None:
+        """BUG-182: Pre-escaped hash should not be double-escaped."""
+        result = _convert_inline(r"Section \#3 details")
+        assert r"\\#" not in result
+        assert r"\#" in result
+
 
 class TestEscapeLatex:
     """Tests for _escape_latex()."""
@@ -314,17 +343,27 @@ class TestBuildBody:
         assert r"\section{Title}" not in body
         assert r"\section{Abstract}" not in body
 
-    def test_subsection(self) -> None:
+    def test_subsection_promoted_when_all_h2(self) -> None:
+        """T1.3: When all body sections are H2, they should be promoted to \\section."""
         md = "## Method\ntext"
         sections = _parse_sections(md)
         body = _build_body(sections)
-        assert r"\subsection{Method}" in body
+        # All-H2 document → auto-promoted to \section
+        assert r"\section{Method}" in body
+
+    def test_h2_promoted_under_h1_title(self) -> None:
+        """When title occupies H1, H2 body sections promote to \\section."""
+        md = "# My Paper\ntitle body\n## Method\ntext"
+        sections = _parse_sections(md)
+        body = _build_body(sections, title="My Paper")
+        assert r"\section{Method}" in body
 
     def test_subsubsection(self) -> None:
-        md = "### Details\ntext"
+        md = "## Intro\nintro\n### Details\ntext"
         sections = _parse_sections(md)
         body = _build_body(sections)
-        assert r"\subsubsection{Details}" in body
+        # H2 promoted to \section, H3 promoted to \subsection
+        assert r"\subsection{Details}" in body
 
 
 class TestListRendering:
@@ -364,13 +403,31 @@ class TestTableRendering:
         ]
         result = _render_table(lines)
         assert r"\begin{table}" in result
-        assert r"\begin{tabular}{l l}" in result
+        assert r"\begin{tabular}{ll}" in result
         assert r"\toprule" in result
         assert r"\textbf{Name}" in result
         assert r"\midrule" in result
         assert r"\bottomrule" in result
         assert r"\end{tabular}" in result
         assert r"\end{table}" in result
+
+    def test_render_counters_are_thread_local(self) -> None:
+        results: list[tuple[int, int, int]] = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            _reset_render_counters()
+            value = (_next_table_num(), _next_table_num(), _next_figure_num())
+            with lock:
+                results.append(value)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert results == [(1, 2, 1)] * 4
 
 
 # =====================================================================
@@ -513,7 +570,7 @@ class TestExportConfig:
         import yaml
         from pathlib import Path
 
-        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text())
+        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text(encoding="utf-8"))
         data["export"] = {
             "target_conference": "icml_2025",
             "authors": "Test Author",
@@ -538,7 +595,7 @@ class TestHitlStageValidation:
         import yaml
         from pathlib import Path
 
-        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text())
+        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text(encoding="utf-8"))
         data.setdefault("security", {})["hitl_required_stages"] = [1, 22, 23]
         result = validate_config(data, check_paths=False)
         assert result.ok, f"Errors: {result.errors}"
@@ -565,8 +622,119 @@ class TestHitlStageValidation:
         import yaml
         from pathlib import Path
 
-        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text())
+        data = yaml.safe_load(Path("config.researchclaw.example.yaml").read_text(encoding="utf-8"))
         data.setdefault("security", {})["hitl_required_stages"] = [24]
         result = validate_config(data, check_paths=False)
         assert not result.ok
         assert any("24" in e for e in result.errors)
+
+
+# =====================================================================
+# check_paper_completeness — section word count + bullet density checks
+# =====================================================================
+
+
+class TestCompletenessWordCountAndBullets:
+    """Tests for new per-section word count and bullet density checks."""
+
+    @staticmethod
+    def _make_sections(section_specs: list[tuple[str, int, bool]]) -> list:
+        """Build _Section objects from (heading, word_count, use_bullets) specs."""
+        results = []
+        for heading, wc, bullets in section_specs:
+            if bullets:
+                lines = [f"- Point number {i}" for i in range(wc // 3)]
+                body = "\n".join(lines)
+            else:
+                body = " ".join(["word"] * wc)
+            results.append(
+                type("_Section", (), {
+                    "level": 1,
+                    "heading": heading,
+                    "heading_lower": heading.lower(),
+                    "body": body,
+                })()
+            )
+        return results
+
+    def test_completeness_section_word_count_short(self) -> None:
+        """A Method section with only 100 words triggers a warning."""
+        secs = self._make_sections([
+            ("Title", 5, False),
+            ("Abstract", 200, False),
+            ("Introduction", 900, False),
+            ("Related Work", 700, False),
+            ("Method", 100, False),
+            ("Experiments", 1000, False),
+            ("Results", 700, False),
+            ("Conclusion", 250, False),
+        ])
+        warns = check_paper_completeness(secs)
+        method_warns = [w for w in warns if "Method" in w and "words" in w]
+        assert len(method_warns) >= 1, f"Expected word count warning, got: {warns}"
+
+    def test_completeness_bullet_density(self) -> None:
+        """A Method section full of bullet points triggers a warning."""
+        secs = self._make_sections([
+            ("Title", 5, False),
+            ("Abstract", 200, False),
+            ("Introduction", 900, False),
+            ("Related Work", 700, False),
+            ("Method", 300, True),
+            ("Experiments", 1000, False),
+            ("Results", 700, False),
+            ("Conclusion", 250, False),
+        ])
+        warns = check_paper_completeness(secs)
+        bullet_warns = [w for w in warns if "bullet" in w.lower() and "Method" in w]
+        assert len(bullet_warns) >= 1, f"Expected bullet warning, got: {warns}"
+
+
+# =====================================================================
+# BUG-177: Algorithm pseudocode escaping tests
+# =====================================================================
+
+
+class TestAlgorithmEscaping:
+    """Tests for _escape_algo_line and algorithm rendering in _render_code_block."""
+
+    def test_escape_underscore(self) -> None:
+        assert r"psi\_1" in _escape_algo_line("psi_1")
+
+    def test_escape_hash_comment(self) -> None:
+        result = _escape_algo_line("x = y  # update rule")
+        assert r"\COMMENT{update rule}" in result
+        assert "x = y" in result
+
+    def test_fullline_hash_comment(self) -> None:
+        result = _escape_algo_line("# Initialize buffer")
+        assert result == r"\COMMENT{Initialize buffer}"
+
+    def test_escape_percent(self) -> None:
+        assert r"\%" in _escape_algo_line("accuracy 95%")
+
+    def test_escape_ampersand(self) -> None:
+        assert r"\&" in _escape_algo_line("x & y")
+
+    def test_preserve_latex_commands(self) -> None:
+        result = _escape_algo_line(r"Set $x = \alpha$ and update")
+        assert r"$x = \alpha$" in result
+
+    def test_render_code_block_algo_escapes(self) -> None:
+        code = (
+            "Initialize theta_1, theta_2\n"
+            "for t = 1 to T do\n"
+            "  Sample batch B  # prioritized\n"
+        )
+        result = _render_code_block("algorithm", code)
+        assert r"\begin{algorithm}" in result
+        assert r"\begin{algorithmic}" in result
+        assert r"theta\_1" in result
+        assert r"\COMMENT{prioritized}" in result
+
+    def test_render_code_block_verbatim_no_escape(self) -> None:
+        """Non-algorithm code blocks should use verbatim (no escaping)."""
+        code = "x_1 = y_2  # comment"
+        result = _render_code_block("python", code)
+        assert r"\begin{verbatim}" in result
+        assert "x_1" in result  # NOT escaped in verbatim

@@ -1,51 +1,43 @@
-"""arXiv API client.
+"""arXiv API client powered by the ``arxiv`` library.
 
-Uses stdlib ``urllib`` + ``xml.etree`` — zero extra dependencies.
+The ``arxiv`` pip package (2.4+) provides robust arXiv search with
+built-in rate limiting, retries, pagination, and PDF download support.
 
 Public API
 ----------
-- ``search_arxiv(query, limit)`` → ``list[Paper]``
+- ``search_arxiv(query, limit, sort_by, year_min)`` → ``list[Paper]``
+- ``download_pdf(arxiv_id, dirpath)`` → ``Path | None``
+- ``get_paper_by_id(arxiv_id)`` → ``Paper | None``
 
-Rate limit: arXiv requests 3-second gaps between calls.  Retries up to
-3 times with exponential back-off on transient failures.
-
-Circuit breaker has three states:
-  CLOSED    → normal operation
-  OPEN      → skip all requests, auto-recover after cooldown
-  HALF_OPEN → try one probe request, success→CLOSED, fail→OPEN (doubled cooldown)
+Circuit breaker is preserved for extra resilience beyond the library's
+built-in retry logic.
 """
 
 from __future__ import annotations
 
 import logging
-import random
 import re
+import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any
+
+try:
+    import arxiv  # pip install arxiv
+except ImportError:
+    arxiv = None  # type: ignore[assignment]
 
 from researchclaw.literature.models import Author, Paper
 
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://export.arxiv.org/api/query"
-_MAX_RESULTS = 50
-_RATE_LIMIT_SEC = 3.1  # arXiv asks for ≥3 s between requests
-_RATE_LIMIT_ELEVATED = 5.0  # raised after 429 to be extra conservative
-_MAX_RETRIES = 3
-_MAX_WAIT_SEC = 60
-_TIMEOUT_SEC = 30
-
 # ---------------------------------------------------------------------------
-# Three-state circuit breaker  (mirrors S2 breaker in semantic_scholar.py)
+# Circuit breaker (kept for extra safety on top of arxiv library retries)
 # ---------------------------------------------------------------------------
 
-_CB_THRESHOLD = 3           # consecutive 429s to trip
-_CB_INITIAL_COOLDOWN = 180  # seconds before first HALF_OPEN probe (3 min)
-_CB_MAX_COOLDOWN = 600      # cap cooldown at 10 minutes
+_CB_THRESHOLD = 3
+_CB_INITIAL_COOLDOWN = 180
+_CB_MAX_COOLDOWN = 600
 
 _CB_CLOSED = "closed"
 _CB_OPEN = "open"
@@ -56,315 +48,281 @@ _cb_consecutive_429s: int = 0
 _cb_cooldown_sec: float = _CB_INITIAL_COOLDOWN
 _cb_open_since: float = 0.0
 _cb_trip_count: int = 0
-_rate_elevated: bool = False  # temporarily use slower rate after 429
+_cb_lock = threading.Lock()
 
 
 def _reset_circuit_breaker() -> None:
     """Reset circuit breaker state (for tests)."""
     global _cb_state, _cb_consecutive_429s, _cb_cooldown_sec  # noqa: PLW0603
-    global _cb_open_since, _cb_trip_count, _rate_elevated  # noqa: PLW0603
-    _cb_state = _CB_CLOSED
-    _cb_consecutive_429s = 0
-    _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
-    _cb_open_since = 0.0
-    _cb_trip_count = 0
-    _rate_elevated = False
+    global _cb_open_since, _cb_trip_count  # noqa: PLW0603
+    with _cb_lock:
+        _cb_state = _CB_CLOSED
+        _cb_consecutive_429s = 0
+        _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
+        _cb_open_since = 0.0
+        _cb_trip_count = 0
 
 
 def _cb_should_allow() -> bool:
-    """Check if circuit breaker allows a request."""
     global _cb_state  # noqa: PLW0603
-    if _cb_state == _CB_CLOSED:
-        return True
-    if _cb_state == _CB_OPEN:
-        elapsed = time.monotonic() - _cb_open_since
-        if elapsed >= _cb_cooldown_sec:
-            _cb_state = _CB_HALF_OPEN
-            logger.info(
-                "arXiv circuit breaker → HALF_OPEN after %.0fs cooldown. "
-                "Trying one probe request...",
-                elapsed,
-            )
+    with _cb_lock:
+        if _cb_state == _CB_CLOSED:
             return True
-        logger.debug(
-            "arXiv circuit breaker OPEN — %.0fs remaining",
-            _cb_cooldown_sec - elapsed,
-        )
-        return False
-    # HALF_OPEN: allow the probe
-    return True
+        if _cb_state == _CB_OPEN:
+            elapsed = time.monotonic() - _cb_open_since
+            if elapsed >= _cb_cooldown_sec:
+                _cb_state = _CB_HALF_OPEN
+                logger.info("arXiv circuit breaker → HALF_OPEN (%.0fs cooldown elapsed)", elapsed)
+                return True
+            return False
+        return True  # HALF_OPEN: allow probe
 
 
 def _cb_on_success() -> None:
-    """Record a successful request."""
     global _cb_state, _cb_consecutive_429s, _cb_cooldown_sec  # noqa: PLW0603
-    global _rate_elevated  # noqa: PLW0603
-    _cb_consecutive_429s = 0
-    if _cb_state != _CB_CLOSED:
-        logger.info("arXiv circuit breaker → CLOSED (request succeeded)")
-        _cb_state = _CB_CLOSED
-        _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
-    _rate_elevated = False  # restore normal rate on success
+    with _cb_lock:
+        _cb_consecutive_429s = 0
+        if _cb_state != _CB_CLOSED:
+            logger.info("arXiv circuit breaker → CLOSED (request succeeded)")
+            _cb_state = _CB_CLOSED
+            _cb_cooldown_sec = _CB_INITIAL_COOLDOWN
 
 
-def _cb_on_429() -> bool:
-    """Record a 429 response. Returns True if breaker is now OPEN."""
+def _cb_on_failure() -> bool:
     global _cb_state, _cb_consecutive_429s, _cb_cooldown_sec  # noqa: PLW0603
-    global _cb_open_since, _cb_trip_count, _rate_elevated  # noqa: PLW0603
-    _cb_consecutive_429s += 1
-    _rate_elevated = True  # slow down future requests
+    global _cb_open_since, _cb_trip_count  # noqa: PLW0603
+    with _cb_lock:
+        _cb_consecutive_429s += 1
+        if _cb_state == _CB_HALF_OPEN or _cb_consecutive_429s >= _CB_THRESHOLD:
+            if _cb_state == _CB_HALF_OPEN:
+                _cb_cooldown_sec = min(_cb_cooldown_sec * 2, _CB_MAX_COOLDOWN)
+            _cb_state = _CB_OPEN
+            _cb_open_since = time.monotonic()
+            _cb_trip_count += 1
+            logger.warning(
+                "arXiv circuit breaker TRIPPED (trip #%d, cooldown %.0fs)",
+                _cb_trip_count, _cb_cooldown_sec,
+            )
+            return True
+        return False
 
-    if _cb_state == _CB_HALF_OPEN:
-        _cb_cooldown_sec = min(_cb_cooldown_sec * 2, _CB_MAX_COOLDOWN)
-        _cb_state = _CB_OPEN
-        _cb_open_since = time.monotonic()
-        _cb_trip_count += 1
-        logger.warning(
-            "arXiv circuit breaker → OPEN (probe failed). "
-            "Next cooldown: %.0fs (trip #%d)",
-            _cb_cooldown_sec,
-            _cb_trip_count,
+
+# ---------------------------------------------------------------------------
+# Shared arxiv.Client instance (reuses connection, respects rate limits)
+# ---------------------------------------------------------------------------
+
+_client: arxiv.Client | None = None
+
+
+def _get_client() -> arxiv.Client:
+    """Get or create the shared arxiv Client."""
+    global _client  # noqa: PLW0603
+    if _client is None:
+        _client = arxiv.Client(
+            page_size=100,       # fetch up to 100 per API call
+            delay_seconds=3.1,   # arXiv requires ≥3s between requests
+            num_retries=3,       # built-in retry on failure
         )
-        return True
-
-    if _cb_consecutive_429s >= _CB_THRESHOLD:
-        _cb_state = _CB_OPEN
-        _cb_open_since = time.monotonic()
-        _cb_trip_count += 1
-        logger.warning(
-            "arXiv circuit breaker TRIPPED after %d consecutive 429s. "
-            "Cooldown: %.0fs (trip #%d). Other sources still active.",
-            _cb_consecutive_429s,
-            _cb_cooldown_sec,
-            _cb_trip_count,
-        )
-        return True
-    return False
+    return _client
 
 
-# Last request timestamp for rate limiting
-_last_request_time: float = 0.0
-
-# Atom XML namespaces
-_NS = {
-    "atom": "http://www.w3.org/2005/Atom",
-    "arxiv": "http://arxiv.org/schemas/atom",
-}
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def search_arxiv(
     query: str,
     *,
-    limit: int = 20,
+    limit: int = 50,
+    sort_by: str = "relevance",
+    year_min: int = 0,
 ) -> list[Paper]:
     """Search arXiv for papers matching *query*.
 
     Parameters
     ----------
     query:
-        Free-text search query (mapped to ``all:`` arXiv field).
+        Free-text search query. Supports arXiv field syntax
+        (e.g., ``ti:transformer``, ``au:vaswani``, ``cat:cs.LG``).
     limit:
-        Maximum number of results (capped at 50).
+        Maximum number of results (up to 300).
+    sort_by:
+        Sort criterion: "relevance", "submitted_date", or "last_updated".
+    year_min:
+        If > 0, only return papers published in this year or later.
 
     Returns
     -------
     list[Paper]
-        Parsed papers.  Empty list on network failure.
+        Parsed papers. Empty list on failure.
     """
-    global _last_request_time  # noqa: PLW0603
-
-    # Rate limiting: enforce minimum spacing between requests
-    now = time.monotonic()
-    rate = _RATE_LIMIT_ELEVATED if _rate_elevated else _RATE_LIMIT_SEC
-    elapsed_since_last = now - _last_request_time
-    if elapsed_since_last < rate:
-        time.sleep(rate - elapsed_since_last)
-
-    limit = min(limit, _MAX_RESULTS)
-    params = {
-        "search_query": f"all:{query}",
-        "start": "0",
-        "max_results": str(limit),
-        "sortBy": "relevance",
-        "sortOrder": "descending",
-    }
-    url = f"{_BASE_URL}?{urllib.parse.urlencode(params)}"
-
-    _last_request_time = time.monotonic()
-    xml_text = _fetch_with_retry(url)
-    if xml_text is None:
+    if arxiv is None:
+        logger.warning("arxiv library not installed — skipping arXiv search")
         return []
-
-    return _parse_atom_feed(xml_text)
-
-
-# ------------------------------------------------------------------
-# Internal helpers
-# ------------------------------------------------------------------
-
-
-def _fetch_with_retry(url: str) -> str | None:
-    """GET *url* returning raw text, with retries.
-
-    Handles HTTP 429 explicitly:
-      - Parses ``Retry-After`` header when present
-      - Notifies circuit breaker on 429 responses
-      - Falls back to exponential back-off if no header
-    """
     if not _cb_should_allow():
-        logger.info("[rate-limit] arXiv circuit breaker OPEN — skipping request")
-        return None
-
-    for attempt in range(_MAX_RETRIES):
-        try:
-            req = urllib.request.Request(
-                url, headers={"Accept": "application/atom+xml"}
-            )
-            with urllib.request.urlopen(req, timeout=_TIMEOUT_SEC) as resp:
-                body = resp.read().decode("utf-8")
-                _cb_on_success()
-                return body
-        except urllib.error.HTTPError as exc:
-            if exc.code == 429:
-                # Parse Retry-After header if present
-                retry_after = exc.headers.get("Retry-After") if exc.headers else None
-                if retry_after:
-                    try:
-                        wait = float(retry_after)
-                    except (ValueError, TypeError):
-                        wait = _RATE_LIMIT_ELEVATED * (2**attempt)
-                else:
-                    wait = _RATE_LIMIT_ELEVATED * (2**attempt)
-                wait = min(wait, _MAX_WAIT_SEC)
-                jitter = random.uniform(0, wait * 0.2)
-
-                if _cb_on_429():
-                    logger.warning(
-                        "[rate-limit] arXiv 429 — circuit breaker OPEN. "
-                        "All arXiv requests paused for %.0fs.",
-                        _cb_cooldown_sec,
-                    )
-                    return None
-
-                logger.warning(
-                    "[rate-limit] arXiv 429 (Retry-After: %s). "
-                    "Waiting %.1fs (attempt %d/%d)...",
-                    retry_after or "none",
-                    wait + jitter,
-                    attempt + 1,
-                    _MAX_RETRIES,
-                )
-                time.sleep(wait + jitter)
-                continue
-
-            if exc.code == 503:
-                # Service unavailable — transient, retry
-                wait = _RATE_LIMIT_SEC * (2**attempt)
-                jitter = random.uniform(0, wait * 0.2)
-                logger.warning(
-                    "arXiv 503 (service unavailable). "
-                    "Retry %d/%d in %.0fs...",
-                    attempt + 1,
-                    _MAX_RETRIES,
-                    wait + jitter,
-                )
-                time.sleep(wait + jitter)
-                continue
-
-            # Other HTTP errors — not retryable
-            logger.warning("arXiv HTTP %d for %s", exc.code, url)
-            return None
-
-        except (urllib.error.URLError, OSError) as exc:
-            wait = min(_RATE_LIMIT_SEC * (2**attempt), _MAX_WAIT_SEC)
-            jitter = random.uniform(0, wait * 0.2)
-            logger.warning(
-                "arXiv request failed (%s). Retry %d/%d in %.0fs…",
-                exc,
-                attempt + 1,
-                _MAX_RETRIES,
-                wait,
-            )
-            time.sleep(wait + jitter)
-
-    logger.error("arXiv request exhausted retries for: %s", url)
-    return None
-
-
-def _parse_atom_feed(xml_text: str) -> list[Paper]:
-    """Parse arXiv Atom XML feed into ``Paper`` objects."""
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        logger.error("Failed to parse arXiv Atom XML")
+        logger.info("[rate-limit] arXiv circuit breaker OPEN — skipping")
         return []
+
+    limit = min(limit, 300)
+
+    sort_map = {
+        "relevance": arxiv.SortCriterion.Relevance,
+        "submitted_date": arxiv.SortCriterion.SubmittedDate,
+        "last_updated": arxiv.SortCriterion.LastUpdatedDate,
+    }
+    criterion = sort_map.get(sort_by, arxiv.SortCriterion.Relevance)
+
+    search = arxiv.Search(
+        query=query,
+        max_results=limit,
+        sort_by=criterion,
+        sort_order=arxiv.SortOrder.Descending,
+    )
 
     papers: list[Paper] = []
-    for entry in root.findall("atom:entry", _NS):
-        try:
-            papers.append(_parse_entry(entry))
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to parse arXiv entry")
+    try:
+        client = _get_client()
+        for result in client.results(search):
+            paper = _convert_result(result)
+            if year_min > 0 and paper.year < year_min:
+                continue
+            papers.append(paper)
+        _cb_on_success()
+        logger.info("arXiv: found %d papers for %r", len(papers), query)
+    except arxiv.HTTPError as exc:
+        logger.warning("arXiv HTTP error: %s", exc)
+        _cb_on_failure()
+    except arxiv.UnexpectedEmptyPageError:
+        logger.warning("arXiv returned unexpected empty page for %r", query)
+        _cb_on_failure()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("arXiv search failed: %s", exc)
+        _cb_on_failure()
+
     return papers
 
 
-def _text(element: ET.Element | None) -> str:
-    if element is None:
-        return ""
-    return (element.text or "").strip()
+def get_paper_by_id(arxiv_id: str) -> Paper | None:
+    """Fetch a single paper by arXiv ID (e.g., '2301.00001')."""
+    if arxiv is None:
+        logger.warning("arxiv library not installed — cannot look up %s", arxiv_id)
+        return None
+    try:
+        search = arxiv.Search(id_list=[arxiv_id])
+        client = _get_client()
+        for result in client.results(search):
+            return _convert_result(result)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("arXiv ID lookup failed for %s: %s", arxiv_id, exc)
+    return None
 
 
-def _parse_entry(entry: ET.Element) -> Paper:
-    """Convert a single Atom <entry> to a ``Paper``."""
-    title = re.sub(r"\s+", " ", _text(entry.find("atom:title", _NS)))
-    abstract = re.sub(r"\s+", " ", _text(entry.find("atom:summary", _NS)))
+def download_pdf(
+    arxiv_id: str,
+    dirpath: str | Path = ".",
+    filename: str = "",
+) -> Path | None:
+    """Download PDF for a given arXiv ID.
+
+    Parameters
+    ----------
+    arxiv_id:
+        arXiv paper ID (e.g., '2301.00001').
+    dirpath:
+        Directory to save the PDF.
+    filename:
+        Custom filename. If empty, uses ``{arxiv_id}.pdf``.
+
+    Returns
+    -------
+    Path | None
+        Path to downloaded PDF, or None on failure.
+    """
+    if arxiv is None:
+        logger.warning("arxiv library not installed — cannot download PDF")
+        return None
+    try:
+        search = arxiv.Search(id_list=[arxiv_id])
+        client = _get_client()
+        for result in client.results(search):
+            dirpath = Path(dirpath)
+            dirpath.mkdir(parents=True, exist_ok=True)
+            fname = filename or f"{arxiv_id.replace('/', '_')}.pdf"
+            result.download_pdf(dirpath=str(dirpath), filename=fname)
+            pdf_path = dirpath / fname
+            logger.info("Downloaded arXiv PDF: %s → %s", arxiv_id, pdf_path)
+            return pdf_path
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("PDF download failed for %s: %s", arxiv_id, exc)
+    return None
+
+
+def search_arxiv_advanced(
+    *,
+    title: str = "",
+    author: str = "",
+    abstract: str = "",
+    category: str = "",
+    limit: int = 50,
+    year_min: int = 0,
+) -> list[Paper]:
+    """Advanced arXiv search using field-specific queries.
+
+    Example: search_arxiv_advanced(title="transformer", category="cs.LG")
+    """
+    parts = []
+    if title:
+        parts.append(f"ti:{title}")
+    if author:
+        parts.append(f"au:{author}")
+    if abstract:
+        parts.append(f"abs:{abstract}")
+    if category:
+        parts.append(f"cat:{category}")
+
+    if not parts:
+        return []
+
+    query = " AND ".join(parts)
+    return search_arxiv(query, limit=limit, year_min=year_min)
+
+
+# ---------------------------------------------------------------------------
+# Internal: convert arxiv.Result → Paper
+# ---------------------------------------------------------------------------
+
+
+def _convert_result(result: arxiv.Result) -> Paper:
+    """Convert an ``arxiv.Result`` to our ``Paper`` dataclass."""
+    # Extract arXiv ID from entry_id URL
+    arxiv_id = ""
+    if result.entry_id:
+        m = re.search(r"(\d{4}\.\d{4,5})(v\d+)?$", result.entry_id)
+        if m:
+            arxiv_id = m.group(1)
 
     # Authors
-    authors = tuple(
-        Author(name=_text(a.find("atom:name", _NS)))
-        for a in entry.findall("atom:author", _NS)
-    )
+    authors = tuple(Author(name=a.name) for a in result.authors)
 
-    # arXiv ID from the <id> element (e.g. "http://arxiv.org/abs/2301.00001v2")
-    raw_id = _text(entry.find("atom:id", _NS))
-    arxiv_id = ""
-    m = re.search(r"(\d{4}\.\d{4,5})(v\d+)?$", raw_id)
-    if m:
-        arxiv_id = m.group(1)
+    # Year from published date
+    year = result.published.year if result.published else 0
 
-    # Year from <published>
-    published = _text(entry.find("atom:published", _NS))
-    year = 0
-    if published:
-        ym = re.match(r"(\d{4})", published)
-        if ym:
-            year = int(ym.group(1))
+    # DOI
+    doi = result.doi or ""
 
-    # DOI (may be absent)
-    doi_el = entry.find("arxiv:doi", _NS)
-    doi = _text(doi_el) if doi_el is not None else ""
+    # Primary category as venue
+    venue = result.primary_category or ""
 
-    # Primary category
-    primary = entry.find("arxiv:primary_category", _NS)
-    venue = ""
-    if primary is not None:
-        venue = primary.get("term", "")
-
-    # URL — prefer abs link
-    url = ""
-    for link in entry.findall("atom:link", _NS):
-        if link.get("type") == "text/html":
-            url = link.get("href", "")
-            break
-    if not url:
-        url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else raw_id
+    # Prefer HTML abstract URL
+    url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else result.entry_id
 
     return Paper(
-        paper_id=f"arxiv-{arxiv_id}" if arxiv_id else f"arxiv-{raw_id}",
-        title=title,
+        paper_id=f"arxiv-{arxiv_id}" if arxiv_id else f"arxiv-{result.entry_id}",
+        title=result.title or "",
         authors=authors,
         year=year,
-        abstract=abstract,
+        abstract=result.summary or "",
         venue=venue,
         citation_count=0,  # arXiv doesn't provide citation counts
         doi=doi,

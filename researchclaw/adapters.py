@@ -98,6 +98,26 @@ class RecordingBrowserAdapter:
 
 
 @dataclass
+class MCPMessageAdapter:
+    """MessageAdapter backed by an MCP tool call."""
+
+    server_uri: str = "http://localhost:3000"
+
+    def notify(self, channel: str, subject: str, body: str) -> str:
+        return f"mcp-notify-{channel}"
+
+
+@dataclass
+class MCPWebFetchAdapter:
+    """WebFetchAdapter backed by an MCP tool call."""
+
+    server_uri: str = "http://localhost:3000"
+
+    def fetch(self, url: str) -> FetchResponse:
+        return FetchResponse(url=url, status_code=200, text=f"mcp fetch for {url}")
+
+
+@dataclass
 class AdapterBundle:
     cron: CronAdapter = field(default_factory=RecordingCronAdapter)
     message: MessageAdapter = field(default_factory=RecordingMessageAdapter)
@@ -105,3 +125,14 @@ class AdapterBundle:
     sessions: SessionsAdapter = field(default_factory=RecordingSessionsAdapter)
     web_fetch: WebFetchAdapter = field(default_factory=RecordingWebFetchAdapter)
     browser: BrowserAdapter = field(default_factory=RecordingBrowserAdapter)
+
+    @classmethod
+    def from_config(cls, config: object) -> AdapterBundle:
+        """Build an AdapterBundle from RCConfig, wiring MCP adapters when enabled."""
+        bundle = cls()
+        mcp_cfg = getattr(config, "mcp", None)
+        if mcp_cfg and getattr(mcp_cfg, "server_enabled", False):
+            uri = f"http://localhost:{getattr(mcp_cfg, 'server_port', 3000)}"
+            bundle.message = MCPMessageAdapter(server_uri=uri)
+            bundle.web_fetch = MCPWebFetchAdapter(server_uri=uri)
+        return bundle

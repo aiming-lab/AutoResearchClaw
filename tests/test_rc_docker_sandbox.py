@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from researchclaw.config import DockerSandboxConfig, ExperimentConfig
-from researchclaw.experiment.docker_sandbox import DockerSandbox
+from researchclaw.experiment.docker_sandbox import DockerSandbox, _next_container_name
 from researchclaw.experiment.factory import create_sandbox
 from researchclaw.experiment.sandbox import SandboxResult
 
@@ -50,8 +52,9 @@ def test_build_run_command_network_none(tmp_path: Path):
     assert "--memory=8192m" in cmd
     assert "--shm-size=2048m" in cmd
     assert cmd[-1] == "main.py"
-    # Should contain --user (non-root)
-    assert "--user" in cmd
+    # Should contain --user on POSIX (non-root); skipped on Windows
+    if sys.platform != "win32":
+        assert "--user" in cmd
 
 
 def test_build_run_command_setup_only(tmp_path: Path):
@@ -73,8 +76,9 @@ def test_build_run_command_setup_only(tmp_path: Path):
     # Should NOT have --network none (needs network for setup)
     network_indices = [i for i, x in enumerate(cmd) if x == "--network"]
     assert len(network_indices) == 0
-    # Should NOT have --user (runs as root for pip install)
-    assert "--user" not in cmd
+    # Should have --user on POSIX (runs as host user so experiment can write results.json)
+    if sys.platform != "win32":
+        assert "--user" in cmd
 
 
 def test_build_run_command_full_network(tmp_path: Path):
@@ -89,8 +93,9 @@ def test_build_run_command_full_network(tmp_path: Path):
     # No --network none
     network_indices = [i for i, x in enumerate(cmd) if x == "--network"]
     assert len(network_indices) == 0
-    # Should have --user (non-root)
-    assert "--user" in cmd
+    # Should have --user on POSIX (non-root)
+    if sys.platform != "win32":
+        assert "--user" in cmd
 
 
 def test_build_run_command_no_gpu(tmp_path: Path):
@@ -115,6 +120,22 @@ def test_build_run_command_specific_gpus(tmp_path: Path):
     assert "--gpus" in cmd
     gpu_idx = cmd.index("--gpus")
     assert "0,2" in cmd[gpu_idx + 1]
+
+
+def test_build_run_command_forwards_entry_args_and_env(tmp_path: Path):
+    cfg = DockerSandboxConfig(network_policy="none")
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    cmd = sandbox._build_run_command(
+        tmp_path / "staging",
+        entry_point="main.py",
+        container_name="rc-test-args",
+        entry_args=["--foo", "bar"],
+        env_overrides={"B_ENV": "2", "A_ENV": "1"},
+    )
+    env_values = [cmd[i + 1] for i, token in enumerate(cmd) if token == "-e"]
+    assert "A_ENV=1" in env_values
+    assert "B_ENV=2" in env_values
+    assert cmd[-3:] == ["main.py", "--foo", "bar"]
 
 
 # ── Harness injection ─────────────────────────────────────────────────
@@ -151,10 +172,12 @@ def test_factory_returns_docker_sandbox(mock_avail, mock_image, tmp_path: Path):
 
 
 @patch("researchclaw.experiment.docker_sandbox.DockerSandbox.check_docker_available", return_value=False)
-def test_factory_raises_when_docker_unavailable(mock_avail, tmp_path: Path):
+def test_factory_falls_back_when_docker_unavailable(mock_avail, tmp_path: Path):
     config = ExperimentConfig(mode="docker")
-    with pytest.raises(RuntimeError, match="Docker daemon"):
-        create_sandbox(config, tmp_path / "work")
+    sandbox = create_sandbox(config, tmp_path / "work")
+    # BUG-002: Should fall back to subprocess sandbox instead of raising
+    from researchclaw.experiment.sandbox import ExperimentSandbox
+    assert isinstance(sandbox, ExperimentSandbox)
 
 
 @patch("researchclaw.experiment.docker_sandbox.DockerSandbox.ensure_image", return_value=False)
@@ -236,6 +259,26 @@ def test_detect_pip_packages_maps_imports(tmp_path: Path):
     detected = DockerSandbox._detect_pip_packages(tmp_path)
     assert "opencv-python" in detected
     assert "wandb" in detected
+
+
+def test_next_container_name_is_thread_safe():
+    names: list[str] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        for _ in range(20):
+            name = _next_container_name()
+            with lock:
+                names.append(name)
+
+    threads = [threading.Thread(target=worker) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(names) == 100
+    assert len(names) == len(set(names))
 
 
 # ── requirements.txt generation ──────────────────────────────────────
@@ -350,3 +393,109 @@ def test_default_network_policy_is_setup_only():
 def test_default_auto_install_deps_enabled():
     cfg = DockerSandboxConfig()
     assert cfg.auto_install_deps is True
+
+
+# ── Entry point path traversal validation ─────────────────────────────
+
+
+@patch("researchclaw.experiment.docker_sandbox.subprocess.run")
+def test_run_project_rejects_path_traversal(mock_run: MagicMock, tmp_path: Path):
+    """run_project() must reject entry_point with '..' components."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "main.py").write_text("print('hi')")
+
+    cfg = DockerSandboxConfig()
+    work = tmp_path / "work"
+    sandbox = DockerSandbox(cfg, work)
+    # Create escape target so .exists() alone wouldn't catch it
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "escape.py").write_text("print('escaped!')")
+
+    result = sandbox.run_project(project, entry_point="../escape.py")
+
+    assert result.returncode == -1
+    assert ".." in result.stderr
+    mock_run.assert_not_called()
+
+
+@patch("researchclaw.experiment.docker_sandbox.subprocess.run")
+def test_run_project_rejects_absolute_path(mock_run: MagicMock, tmp_path: Path):
+    """run_project() must reject absolute entry_point paths."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "main.py").write_text("print('hi')")
+
+    cfg = DockerSandboxConfig()
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    result = sandbox.run_project(project, entry_point="/etc/passwd")
+
+    assert result.returncode == -1
+    assert "relative" in result.stderr.lower() or "absolute" in result.stderr.lower()
+    mock_run.assert_not_called()
+
+
+# ── Container cleanup behavior ────────────────────────────────────────
+
+
+@patch.object(DockerSandbox, "_remove_container")
+@patch("subprocess.run")
+def test_cleanup_on_normal_exit(mock_run: MagicMock, mock_remove: MagicMock, tmp_path: Path):
+    """_remove_container is called on normal successful exit."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["docker", "run"], returncode=0, stdout="metric: 1.0\n", stderr="",
+    )
+    cfg = DockerSandboxConfig(network_policy="none")
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    result = sandbox.run("print('ok')", timeout_sec=60)
+
+    assert result.returncode == 0
+    mock_remove.assert_called_once()
+
+
+@patch.object(DockerSandbox, "_remove_container")
+@patch.object(DockerSandbox, "_kill_container")
+@patch("subprocess.run")
+def test_cleanup_on_timeout(
+    mock_run: MagicMock, mock_kill: MagicMock, mock_remove: MagicMock, tmp_path: Path,
+):
+    """Both _kill_container and _remove_container are called on timeout."""
+    mock_run.side_effect = subprocess.TimeoutExpired(cmd="docker run", timeout=10)
+    cfg = DockerSandboxConfig(network_policy="none")
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    result = sandbox.run("import time; time.sleep(999)", timeout_sec=10)
+
+    assert result.timed_out is True
+    mock_kill.assert_called_once()
+    mock_remove.assert_called_once()
+
+
+@patch.object(DockerSandbox, "_remove_container")
+@patch("subprocess.run")
+def test_cleanup_on_exception(mock_run: MagicMock, mock_remove: MagicMock, tmp_path: Path):
+    """_remove_container is called even when subprocess.run raises an unexpected exception."""
+    mock_run.side_effect = OSError("Docker daemon not responding")
+    cfg = DockerSandboxConfig(network_policy="none")
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    result = sandbox.run("print('hi')", timeout_sec=60)
+
+    assert result.returncode == -1
+    assert "Docker execution error" in result.stderr
+    mock_remove.assert_called_once()
+
+
+@patch.object(DockerSandbox, "_remove_container")
+@patch.object(DockerSandbox, "_kill_container")
+@patch("subprocess.run")
+def test_keep_containers_skips_removal(
+    mock_run: MagicMock, mock_kill: MagicMock, mock_remove: MagicMock, tmp_path: Path,
+):
+    """When keep_containers=True, _remove_container is never called."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=["docker", "run"], returncode=0, stdout="", stderr="",
+    )
+    cfg = DockerSandboxConfig(network_policy="none", keep_containers=True)
+    sandbox = DockerSandbox(cfg, tmp_path / "work")
+    sandbox.run("print('ok')", timeout_sec=60)
+
+    mock_remove.assert_not_called()

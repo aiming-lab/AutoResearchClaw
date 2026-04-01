@@ -1,0 +1,113 @@
+domain_id: neuroscience_imaging
+display_name: Brain Imaging Analysis
+parent_domain: neuroscience
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: standard analysis pipeline
+  proposed: proposed analysis method
+  variant: ablation / preprocessing variant
+  input: imaging dataset
+  metric: classification accuracy / connectivity strength
+
+typical_file_structure:
+  config.py: "Analysis parameters (TR, voxel size, atlas, frequency bands)"
+  preprocess.py: "Preprocessing pipeline (motion correction, filtering)"
+  features.py: "Feature extraction (ROI signals, connectivity matrices)"
+  classify.py: "Decoding / classification pipeline"
+  main.py: "Entry point: preprocess → extract → analyze → report"
+
+entry_point: main.py
+
+core_libraries:
+  - numpy
+  - scipy
+  - nilearn
+  - mne
+  - scikit-learn
+  - matplotlib
+
+docker_image: researchclaw/sandbox-generic:latest
+gpu_required: false
+
+pip_packages:
+  - numpy
+  - scipy
+  - nilearn
+  - mne
+  - scikit-learn
+  - matplotlib
+  - nibabel
+
+metric_types:
+  - scalar
+  - confusion
+
+standard_baselines:
+  - SVM classifier
+  - Correlation-based connectivity
+  - Atlas-based parcellation
+  - Band-pass filtering
+
+evaluation_protocol: "Generate synthetic imaging data or use standard atlases. Run analysis pipeline, report classification accuracy with cross-validation, or connectivity metrics."
+statistical_tests:
+  - paired_t_test
+  - permutation_test
+  - fdr_correction
+
+output_formats:
+  - latex_table
+  - brain_map
+  - connectivity_matrix
+
+figure_types:
+  - brain_map
+  - connectivity_matrix
+  - bar_chart
+  - confusion_matrix
+
+github_search_terms:
+  - nilearn fmri analysis
+  - mne eeg python
+  - brain decoding sklearn
+  - functional connectivity python
+
+paper_keywords:
+  - brain imaging
+  - functional connectivity
+  - neural decoding
+  - fMRI analysis
+  - EEG signal processing
+
+compute_budget_guidance: |
+  Time budget for brain imaging analysis:
+  - Synthetic data generation: fast
+  - Feature extraction from ROIs: seconds
+  - Classification with cross-validation: seconds to minutes
+  - Keep number of subjects/trials manageable for time budget
+
+dataset_guidance: |
+  Brain imaging experiments should generate synthetic data:
+  - Use nilearn.datasets for atlas references only
+  - Generate synthetic fMRI signals with known activation patterns
+  - Generate synthetic EEG with known frequency components
+  - Do NOT download large imaging datasets
+  - Simulate realistic noise characteristics (scanner drift, eye blinks)
+
+code_generation_hints: |
+  Brain imaging analysis code:
+  1. Generate synthetic imaging data with known ground truth
+  2. Apply standard preprocessing (filtering, artifact removal)
+  3. Extract features (ROI timeseries, connectivity, power spectra)
+  4. Run classification/analysis pipeline
+  5. Report accuracy with cross-validation (k-fold, leave-one-out)
+  6. Compare methods on the same synthetic data
+  7. Output results to results.json
+
+result_analysis_hints: |
+  Brain imaging result analysis:
+  - Classification: accuracy, F1, confusion matrix (with cross-validation)
+  - Connectivity: correlation strength, graph metrics (modularity, efficiency)
+  - Frequency analysis: power spectral density, band power ratios
+  - Use permutation tests for statistical significance
+  - Apply FDR correction for multiple comparisons

@@ -177,7 +177,7 @@ def search_papers(
                 time.sleep(1.0)
 
             elif src_lower == "arxiv":
-                papers = search_arxiv(query, limit=limit)
+                papers = search_arxiv(query, limit=limit, year_min=year_min)
                 all_papers.extend(papers)
                 cache_put(query, "arxiv", limit, _papers_to_dicts(papers))
                 source_stats["arxiv"] = len(papers)
@@ -287,38 +287,72 @@ def _deduplicate(papers: list[Paper]) -> list[Paper]:
     seen_title: dict[str, int] = {}
     result: list[Paper] = []
 
+    def _update_indices(p: Paper, idx: int) -> None:
+        """Register all identifiers of *p* in the lookup dicts at *idx*."""
+        if p.doi:
+            seen_doi[p.doi.lower().strip()] = idx
+        if p.arxiv_id:
+            seen_arxiv[p.arxiv_id.strip()] = idx
+        norm = _normalise_title(p.title)
+        if norm:
+            seen_title[norm] = idx
+
+    def _replace_at(old: Paper, new: Paper, idx: int) -> None:
+        """Replace paper at *idx* and clean up stale index entries."""
+        # Remove old identifiers that the new paper does NOT share
+        if old.doi:
+            old_doi = old.doi.lower().strip()
+            new_doi = new.doi.lower().strip() if new.doi else ""
+            if old_doi != new_doi and seen_doi.get(old_doi) == idx:
+                del seen_doi[old_doi]
+        if old.arxiv_id:
+            old_ax = old.arxiv_id.strip()
+            new_ax = new.arxiv_id.strip() if new.arxiv_id else ""
+            if old_ax != new_ax and seen_arxiv.get(old_ax) == idx:
+                del seen_arxiv[old_ax]
+        old_norm = _normalise_title(old.title)
+        new_norm = _normalise_title(new.title)
+        if old_norm and old_norm != new_norm and seen_title.get(old_norm) == idx:
+            del seen_title[old_norm]
+        result[idx] = new
+        _update_indices(new, idx)
+
     for paper in papers:
+        is_dup = False
+
         # Check DOI
         if paper.doi:
             doi_key = paper.doi.lower().strip()
             if doi_key in seen_doi:
-                # Keep the one with more citations
                 idx = seen_doi[doi_key]
                 if paper.citation_count > result[idx].citation_count:
-                    result[idx] = paper
-                continue
-            seen_doi[doi_key] = len(result)
+                    _replace_at(result[idx], paper, idx)
+                is_dup = True
 
         # Check arXiv ID
-        if paper.arxiv_id:
+        if not is_dup and paper.arxiv_id:
             ax_key = paper.arxiv_id.strip()
             if ax_key in seen_arxiv:
                 idx = seen_arxiv[ax_key]
                 if paper.citation_count > result[idx].citation_count:
-                    result[idx] = paper
-                continue
-            seen_arxiv[ax_key] = len(result)
+                    _replace_at(result[idx], paper, idx)
+                is_dup = True
 
         # Check fuzzy title
-        norm = _normalise_title(paper.title)
-        if norm and norm in seen_title:
-            idx = seen_title[norm]
-            if paper.citation_count > result[idx].citation_count:
-                result[idx] = paper
-            continue
-        if norm:
-            seen_title[norm] = len(result)
+        if not is_dup:
+            norm = _normalise_title(paper.title)
+            if norm and norm in seen_title:
+                idx = seen_title[norm]
+                if paper.citation_count > result[idx].citation_count:
+                    _replace_at(result[idx], paper, idx)
+                is_dup = True
 
+        if is_dup:
+            continue
+
+        # Not a duplicate — store indices and append
+        new_idx = len(result)
+        _update_indices(paper, new_idx)
         result.append(paper)
 
     return result

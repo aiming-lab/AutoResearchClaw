@@ -1,0 +1,99 @@
+domain_id: physics_pde
+display_name: PDE Solvers
+parent_domain: physics
+
+experiment_paradigm: convergence
+condition_terminology:
+  baseline: reference solver
+  proposed: proposed solver
+  variant: parameter variant
+  input: test problem
+  metric: L2 error norm
+
+typical_file_structure:
+  config.py: "Problem parameters (domain, boundary conditions, grid sizes)"
+  problem.py: "PDE definition and analytical solution (if available)"
+  solver.py: "Numerical solver implementation"
+  analysis.py: "Error computation and convergence analysis"
+  main.py: "Entry point: define problem → solve at multiple resolutions → analyze → report"
+
+entry_point: main.py
+
+core_libraries:
+  - numpy
+  - scipy
+  - matplotlib
+
+docker_image: researchclaw/sandbox-physics:latest
+gpu_required: false
+
+pip_packages:
+  - numpy
+  - scipy
+  - matplotlib
+  - findiff
+
+metric_types:
+  - scalar
+  - convergence
+
+standard_baselines:
+  - Finite Difference (2nd order)
+  - Finite Element (P1)
+  - Spectral Method
+  - Crank-Nicolson
+
+evaluation_protocol: "Solve on progressively finer grids, compute L2/L-inf error against analytical solution. Determine convergence order."
+statistical_tests:
+  - convergence_order_fit
+
+output_formats:
+  - latex_table
+  - convergence_plot
+
+figure_types:
+  - convergence_plot
+  - solution_surface_plot
+  - error_distribution_plot
+
+github_search_terms:
+  - PDE solver python
+  - finite difference python
+  - finite element numpy
+  - poisson equation solver
+
+paper_keywords:
+  - partial differential equations
+  - finite element method
+  - finite difference method
+  - numerical PDE
+
+compute_budget_guidance: |
+  PDE solver time budget:
+  - 2D problems: grid sizes 16, 32, 64, 128, 256 (5 levels)
+  - 3D problems: grid sizes 8, 16, 32, 64 (4 levels)
+  - Time-dependent: keep simulation time short, focus on spatial convergence
+
+dataset_guidance: |
+  PDE problems use manufactured or standard test problems:
+  - Use problems with known analytical solutions for error measurement
+  - Standard: Poisson, Heat equation, Wave equation, Advection
+  - Define boundary conditions and source terms in code
+  - Do NOT download external datasets
+
+code_generation_hints: |
+  PDE solver requirements:
+  1. Implement the discretization correctly (stencils, assembly)
+  2. Run at MULTIPLE grid sizes for convergence study
+  3. Compute error norms: L2 = sqrt(h^d * sum((u_h - u_exact)^2))
+  4. Report convergence order: p = log(e1/e2) / log(h1/h2)
+  5. Handle boundary conditions properly
+  6. Output results.json with convergence data:
+     {"convergence": {"method": [{"h": 0.1, "l2_error": 0.05, "linf_error": 0.1}]}}
+
+result_analysis_hints: |
+  PDE convergence analysis:
+  - Fit log-log regression: log(error) = p * log(h) + C
+  - Expected: 2nd order FD → p≈2, 4th order → p≈4
+  - Report observed vs expected convergence order
+  - Flag if convergence order is significantly below expected

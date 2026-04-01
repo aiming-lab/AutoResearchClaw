@@ -23,7 +23,7 @@ RUN python3 -m pip install \
     && python3 -m pip install \
         numpy scipy scikit-learn pandas matplotlib seaborn \
         tqdm gymnasium networkx torchdiffeq PyYAML \
-    && python3 -m pip install "gymnasium[mujoco]" mujoco
+    && python3 -m pip install "gymnasium[mujoco]" "gymnasium[box2d]" mujoco
 
 # Extended ML ecosystem — vision, metrics, utilities
 RUN python3 -m pip install \

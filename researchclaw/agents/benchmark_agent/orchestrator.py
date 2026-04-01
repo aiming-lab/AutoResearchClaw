@@ -37,6 +37,9 @@ class BenchmarkAgentConfig:
     # Surveyor
     enable_hf_search: bool = True
     max_hf_results: int = 10
+    enable_web_search: bool = False
+    max_web_results: int = 5
+    web_search_min_local: int = 3
     # Selector
     tier_limit: int = 2
     min_benchmarks: int = 1
@@ -113,7 +116,7 @@ class BenchmarkPlan:
                 role = b.get("role", "secondary")
                 metrics = b.get("metrics", [])
                 parts.append(
-                    f"- **{b['name']}** ({role}) — "
+                    f"- **{b.get('name', 'Unknown')}** ({role}) — "
                     f"metrics: {', '.join(str(m) for m in metrics)}"
                 )
                 if b.get("api"):
@@ -126,7 +129,7 @@ class BenchmarkPlan:
             parts.append("\n## Selected Baselines")
             for bl in self.selected_baselines:
                 parts.append(
-                    f"- **{bl['name']}**: {bl.get('paper', 'N/A')}"
+                    f"- **{bl.get('name', 'Unknown')}**: {bl.get('paper', 'N/A')}"
                 )
                 if bl.get("source"):
                     parts.append(f"  Code: `{bl['source']}`")

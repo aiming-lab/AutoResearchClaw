@@ -1,0 +1,72 @@
+domain_id: ml_vision
+display_name: Computer Vision (ML)
+parent_domain: ml
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline
+  proposed: proposed method
+  variant: ablation
+  input: dataset
+  metric: accuracy/loss
+
+typical_file_structure:
+  config.py: "Hyperparameters and model configuration"
+  data.py: "Dataset loading with train/val/test splits"
+  model.py: "Model architecture definition"
+  train.py: "Training loop with metric tracking"
+  main.py: "Entry point: setup → train → evaluate → report"
+
+entry_point: main.py
+
+core_libraries:
+  - torch
+  - torchvision
+  - numpy
+  - scikit-learn
+
+docker_image: researchclaw/sandbox-ml:latest
+gpu_required: true
+
+pip_packages:
+  - torch
+  - torchvision
+  - numpy
+  - scikit-learn
+  - matplotlib
+  - tqdm
+
+metric_types:
+  - scalar
+  - learning_curve
+
+standard_baselines:
+  - ResNet-18
+  - ResNet-50
+  - VGG-16
+  - DenseNet-121
+  - EfficientNet-B0
+
+evaluation_protocol: "Train on training set, evaluate on test set. Report mean ± std over 3+ seeds."
+statistical_tests:
+  - paired_t_test
+
+output_formats:
+  - latex_table
+  - convergence_plot
+
+figure_types:
+  - accuracy_curve
+  - loss_curve
+  - confusion_matrix
+  - bar_chart
+
+github_search_terms:
+  - image classification pytorch
+  - computer vision benchmark
+  - CNN training pipeline
+
+paper_keywords:
+  - image classification
+  - convolutional neural network
+  - visual recognition

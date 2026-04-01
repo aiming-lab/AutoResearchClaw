@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pipeline &mdash; AutoResearchClaw</title>
+  <meta name="description" content="Explore the 23-stage autonomous research pipeline, from topic initialization to citation verification.">
+  <link rel="icon" href="assets/logo.png" type="image/png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Nav -->
+<nav class="navbar">
+  <div class="container">
+    <a href="index.html" class="nav-brand"><img src="assets/logo.png" alt="Logo">AutoResearchClaw</a>
+    <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')">&#9776;</button>
+    <ul class="nav-links">
+      <li><a href="index.html">Home</a></li>
+      <li><a href="pipeline.html" class="active">Pipeline</a></li>
+      <li><a href="features.html">Features</a></li>
+      <li><a href="papers.html">Papers</a></li>
+      <li><a href="getting-started.html">Get Started</a></li>
+      <li><a href="https://github.com/aiming-lab/AutoResearchClaw" class="nav-github" target="_blank">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- Header -->
+<section class="hero" style="padding-bottom: 2rem;">
+  <div class="container">
+    <h1>The <span class="gradient">23-Stage</span> Pipeline</h1>
+    <p class="tagline">Click any stage to expand its description. Yellow badges mark gate stages that require quality checks before proceeding.</p>
+  </div>
+</section>
+
+<!-- Pipeline -->
+<section class="section" style="padding-top: 1rem;">
+  <div class="container pipeline-full" id="pipeline">
+
+    <!-- Phase A -->
+    <div class="phase-group">
+      <div class="phase-group-header">
+        <div class="phase-letter">A</div>
+        <h3>Research Scoping</h3>
+      </div>
+      <div class="stage-list">
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">1</div>
+          <div class="stage-info">
+            <h4>Topic Initialization</h4>
+            <div class="stage-subtitle">Define research topic, scope, and target conference</div>
+            <div class="stage-detail">
+              Takes a user-provided topic prompt and generates a structured research plan including target conference, research questions, and expected contributions. Emphasizes novelty and alignment with recent conference trends.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">2</div>
+          <div class="stage-info">
+            <h4>Problem Decomposition</h4>
+            <div class="stage-subtitle">Break research into sub-problems and objectives</div>
+            <div class="stage-detail">
+              Decomposes the research topic into concrete sub-problems, defines evaluation criteria, and identifies the key technical challenges to address.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector"><div class="connector-line"></div></div>
+
+    <!-- Phase B -->
+    <div class="phase-group">
+      <div class="phase-group-header">
+        <div class="phase-letter">B</div>
+        <h3>Literature Discovery</h3>
+      </div>
+      <div class="stage-list">
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">3</div>
+          <div class="stage-info">
+            <h4>Search Strategy</h4>
+            <div class="stage-subtitle">Generate search queries and select paper sources</div>
+            <div class="stage-detail">
+              Generates targeted search queries from the research plan, selects which APIs to query (OpenAlex, Semantic Scholar, arXiv), and defines inclusion/exclusion criteria.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">4</div>
+          <div class="stage-info">
+            <h4>Literature Collect</h4>
+            <div class="stage-subtitle">Search OpenAlex, Semantic Scholar, and arXiv</div>
+            <div class="stage-detail">
+              Executes multi-source literature search with intelligent caching, circuit breakers, and rate limiting. Deduplicates results across sources and injects seminal papers from the seed library.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">API</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number gate">5</div>
+          <div class="stage-info">
+            <h4>Literature Screen</h4>
+            <div class="stage-subtitle">Quality and relevance screening (Gate)</div>
+            <div class="stage-detail">
+              <strong>Gate Stage.</strong> LLM reviews each collected paper for relevance, quality, and domain match. Cross-domain false positives are explicitly rejected. Papers below threshold are filtered out.
+              <div class="stage-badges">
+                <span class="stage-badge stage-badge-gate">Gate</span>
+                <span class="stage-badge stage-badge-llm">LLM</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">6</div>
+          <div class="stage-info">
+            <h4>Knowledge Extract</h4>
+            <div class="stage-subtitle">Extract key insights and methodologies from papers</div>
+            <div class="stage-detail">
+              Extracts structured knowledge from screened papers: key contributions, methods, results, limitations, and open questions. Builds a knowledge graph for synthesis.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector"><div class="connector-line"></div></div>
+
+    <!-- Phase C -->
+    <div class="phase-group">
+      <div class="phase-group-header">
+        <div class="phase-letter">C</div>
+        <h3>Knowledge Synthesis</h3>
+      </div>
+      <div class="stage-list">
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">7</div>
+          <div class="stage-info">
+            <h4>Synthesis</h4>
+            <div class="stage-subtitle">Gap analysis and research trend synthesis</div>
+            <div class="stage-detail">
+              Clusters extracted knowledge by topic, identifies research gaps, and synthesizes trends. Produces a structured literature review summary that informs hypothesis generation.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">8</div>
+          <div class="stage-info">
+            <h4>Hypothesis Generation</h4>
+            <div class="stage-subtitle">Generate testable research hypotheses</div>
+            <div class="stage-detail">
+              Generates novel, testable hypotheses that address gaps not covered by existing literature. Each hypothesis includes expected outcomes, evaluation metrics, and ablation dimensions.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector"><div class="connector-line"></div></div>
+
+    <!-- Phase D -->
+    <div class="phase-group">
+      <div class="phase-group-header">
+        <div class="phase-letter">D</div>
+        <h3>Experiment Design</h3>
+      </div>
+      <div class="stage-list">
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number gate">9</div>
+          <div class="stage-info">
+            <h4>Experiment Design</h4>
+            <div class="stage-subtitle">Methodology design and validation (Gate)</div>
+            <div class="stage-detail">
+              <strong>Gate Stage.</strong> Designs the complete experimental methodology: baselines, ablations, metrics, datasets, and statistical tests. Requires modern benchmarks and real datasets (CIFAR-10, etc.).
+              <div class="stage-badges">
+                <span class="stage-badge stage-badge-gate">Gate</span>
+                <span class="stage-badge stage-badge-llm">LLM</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">10</div>
+          <div class="stage-info">
+            <h4>Code Generation</h4>
+            <div class="stage-subtitle">Generate executable experiment code</div>
+            <div class="stage-detail">
+              Generates complete Python experiment code (main.py) with dataset loading, model definition, training loop, evaluation, and results output. Includes security validation, import checking, and code review.
+              <div class="stage-badges">
+                <span class="stage-badge stage-badge-llm">LLM</span>
+                <span class="stage-badge stage-badge-new">New</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">11</div>
+          <div class="stage-info">
+            <h4>Resource Planning</h4>
+            <div class="stage-subtitle">Estimate compute budget and time allocation</div>
+            <div class="stage-detail">
+              Estimates GPU memory requirements, training time, and compute budget. Configures Docker sandbox resource limits and timeout values based on available hardware.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector"><div class="connector-line"></div></div>
+
+    <!-- Phase E -->
+    <div class="phase-group">
+      <div class="phase-group-header">
+        <div class="phase-letter">E</div>
+        <h3>Experiment Execution</h3>
+      </div>
+      <div class="stage-list">
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">12</div>
+          <div class="stage-info">
+            <h4>Experiment Run</h4>
+            <div class="stage-subtitle">Execute experiments in Docker sandbox</div>
+            <div class="stage-detail">
+              Runs generated code inside an isolated Docker container with NVIDIA GPU passthrough. Captures stdout metrics, timing data, and exit codes. Pre-cached datasets available at /workspace/data.
+              <div class="stage-badges">
+                <span class="stage-badge stage-badge-docker">Docker</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">13</div>
+          <div class="stage-info">
+            <h4>Iterative Refinement</h4>
+            <div class="stage-subtitle">Fix errors and improve experiment code</div>
+            <div class="stage-detail">
+              If experiment fails or produces poor results, automatically diagnoses issues and generates refined code. Checks ablation effectiveness (>5% difference from baseline). Up to 3 refinement iterations.
+              <div class="stage-badges">
+                <span class="stage-badge stage-badge-llm">LLM</span>
+                <span class="stage-badge stage-badge-docker">Docker</span>
+                <span class="stage-badge stage-badge-new">New</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector"><div class="connector-line"></div></div>
+
+    <!-- Phase F -->
+    <div class="phase-group">
+      <div class="phase-group-header">
+        <div class="phase-letter">F</div>
+        <h3>Analysis &amp; Decision</h3>
+      </div>
+      <div class="stage-list">
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">14</div>
+          <div class="stage-info">
+            <h4>Result Analysis</h4>
+            <div class="stage-subtitle">Statistical analysis of experiment outcomes</div>
+            <div class="stage-detail">
+              Parses experiment outputs, computes statistical significance, generates comparison charts, and produces structured results summaries. Detects result contradictions and null findings.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">15</div>
+          <div class="stage-info">
+            <h4>Research Decision</h4>
+            <div class="stage-subtitle">Pivot, refine, or proceed based on results</div>
+            <div class="stage-detail">
+              Evaluates experiment results and decides: <strong>Proceed</strong> (results support hypothesis), <strong>Refine</strong> (re-run with improvements), or <strong>Pivot</strong> (discard hypothesis, generate new one). Max 2 pivots to prevent infinite loops.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector"><div class="connector-line"></div></div>
+
+    <!-- Phase G -->
+    <div class="phase-group">
+      <div class="phase-group-header">
+        <div class="phase-letter">G</div>
+        <h3>Paper Writing</h3>
+      </div>
+      <div class="stage-list">
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">16</div>
+          <div class="stage-info">
+            <h4>Paper Outline</h4>
+            <div class="stage-subtitle">Structure paper sections and arguments</div>
+            <div class="stage-detail">
+              Creates a detailed paper outline with section-by-section arguments, key claims, and figure placements. Follows conference template structure (abstract, intro, related work, method, experiments, conclusion).
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">17</div>
+          <div class="stage-info">
+            <h4>Paper Draft</h4>
+            <div class="stage-subtitle">Write the full paper draft</div>
+            <div class="stage-detail">
+              Generates the complete paper in Markdown/LaTeX with structured writing rules: 150-200 word abstract, no number repetition across sections, proper citation of original papers for all discussed techniques.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">18</div>
+          <div class="stage-info">
+            <h4>Peer Review</h4>
+            <div class="stage-subtitle">Multi-agent simulated conference review</div>
+            <div class="stage-detail">
+              Multiple LLM reviewer personas evaluate the paper: one technical reviewer, one methodology expert, and one clarity/presentation reviewer. Each provides structured feedback with scores.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">19</div>
+          <div class="stage-info">
+            <h4>Paper Revision</h4>
+            <div class="stage-subtitle">Revise based on peer review feedback</div>
+            <div class="stage-detail">
+              Addresses reviewer comments systematically: fixes technical issues, improves writing clarity, adds missing comparisons, and strengthens the narrative. Produces a revised draft.
+              <div class="stage-badges">
+                <span class="stage-badge stage-badge-llm">LLM</span>
+                <span class="stage-badge stage-badge-new">New</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="connector"><div class="connector-line"></div></div>
+
+    <!-- Phase H -->
+    <div class="phase-group">
+      <div class="phase-group-header">
+        <div class="phase-letter">H</div>
+        <h3>Finalization</h3>
+      </div>
+      <div class="stage-list">
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number gate">20</div>
+          <div class="stage-info">
+            <h4>Quality Gate</h4>
+            <div class="stage-subtitle">Final quality assessment (Gate)</div>
+            <div class="stage-detail">
+              <strong>Gate Stage.</strong> Comprehensive quality assessment scoring the paper on novelty, soundness, significance, clarity, and reproducibility. Papers below threshold are sent back for rewriting.
+              <div class="stage-badges">
+                <span class="stage-badge stage-badge-gate">Gate</span>
+                <span class="stage-badge stage-badge-llm">LLM</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">21</div>
+          <div class="stage-info">
+            <h4>Knowledge Archive</h4>
+            <div class="stage-subtitle">Archive findings to knowledge base</div>
+            <div class="stage-detail">
+              Stores research findings, methodology, and results in the persistent knowledge base for future reference and cross-project knowledge transfer. Non-critical: failure doesn't abort pipeline.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LLM</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">22</div>
+          <div class="stage-info">
+            <h4>Export &amp; Publish</h4>
+            <div class="stage-subtitle">Generate LaTeX PDF and final output</div>
+            <div class="stage-detail">
+              Converts the paper to conference-ready LaTeX, compiles to PDF, generates BibTeX bibliography, and produces the final output package (paper.pdf, main.tex, references.bib, charts/).
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">LaTeX</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-item" onclick="this.classList.toggle('expanded')">
+          <div class="stage-number">23</div>
+          <div class="stage-info">
+            <h4>Citation Verify</h4>
+            <div class="stage-subtitle">Verify all citations against real databases</div>
+            <div class="stage-detail">
+              Verifies every cited paper exists in real academic databases. Checks DOI via CrossRef, title via OpenAlex, arXiv ID via arXiv API, and falls back to Semantic Scholar. Non-critical: failure doesn't abort pipeline.
+              <div class="stage-badges"><span class="stage-badge stage-badge-llm">API</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- Footer -->
+<footer class="footer">
+  <ul class="footer-links">
+    <li><a href="index.html">Home</a></li>
+    <li><a href="pipeline.html">Pipeline</a></li>
+    <li><a href="features.html">Features</a></li>
+    <li><a href="papers.html">Papers</a></li>
+    <li><a href="getting-started.html">Get Started</a></li>
+    <li><a href="https://github.com/aiming-lab/AutoResearchClaw" target="_blank">GitHub</a></li>
+  </ul>
+  <p>AutoResearchClaw &mdash; Autonomous Research Paper Generation Pipeline</p>
+</footer>
+
+</body>
+</html>

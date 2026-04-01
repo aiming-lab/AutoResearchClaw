@@ -409,14 +409,14 @@ class TestCodeGenAgent:
 class TestRendererAgent:
     def test_render_simple_script(self, tmp_path):
         from researchclaw.agents.figure_agent.renderer import RendererAgent
-        agent = RendererAgent(_FakeLLM(), timeout_sec=10)
+        agent = RendererAgent(_FakeLLM(), timeout_sec=10, use_docker=False)
         output_dir = tmp_path / "charts"
 
         # Use a script that creates a valid PNG without matplotlib
         # (creates a minimal 1x1 PNG file directly)
         script = textwrap.dedent("""\
-            import struct, zlib
-            output_path = "{output_dir}/fig_test.png"
+            import struct, zlib, os
+            output_path = os.path.join(r"{output_dir}", "fig_test.png")
             # Minimal valid PNG: 1x1 white pixel
             def write_png(path):
                 sig = b'\\x89PNG\\r\\n\\x1a\\n'
@@ -867,6 +867,23 @@ class TestFigureAgentConfig:
         assert cfg.min_figures == 2
         assert cfg.max_figures == 6
         assert cfg.dpi == 150
+
+    def test_parse_from_dict_extended_fields(self):
+        from researchclaw.config import _parse_figure_agent_config
+        cfg = _parse_figure_agent_config({
+            "use_docker": False,
+            "docker_image": "custom/figure:latest",
+            "output_format": "latex",
+            "gemini_api_key": "test-key",
+            "gemini_model": "gemini-test",
+            "nano_banana_enabled": False,
+        })
+        assert cfg.use_docker is False
+        assert cfg.docker_image == "custom/figure:latest"
+        assert cfg.output_format == "latex"
+        assert cfg.gemini_api_key == "test-key"
+        assert cfg.gemini_model == "gemini-test"
+        assert cfg.nano_banana_enabled is False
 
     def test_parse_empty(self):
         from researchclaw.config import _parse_figure_agent_config

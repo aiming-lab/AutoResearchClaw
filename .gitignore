@@ -1,3 +1,4 @@
+HANDOFF_METACLAW_SKILL_LOOP.md
 .venv/
 __pycache__/
 *.pyc
@@ -50,8 +51,6 @@ docs/OPTIMIZATION_PLAN*.md
 docs/MULTI_CASE_EVALUATION*.md
 docs/pipeline_quality_issues*.md
 docs/autobench-loop.md
-RESEARCHCLAW_AGENTS.md
-RESEARCHCLAW_CLAUDE.md
 
 # Task-specific config files (keep example template only)
 config_agent_*.yaml
@@ -66,6 +65,8 @@ image/logo_prompt.md
 # macOS
 .DS_Store
 
+run.log
+
 # Misc temp files
 .history/
 .serena/
@@ -77,3 +78,20 @@ cli_pause
 
 .venv_arc/
 /config.arc.yaml
+
+config_*.yaml
+
+# Frontend (local dev only)
+frontend/
+
+# Test outputs and run logs (local only)
+test_outputs*/
+records/
+run*_full_log.txt
+mdpdf.log
+scripts/md2pdf.py
+
+# Local docs (not for public)
+docs/tasks/
+docs/feature_expansion_analysis.*
+docs/tester_guide_cn.*

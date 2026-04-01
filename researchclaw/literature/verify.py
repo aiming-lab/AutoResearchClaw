@@ -121,11 +121,14 @@ class VerificationReport:
 # ---------------------------------------------------------------------------
 
 _ENTRY_RE = re.compile(
-    r"@(\w+)\s*\{\s*([^,\s]+)\s*,\s*(.*?)\n\}",
+    r"@(\w+)\s*\{\s*([^,\s]+)\s*,\s*(.*?)\s*\}(?=\s*(?:@|\Z))",
     re.DOTALL,
 )
 
-_FIELD_RE = re.compile(r"(\w+)\s*=\s*\{([^}]*)\}", re.DOTALL)
+_FIELD_RE = re.compile(
+    r"(\w+)\s*=\s*\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}",
+    re.DOTALL,
+)
 
 
 def parse_bibtex_entries(bib_text: str) -> list[dict[str, str]]:
@@ -454,7 +457,7 @@ def verify_by_openalex(title: str) -> CitationResult | None:
     Returns *None* only on network failure (allows fallthrough to S2).
     """
     params = urllib.parse.urlencode({
-        "filter": f"title.search:{title}",
+        "filter": "title.search:" + title.replace(",", " ").replace(":", " "),
         "per_page": "5",
         "mailto": _OPENALEX_EMAIL,
     })
@@ -689,7 +692,32 @@ def verify_citations(
     _DELAY_OPENALEX = 0.2                   # OpenAlex: 10K/day
     api_call_count = 0
 
+    # BUG-22: Global timeout — stop verifying after 5 minutes total
+    _verify_start = time.monotonic()
+    _VERIFY_TIMEOUT_SEC = 300  # 5 minutes
+
     for i, entry in enumerate(entries):
+        # BUG-22: Check global timeout — mark remaining as SKIPPED
+        if time.monotonic() - _verify_start > _VERIFY_TIMEOUT_SEC:
+            logger.warning(
+                "Verification timeout (%.0fs). Marking remaining %d/%d "
+                "citations as SKIPPED.",
+                _VERIFY_TIMEOUT_SEC, len(entries) - i, len(entries),
+            )
+            for remaining_entry in entries[i:]:
+                _rkey = remaining_entry.get("key", f"unknown_{i}")
+                _rtitle = remaining_entry.get("title", "")
+                report.results.append(CitationResult(
+                    cite_key=_rkey,
+                    title=_rtitle,
+                    status=VerifyStatus.SKIPPED,
+                    confidence=0.0,
+                    method="skipped",
+                    details="Verification timeout exceeded",
+                ))
+                report.skipped += 1
+            break
+
         key = entry.get("key", f"unknown_{i}")
         title = entry.get("title", "")
         arxiv_id = entry.get("eprint", "")
@@ -921,7 +949,7 @@ def annotate_paper_hallucinations(
     )
 
     # Clean up artifacts: double spaces, empty parenthetical citations, orphan punctuation
-    result = re.sub(r"\s{2,}", " ", result)
+    result = re.sub(r" {2,}", " ", result)
     result = re.sub(r"\(\s*\)", "", result)
     result = re.sub(r"\[\s*\]", "", result)
 

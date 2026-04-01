@@ -30,7 +30,7 @@ class AcquirerAgent(BaseAgent):
         bench_specs = []
         for b in benchmarks:
             spec = (
-                f"- {b['name']} (tier {b.get('tier', '?')}, "
+                f"- {b.get('name', 'Unknown')} (tier {b.get('tier', '?')}, "
                 f"role: {b.get('role', 'secondary')})\n"
                 f"  API: {b.get('api', 'N/A')}\n"
                 f"  Metrics: {b.get('metrics', [])}\n"
@@ -70,7 +70,7 @@ class AcquirerAgent(BaseAgent):
         base_specs = []
         for bl in baselines:
             spec = (
-                f"- {bl['name']}\n"
+                f"- {bl.get('name', 'Unknown')}\n"
                 f"  Source: {bl.get('source', 'N/A')}\n"
                 f"  Paper: {bl.get('paper', 'N/A')}"
             )
@@ -153,12 +153,15 @@ class AcquirerAgent(BaseAgent):
                     f'        print(f"Warning: Failed to download {name}: {{e}}")',
                     '',
                 ])
-            elif "datasets.load_dataset" in api:
+            elif "datasets.load_dataset" in api or "load_dataset" in api:
+                # Rewrite qualified `datasets.load_dataset(...)` to
+                # `load_dataset(...)` so it matches the `from datasets import`
+                _dl_api = api.replace("datasets.load_dataset", "load_dataset")
                 lines.extend([
                     f'    # Download {name}',
                     '    try:',
                     f'        from datasets import load_dataset',
-                    f'        {api}',
+                    f'        {_dl_api}',
                     f'        print(f"Downloaded {name}")',
                     f'    except Exception as e:',
                     f'        print(f"Warning: Failed to download {name}: {{e}}")',
@@ -261,8 +264,8 @@ class AcquirerAgent(BaseAgent):
             "baseline_code": baseline_code,
             "setup_code": setup_code,
             "requirements": requirements,
-            "benchmark_names": [b["name"] for b in benchmarks],
-            "baseline_names": [bl["name"] for bl in baselines],
+            "benchmark_names": [b.get("name", "Unknown") for b in benchmarks],
+            "baseline_names": [bl.get("name", "Unknown") for bl in baselines],
         }
 
         self.logger.info("Acquirer complete: %d code artifacts generated",

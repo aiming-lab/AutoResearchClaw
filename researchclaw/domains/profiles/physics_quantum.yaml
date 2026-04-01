@@ -1,0 +1,26 @@
+domain_id: physics_quantum
+display_name: Quantum Mechanics / Quantum Physics
+parent_domain: physics
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: reference method
+  proposed: proposed method
+  variant: parameter variant
+  input: quantum system
+  metric: energy / fidelity
+typical_file_structure:
+  config.py: "System parameters (potential, basis, grid)"
+  system.py: "Quantum system definition"
+  solver.py: "Solver implementation"
+  main.py: "Entry point: setup → solve → analyze → report"
+entry_point: main.py
+core_libraries: [numpy, scipy, matplotlib]
+docker_image: researchclaw/sandbox-physics:latest
+gpu_required: false
+pip_packages: [numpy, scipy, matplotlib]
+metric_types: [scalar, convergence]
+standard_baselines: [Exact diagonalization, Variational method, Perturbation theory]
+evaluation_protocol: "Compare methods on standard quantum systems. Report energy accuracy, fidelity."
+statistical_tests: [relative_error, convergence_order_fit]
+github_search_terms: [quantum mechanics python, schrodinger equation solver]
+paper_keywords: [quantum mechanics, Schrodinger equation]

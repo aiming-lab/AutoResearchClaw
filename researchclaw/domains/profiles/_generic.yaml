@@ -1,0 +1,59 @@
+domain_id: generic
+display_name: Generic Computational Research
+parent_domain: ""
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline
+  proposed: proposed method
+  variant: variant
+  input: input data
+  metric: primary metric
+
+typical_file_structure:
+  config.py: "Experiment configuration and parameters"
+  data.py: "Data generation or loading"
+  methods.py: "Method implementations"
+  evaluate.py: "Evaluation and metrics"
+  main.py: "Entry point: setup → run → evaluate → report"
+
+entry_point: main.py
+
+core_libraries:
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas
+
+docker_image: researchclaw/sandbox-generic:latest
+gpu_required: false
+
+pip_packages:
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas
+  - scikit-learn
+
+metric_types:
+  - scalar
+  - structured
+
+evaluation_protocol: "Compare methods on standard test problems. Report primary metric with error bars."
+statistical_tests:
+  - paired_t_test
+
+github_search_terms:
+  - scientific computing python
+  - computational experiment
+
+paper_keywords:
+  - computational methods
+
+code_generation_hints: |
+  General guidelines for any computational experiment:
+  1. Implement all methods from the experiment plan
+  2. Use the same test problems / data for all methods
+  3. Report results as JSON to results.json
+  4. Include error bars / multiple seeds where applicable
+  5. Follow good software practices: clear variable names, modular code

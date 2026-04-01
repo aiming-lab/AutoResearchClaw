@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Features &mdash; AutoResearchClaw</title>
+  <meta name="description" content="AutoResearchClaw features: real literature search, Docker sandbox, multi-agent review, iterative refinement, and more.">
+  <link rel="icon" href="assets/logo.png" type="image/png">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Nav -->
+<nav class="navbar">
+  <div class="container">
+    <a href="index.html" class="nav-brand"><img src="assets/logo.png" alt="Logo">AutoResearchClaw</a>
+    <button class="nav-toggle" onclick="document.querySelector('.nav-links').classList.toggle('open')">&#9776;</button>
+    <ul class="nav-links">
+      <li><a href="index.html">Home</a></li>
+      <li><a href="pipeline.html">Pipeline</a></li>
+      <li><a href="features.html" class="active">Features</a></li>
+      <li><a href="papers.html">Papers</a></li>
+      <li><a href="getting-started.html">Get Started</a></li>
+      <li><a href="https://github.com/aiming-lab/AutoResearchClaw" class="nav-github" target="_blank">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- Header -->
+<section class="hero" style="padding-bottom: 2rem;">
+  <div class="container">
+    <h1><span class="gradient">Features</span></h1>
+    <p class="tagline">Everything you need for autonomous research paper generation, built for reliability and quality.</p>
+  </div>
+</section>
+
+<!-- Features Grid -->
+<section class="section" style="padding-top: 1rem;">
+  <div class="container">
+    <div class="feature-grid">
+
+      <div class="feature-card">
+        <div class="feature-icon bg-blue">&#128269;</div>
+        <h3>Multi-Source Literature Search</h3>
+        <p>Searches OpenAlex (primary, 10K/day), Semantic Scholar, and arXiv in parallel. Intelligent source fallback ensures results even when individual APIs are rate-limited.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-blue">&#9889;</div>
+        <h3>Rate Limit Defense</h3>
+        <p>Five-layer defense: adaptive rate limiter, three-state circuit breaker, multi-source fallback, intelligent caching with per-source TTL, and request optimization via S2 batch API.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-green">&#128011;</div>
+        <h3>Docker Sandbox with GPU</h3>
+        <p>Experiments run in isolated Docker containers based on nvidia/cuda:12.4.1 with PyTorch, GPU passthrough, network sandboxing, and pre-cached datasets (CIFAR-10, FashionMNIST).</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-green">&#128187;</div>
+        <h3>Hardware-Aware Design</h3>
+        <p>Automatically detects available GPU memory and adjusts experiment parameters (batch size, model size, training epochs) to fit within hardware constraints.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-purple">&#129302;</div>
+        <h3>Multi-Agent Peer Review</h3>
+        <p>Simulated conference-style peer review with multiple LLM reviewer personas providing structured feedback on technical soundness, methodology, and clarity.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-purple">&#128260;</div>
+        <h3>Pivot / Refine / Proceed</h3>
+        <p>After analyzing experiment results, the pipeline autonomously decides whether to proceed with paper writing, refine the experiment, or pivot to a new hypothesis (max 2 pivots).</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-amber">&#128200;</div>
+        <h3>Experiment Charts</h3>
+        <p>Automatically generates publication-quality comparison charts, filtering out timing/meta metrics. Supports bar charts, learning curves, and ablation visualizations.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-red">&#128220;</div>
+        <h3>Conference-Ready LaTeX</h3>
+        <p>Outputs publication-quality LaTeX with proper bibliography, figure placement, and conference formatting (NeurIPS, ICLR, ICML templates).</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-blue">&#9989;</div>
+        <h3>Citation Verification</h3>
+        <p>Every cited paper is verified against real academic databases (CrossRef, OpenAlex, arXiv, Semantic Scholar) in optimized order to minimize API pressure.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-green">&#128230;</div>
+        <h3>Result Caching</h3>
+        <p>Per-source cache TTL: arXiv results cached 24h (daily metadata updates), S2/OpenAlex 3 days, citation verification results cached permanently.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-purple">&#128218;</div>
+        <h3>Seminal Paper Library</h3>
+        <p>Built-in seed library of foundational ML papers (normalization, ResNets, transformers, etc.) injected during literature search to ensure key references are cited.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-amber">&#128736;</div>
+        <h3>Code Security Validation</h3>
+        <p>Generated experiment code is validated for security (no network access, no subprocess calls, no file system writes outside workspace) before Docker execution.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-red">&#128161;</div>
+        <h3>Contradiction Detection</h3>
+        <p>Automatically detects contradictions in experiment results: null findings, negative results, and cases where control outperforms proposed method.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-blue">&#128203;</div>
+        <h3>Quality Assessment</h3>
+        <p>Built-in quality scoring across novelty, soundness, significance, clarity, and reproducibility. Papers below threshold trigger rewriting.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-green">&#128451;</div>
+        <h3>Knowledge Archive</h3>
+        <p>Research findings are archived in a persistent knowledge base (Markdown-backed) for cross-project knowledge transfer and future reference.</p>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon bg-purple">&#127891;</div>
+        <h3>LLM Fine-Tuning</h3>
+        <p>Optional QLoRA/LoRA fine-tuning support for adapting language models to specific research domains and writing styles.</p>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- Comparison Table -->
+<section class="section" style="background: var(--color-bg-alt);">
+  <div class="container">
+    <div class="section-header">
+      <h2>How We Compare</h2>
+      <p>AutoResearchClaw vs. other autonomous research tools</p>
+    </div>
+
+    <div style="overflow-x: auto;">
+      <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">
+        <thead>
+          <tr style="border-bottom: 2px solid var(--color-border);">
+            <th style="text-align: left; padding: 0.75rem;">Feature</th>
+            <th style="text-align: center; padding: 0.75rem; color: var(--color-primary);">AutoResearchClaw</th>
+            <th style="text-align: center; padding: 0.75rem;">PaperClaw</th>
+            <th style="text-align: center; padding: 0.75rem;">Sibyl</th>
+            <th style="text-align: center; padding: 0.75rem;">Idea2Paper</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr style="border-bottom: 1px solid var(--color-border);">
+            <td style="padding: 0.75rem;">Literature search</td>
+            <td style="text-align: center; padding: 0.75rem; color: var(--color-success);">3 APIs + cache</td>
+            <td style="text-align: center; padding: 0.75rem;">2 APIs</td>
+            <td style="text-align: center; padding: 0.75rem;">arXiv only</td>
+            <td style="text-align: center; padding: 0.75rem;">Offline KG</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--color-border);">
+            <td style="padding: 0.75rem;">Rate limit handling</td>
+            <td style="text-align: center; padding: 0.75rem; color: var(--color-success);">Circuit breaker + fallback</td>
+            <td style="text-align: center; padding: 0.75rem;">Exponential backoff</td>
+            <td style="text-align: center; padding: 0.75rem;">None</td>
+            <td style="text-align: center; padding: 0.75rem;">N/A</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--color-border);">
+            <td style="padding: 0.75rem;">Code execution</td>
+            <td style="text-align: center; padding: 0.75rem; color: var(--color-success);">Docker + GPU</td>
+            <td style="text-align: center; padding: 0.75rem;">No</td>
+            <td style="text-align: center; padding: 0.75rem;">No</td>
+            <td style="text-align: center; padding: 0.75rem;">No</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--color-border);">
+            <td style="padding: 0.75rem;">Peer review</td>
+            <td style="text-align: center; padding: 0.75rem; color: var(--color-success);">Multi-agent</td>
+            <td style="text-align: center; padding: 0.75rem;">No</td>
+            <td style="text-align: center; padding: 0.75rem;">Single agent</td>
+            <td style="text-align: center; padding: 0.75rem;">No</td>
+          </tr>
+          <tr style="border-bottom: 1px solid var(--color-border);">
+            <td style="padding: 0.75rem;">Citation verification</td>
+            <td style="text-align: center; padding: 0.75rem; color: var(--color-success);">4 API sources</td>
+            <td style="text-align: center; padding: 0.75rem;">No</td>
+            <td style="text-align: center; padding: 0.75rem;">No</td>
+            <td style="text-align: center; padding: 0.75rem;">No</td>
+          </tr>
+          <tr>
+            <td style="padding: 0.75rem;">Pipeline stages</td>
+            <td style="text-align: center; padding: 0.75rem; color: var(--color-success);">23</td>
+            <td style="text-align: center; padding: 0.75rem;">~8</td>
+            <td style="text-align: center; padding: 0.75rem;">~5</td>
+            <td style="text-align: center; padding: 0.75rem;">~6</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer class="footer">
+  <ul class="footer-links">
+    <li><a href="index.html">Home</a></li>
+    <li><a href="pipeline.html">Pipeline</a></li>
+    <li><a href="features.html">Features</a></li>
+    <li><a href="papers.html">Papers</a></li>
+    <li><a href="getting-started.html">Get Started</a></li>
+    <li><a href="https://github.com/aiming-lab/AutoResearchClaw" target="_blank">GitHub</a></li>
+  </ul>
+  <p>AutoResearchClaw &mdash; Autonomous Research Paper Generation Pipeline</p>
+</footer>
+
+</body>
+</html>

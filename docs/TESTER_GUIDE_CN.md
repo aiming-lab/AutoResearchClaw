@@ -12,7 +12,8 @@
   <a href="https://github.com/aiming-lab/AutoResearchClaw">⭐ Star 项目</a> ·
   <a href="#-快速开始">🚀 快速开始</a> ·
   <a href="#-反馈报告模板">📋 反馈模板</a> ·
-  <a href="TESTER_GUIDE.md">🇬🇧 English</a>
+  <a href="TESTER_GUIDE.md">🇬🇧 English</a> ·
+  <a href="TESTER_GUIDE_JA.md">🇯🇵 日本語テストガイド</a>
 </p>
 
 ---

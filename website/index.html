@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoResearchClaw — Autonomous Research Paper Generation</title>
+  <meta name="description" content="Chat an idea, get a conference paper. AutoResearchClaw is a 23-stage autonomous pipeline that generates research papers from a single topic prompt.">
+  <link rel="icon" href="assets/logo.png" type="image/png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============ Navigation ============ -->
+<nav class="navbar">
+  <div class="container">
+    <a href="index.html" class="nav-brand">
+      <img src="assets/logo.png" alt="Logo">
+      AutoResearchClaw
+    </a>
+    <button class="nav-toggle" aria-label="Toggle navigation" onclick="document.querySelector('.nav-links').classList.toggle('open')">&#9776;</button>
+    <ul class="nav-links">
+      <li><a href="index.html" class="active">Home</a></li>
+      <li><a href="pipeline.html">Pipeline</a></li>
+      <li><a href="features.html">Features</a></li>
+      <li><a href="papers.html">Papers</a></li>
+      <li><a href="getting-started.html">Get Started</a></li>
+      <li><a href="https://github.com/aiming-lab/AutoResearchClaw" class="nav-github" target="_blank">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- ============ Hero ============ -->
+<section class="hero">
+  <div class="container">
+    <h1>Chat an Idea.<br><span class="gradient">Get a Paper.</span></h1>
+    <p class="tagline">
+      AutoResearchClaw is a fully autonomous 23-stage pipeline that transforms a research topic
+      into a conference-ready paper &mdash; with real experiments, GPU-accelerated code,
+      and verified citations.
+    </p>
+    <div class="hero-actions">
+      <a href="getting-started.html" class="btn btn-primary">Get Started</a>
+      <a href="pipeline.html" class="btn btn-outline">Explore Pipeline</a>
+    </div>
+    <div class="hero-code">
+      <span class="comment"># one command, one paper</span><br>
+      python -m researchclaw run --topic "your research idea"
+    </div>
+  </div>
+</section>
+
+<!-- ============ Stats ============ -->
+<section class="container">
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-value">23</div>
+      <div class="stat-label">Autonomous Stages</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">1117</div>
+      <div class="stat-label">Tests Passing</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">3</div>
+      <div class="stat-label">Literature APIs</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">GPU</div>
+      <div class="stat-label">Docker Sandbox</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Pipeline Overview ============ -->
+<section class="section">
+  <div class="container">
+    <div class="section-header">
+      <h2>From Idea to Paper in 23 Steps</h2>
+      <p>Eight autonomous phases transform a research topic into a publication-ready manuscript.</p>
+    </div>
+
+    <div class="pipeline-preview">
+      <!-- Phase A -->
+      <div class="phase-card">
+        <div class="phase-icon">&#127919;</div>
+        <h3>A: Research Scoping</h3>
+        <p>Topic initialization, problem decomposition, and scope definition.</p>
+        <div class="phase-stages">
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+        </div>
+      </div>
+      <!-- Phase B -->
+      <div class="phase-card">
+        <div class="phase-icon">&#128218;</div>
+        <h3>B: Literature Discovery</h3>
+        <p>Multi-source paper search via OpenAlex, Semantic Scholar, and arXiv with quality screening.</p>
+        <div class="phase-stages">
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+          <div class="stage-dot gate"></div>
+          <div class="stage-dot"></div>
+        </div>
+      </div>
+      <!-- Phase C -->
+      <div class="phase-card">
+        <div class="phase-icon">&#129504;</div>
+        <h3>C: Knowledge Synthesis</h3>
+        <p>Gap analysis, trend synthesis, and novel hypothesis generation.</p>
+        <div class="phase-stages">
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+        </div>
+      </div>
+      <!-- Phase D -->
+      <div class="phase-card">
+        <div class="phase-icon">&#9881;&#65039;</div>
+        <h3>D: Experiment Design</h3>
+        <p>Methodology design, code generation, and resource planning with hardware awareness.</p>
+        <div class="phase-stages">
+          <div class="stage-dot gate"></div>
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+        </div>
+      </div>
+      <!-- Phase E -->
+      <div class="phase-card">
+        <div class="phase-icon">&#128640;</div>
+        <h3>E: Experiment Execution</h3>
+        <p>GPU-accelerated Docker sandbox execution with iterative refinement.</p>
+        <div class="phase-stages">
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+        </div>
+      </div>
+      <!-- Phase F -->
+      <div class="phase-card">
+        <div class="phase-icon">&#128202;</div>
+        <h3>F: Analysis &amp; Decision</h3>
+        <p>Result analysis with pivot/refine/proceed decisions.</p>
+        <div class="phase-stages">
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+        </div>
+      </div>
+      <!-- Phase G -->
+      <div class="phase-card">
+        <div class="phase-icon">&#9997;&#65039;</div>
+        <h3>G: Paper Writing</h3>
+        <p>Structured drafting, multi-agent peer review, and iterative revision.</p>
+        <div class="phase-stages">
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+        </div>
+      </div>
+      <!-- Phase H -->
+      <div class="phase-card">
+        <div class="phase-icon">&#10004;&#65039;</div>
+        <h3>H: Finalization</h3>
+        <p>Quality gate, knowledge archival, LaTeX export, and citation verification.</p>
+        <div class="phase-stages">
+          <div class="stage-dot gate"></div>
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+          <div class="stage-dot"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="text-center mt-8">
+      <a href="pipeline.html" class="btn btn-outline">View Full Pipeline &rarr;</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Feature Highlights ============ -->
+<section class="section" style="background: var(--color-bg-alt);">
+  <div class="container">
+    <div class="section-header">
+      <h2>Key Features</h2>
+      <p>Built for serious research, engineered for reliability.</p>
+    </div>
+
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="feature-icon bg-blue">&#128269;</div>
+        <h3>Real Literature Search</h3>
+        <p>Multi-source search across OpenAlex, Semantic Scholar, and arXiv with circuit breakers, rate limiting, and intelligent caching.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon bg-green">&#128011;</div>
+        <h3>Docker Sandbox + GPU</h3>
+        <p>Experiments run in isolated Docker containers with NVIDIA GPU passthrough, network sandboxing, and automatic dependency management.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon bg-purple">&#129302;</div>
+        <h3>Multi-Agent Peer Review</h3>
+        <p>Simulated conference-style peer review with multiple reviewer personas providing structured feedback for revision.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon bg-amber">&#128260;</div>
+        <h3>Iterative Refinement</h3>
+        <p>Automatic pivot/refine/proceed decisions with rollback to any previous stage based on experiment outcomes.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon bg-red">&#128220;</div>
+        <h3>Conference-Ready LaTeX</h3>
+        <p>Publication-quality LaTeX output with proper citations, experiment charts, and structured abstracts.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon bg-blue">&#9989;</div>
+        <h3>Citation Verification</h3>
+        <p>All citations verified against CrossRef, OpenAlex, and arXiv APIs to ensure bibliography accuracy.</p>
+      </div>
+    </div>
+
+    <div class="text-center mt-8">
+      <a href="features.html" class="btn btn-outline">All Features &rarr;</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Showcase Papers ============ -->
+<section class="section">
+  <div class="container">
+    <div class="section-header">
+      <h2>Showcase Papers</h2>
+      <p>Papers generated entirely by the pipeline, from topic to camera-ready PDF.</p>
+    </div>
+
+    <div class="paper-grid">
+      <div class="paper-card">
+        <div class="paper-thumb">&#128196;</div>
+        <div class="paper-body">
+          <h3>Curriculum Learning with Adaptive Difficulty Scheduling for Image Classification</h3>
+          <div class="paper-meta">
+            <span class="badge badge-domain">Computer Vision</span>
+            <span class="badge badge-pending">Coming Soon</span>
+          </div>
+          <p class="paper-abstract">Investigates adaptive curriculum strategies on CIFAR-10/100 benchmarks, demonstrating improved convergence speed and final accuracy compared to standard training.</p>
+        </div>
+      </div>
+
+      <div class="paper-card">
+        <div class="paper-thumb">&#128196;</div>
+        <div class="paper-body">
+          <h3>Test-Time Adaptation via Batch Normalization Statistics for Distribution Shift</h3>
+          <div class="paper-meta">
+            <span class="badge badge-domain">Domain Adaptation</span>
+            <span class="badge badge-pending">Coming Soon</span>
+          </div>
+          <p class="paper-abstract">Explores test-time adaptation methods using batch normalization statistics to handle distribution shift on CIFAR-10-C corruption benchmarks.</p>
+        </div>
+      </div>
+
+      <div class="paper-card">
+        <div class="paper-thumb">&#128196;</div>
+        <div class="paper-body">
+          <h3>Entropy-Guided Exploration Bonuses for Sparse-Reward Continuous Control</h3>
+          <div class="paper-meta">
+            <span class="badge badge-domain">Reinforcement Learning</span>
+            <span class="badge badge-pending">Coming Soon</span>
+          </div>
+          <p class="paper-abstract">Proposes entropy-guided intrinsic reward bonuses to improve exploration in sparse-reward MuJoCo locomotion environments.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="text-center mt-8">
+      <a href="papers.html" class="btn btn-outline">View All Papers &rarr;</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Framework Diagram ============ -->
+<section class="section" style="background: var(--color-bg-alt);">
+  <div class="container text-center">
+    <div class="section-header">
+      <h2>System Architecture</h2>
+      <p>End-to-end pipeline architecture from topic input to published paper.</p>
+    </div>
+    <img src="assets/framework.png" alt="AutoResearchClaw Framework" style="max-width: 900px; margin: 0 auto; border-radius: var(--radius-lg); border: 1px solid var(--color-border);">
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="section text-center">
+  <div class="container">
+    <h2>Ready to Generate Your First Paper?</h2>
+    <p class="tagline" style="margin-top: 0.5rem;">
+      Clone the repo, configure your LLM API key, and run your first autonomous research paper.
+    </p>
+    <div class="hero-actions mt-8">
+      <a href="getting-started.html" class="btn btn-primary">Quick Start Guide</a>
+      <a href="https://github.com/aiming-lab/AutoResearchClaw" class="btn btn-outline" target="_blank">View on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Footer ============ -->
+<footer class="footer">
+  <ul class="footer-links">
+    <li><a href="index.html">Home</a></li>
+    <li><a href="pipeline.html">Pipeline</a></li>
+    <li><a href="features.html">Features</a></li>
+    <li><a href="papers.html">Papers</a></li>
+    <li><a href="getting-started.html">Get Started</a></li>
+    <li><a href="https://github.com/aiming-lab/AutoResearchClaw" target="_blank">GitHub</a></li>
+  </ul>
+  <p>AutoResearchClaw &mdash; Autonomous Research Paper Generation Pipeline</p>
+</footer>
+
+</body>
+</html>

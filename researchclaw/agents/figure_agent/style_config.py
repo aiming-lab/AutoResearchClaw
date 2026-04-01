@@ -21,16 +21,36 @@ DPI_PUBLICATION = 300
 DPI_DRAFT = 150
 
 # ---------------------------------------------------------------------------
-# Font sizes (points)
+# Font sizes (points) — width-aware to avoid oversized text in paper columns
 # ---------------------------------------------------------------------------
 
-FONT_SIZE = {
-    "title": 12,
-    "axis_label": 10,
-    "tick": 8,
-    "legend": 9,
-    "annotation": 8,
+# For single-column figures (≤3.5in) — fonts must be small to match 10pt body
+FONT_SIZE_SINGLE_COL = {
+    "title": 9,
+    "axis_label": 8,
+    "tick": 7,
+    "legend": 7,
+    "annotation": 7,
 }
+
+# For double-column / full-page figures (≥7.0in) — normal academic sizes
+FONT_SIZE_DOUBLE_COL = {
+    "title": 11,
+    "axis_label": 10,
+    "tick": 9,
+    "legend": 9,
+    "annotation": 9,
+}
+
+# Legacy alias (default to single-column, the most common case)
+FONT_SIZE = FONT_SIZE_SINGLE_COL
+
+
+def get_font_sizes(width_key: str = "single_column") -> dict[str, int]:
+    """Return font size dict appropriate for the given figure width."""
+    if width_key in ("double_column", "full_page"):
+        return FONT_SIZE_DOUBLE_COL
+    return FONT_SIZE_SINGLE_COL
 
 # ---------------------------------------------------------------------------
 # Figure dimensions (inches) — column-width aware
@@ -138,22 +158,27 @@ plt.rcParams.update({{
     "figure.dpi": {dpi},
     "savefig.dpi": {dpi},
     "savefig.bbox": "tight",
-    "savefig.pad_inches": 0.05,
+    "savefig.pad_inches": 0.15,
 }})
 '''.strip()
 
 
-def get_style_preamble(*, dpi: int = DPI_PUBLICATION) -> str:
+def get_style_preamble(
+    *,
+    dpi: int = DPI_PUBLICATION,
+    width_key: str = "single_column",
+) -> str:
     """Return the style preamble string for injection into chart scripts."""
+    fonts = get_font_sizes(width_key)
     return STYLE_PREAMBLE.format(
         styles=repr(MATPLOTLIB_STYLES),
         fallback=repr(MATPLOTLIB_STYLES_FALLBACK),
         colors=repr(COLORS_BRIGHT),
         line_styles=repr(LINE_STYLES),
         markers=repr(MARKER_STYLES),
-        font_title=FONT_SIZE["title"],
-        font_axis=FONT_SIZE["axis_label"],
-        font_tick=FONT_SIZE["tick"],
-        font_legend=FONT_SIZE["legend"],
+        font_title=fonts["title"],
+        font_axis=fonts["axis_label"],
+        font_tick=fonts["tick"],
+        font_legend=fonts["legend"],
         dpi=dpi,
     )

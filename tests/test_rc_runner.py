@@ -53,6 +53,16 @@ def _failed(stage: Stage, msg: str = "boom") -> StageResult:
     return StageResult(stage=stage, status=StageStatus.FAILED, artifacts=(), error=msg)
 
 
+def _paused(stage: Stage, msg: str = "resume needed") -> StageResult:
+    return StageResult(
+        stage=stage,
+        status=StageStatus.PAUSED,
+        artifacts=("refinement_log.json",),
+        error=msg,
+        decision="resume",
+    )
+
+
 def _blocked(stage: Stage) -> StageResult:
     return StageResult(
         stage=stage,
@@ -111,6 +121,37 @@ def test_execute_pipeline_stops_on_failed_stage(
     assert results[-1].stage == fail_stage
     assert results[-1].status == StageStatus.FAILED
     assert len(results) == int(fail_stage)
+
+
+def test_execute_pipeline_stops_on_paused_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    pause_stage = Stage.ITERATIVE_REFINE
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        if stage == pause_stage:
+            return _paused(stage, "ACP prompt timed out after 1800s")
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-paused",
+        config=rc_config,
+        adapters=adapters,
+    )
+    assert results[-1].stage == pause_stage
+    assert results[-1].status == StageStatus.PAUSED
+    assert len(results) == int(pause_stage)
+    checkpoint = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    assert checkpoint["last_completed_stage"] == int(Stage.EXPERIMENT_RUN)
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text(encoding="utf-8"))
+    assert summary["stages_paused"] == 1
+    assert summary["final_status"] == "paused"
 
 
 def test_execute_pipeline_stops_on_gate_when_stop_on_gate_enabled(
@@ -217,6 +258,7 @@ def test_pipeline_summary_has_expected_fields_and_values(
     assert summary["stages_done"] == sum(
         1 for r in results if r.status == StageStatus.DONE
     )
+    assert summary["stages_paused"] == 0
     assert summary["stages_blocked"] == 1
     assert summary["stages_failed"] == 1
     assert summary["from_stage"] == 1
@@ -337,6 +379,11 @@ def test_should_start_logic(stage: Stage, started: bool, expected: bool) -> None
     [
         ([], "no_stages", int(Stage.TOPIC_INIT)),
         ([_done(Stage.TOPIC_INIT)], "done", int(Stage.TOPIC_INIT)),
+        (
+            [_done(Stage.TOPIC_INIT), _paused(Stage.PROBLEM_DECOMPOSE)],
+            "paused",
+            int(Stage.PROBLEM_DECOMPOSE),
+        ),
         (
             [_done(Stage.TOPIC_INIT), _failed(Stage.PROBLEM_DECOMPOSE)],
             "failed",
@@ -705,6 +752,113 @@ def test_package_deliverables_includes_style_files(
     assert "neurips_2025.sty" in manifest["files"]
 
 
+# ── Atomic checkpoint write tests ──
+
+
+def test_write_checkpoint_uses_atomic_rename(run_dir: Path) -> None:
+    """Checkpoint must be written via temp file + rename, not direct write"""
+    rc_runner._write_checkpoint(run_dir, Stage.TOPIC_INIT, "run-atomic")
+    cp = run_dir / "checkpoint.json"
+    assert cp.exists()
+    data = json.loads(cp.read_text(encoding="utf-8"))
+    assert data["last_completed_stage"] == int(Stage.TOPIC_INIT)
+    assert data["run_id"] == "run-atomic"
+
+
+def test_write_checkpoint_leaves_no_temp_files(run_dir: Path) -> None:
+    """Atomic write must clean up temp files on success"""
+    rc_runner._write_checkpoint(run_dir, Stage.TOPIC_INIT, "run-clean")
+    temps = list(run_dir.glob("*.tmp"))
+    assert temps == [], f"Leftover temp files: {temps}"
+
+
+def test_write_checkpoint_preserves_old_on_write_failure(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the temp-file write fails, the existing checkpoint must survive"""
+    import builtins
+
+    rc_runner._write_checkpoint(run_dir, Stage.TOPIC_INIT, "run-ok")
+
+    original_open = builtins.open
+
+    def _exploding_open(path, *args, **kwargs):
+        # After os.close(fd), _write_checkpoint opens via path string —
+        # intercept temp-file opens (checkpoint_*.tmp)
+        if isinstance(path, (str, Path)) and "checkpoint_" in str(path):
+            raise OSError("disk full")
+        if isinstance(path, int):
+            raise OSError("disk full")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _exploding_open)
+    with pytest.raises(OSError):
+        rc_runner._write_checkpoint(run_dir, Stage.PROBLEM_DECOMPOSE, "run-ok")
+
+    # Original checkpoint must be intact
+    data = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    assert data["last_completed_stage"] == int(Stage.TOPIC_INIT)
+    # Temp file must be cleaned up
+    assert list(run_dir.glob("checkpoint_*.tmp")) == []
+
+
+def test_write_checkpoint_overwrites_previous(run_dir: Path) -> None:
+    """A second checkpoint call must fully replace the first"""
+    rc_runner._write_checkpoint(run_dir, Stage.TOPIC_INIT, "run-1")
+    rc_runner._write_checkpoint(run_dir, Stage.PROBLEM_DECOMPOSE, "run-1")
+    data = json.loads((run_dir / "checkpoint.json").read_text(encoding="utf-8"))
+    assert data["last_completed_stage"] == int(Stage.PROBLEM_DECOMPOSE)
+    assert data["last_completed_name"] == Stage.PROBLEM_DECOMPOSE.name
+
+
+def _degraded(stage: Stage) -> StageResult:
+    return StageResult(
+        stage=stage,
+        status=StageStatus.DONE,
+        artifacts=("quality_report.json",),
+        decision="degraded",
+    )
+
+
+def test_degraded_quality_gate_continues_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When quality gate returns decision='degraded', pipeline continues to completion."""
+    seen: list[Stage] = []
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        seen.append(stage)
+        if stage == Stage.QUALITY_GATE:
+            return _degraded(stage)
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-degraded",
+        config=rc_config,
+        adapters=adapters,
+    )
+    # All 23 stages should execute (not stopped at quality gate)
+    assert len(results) == 23
+    assert seen == list(STAGE_SEQUENCE)
+    # Quality gate result should have decision="degraded"
+    qg_result = [r for r in results if r.stage == Stage.QUALITY_GATE][0]
+    assert qg_result.decision == "degraded"
+    assert qg_result.status == StageStatus.DONE
+    # Pipeline summary should have degraded=True
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degraded"] is True
+    # Output should show DEGRADED message
+    captured = capsys.readouterr()
+    assert "DEGRADED" in captured.out
+
+
 def test_package_deliverables_called_after_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     run_dir: Path,
@@ -728,3 +882,170 @@ def test_package_deliverables_called_after_pipeline(
     captured = capsys.readouterr()
     assert "Deliverables packaged" in captured.out
     assert (run_dir / "deliverables" / "manifest.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# BUG-223: _promote_best_stage14 must always write experiment_summary_best.json
+# ---------------------------------------------------------------------------
+
+def _make_stage14_summary(run_dir: Path, suffix: str, pm_value: float) -> None:
+    """Helper: create a stage-14{suffix}/experiment_summary.json."""
+    d = run_dir / f"stage-14{suffix}"
+    d.mkdir(parents=True, exist_ok=True)
+    data = {
+        "metrics_summary": {
+            "primary_metric": {"min": pm_value, "max": pm_value, "mean": pm_value, "count": 1}
+        },
+        "condition_summaries": {"cond_a": {"metrics": {"primary_metric": pm_value}}},
+    }
+    (d / "experiment_summary.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+class TestPromoteBestStage14BestJson:
+    """BUG-223: experiment_summary_best.json must be written even when
+    stage-14/ already has the best result (early-return path)."""
+
+    @pytest.fixture()
+    def max_config(self, rc_config: RCConfig) -> RCConfig:
+        """Config with metric_direction=maximize (accuracy-like metrics)."""
+        object.__setattr__(rc_config.experiment, "metric_direction", "maximize")
+        return rc_config
+
+    def test_best_json_written_when_current_is_best(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """stage-14/ already best → should still write best.json."""
+        _make_stage14_summary(run_dir, "", 90.0)
+        _make_stage14_summary(run_dir, "_v1", 80.0)
+        _make_stage14_summary(run_dir, "_v2", 70.0)
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        assert best_path.exists(), "experiment_summary_best.json must always be written"
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 90.0
+
+    def test_best_json_written_when_promotion_needed(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """stage-14/ is NOT best → promote + write best.json."""
+        _make_stage14_summary(run_dir, "", 70.0)
+        _make_stage14_summary(run_dir, "_v1", 95.0)
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        assert best_path.exists()
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 95.0
+
+    def test_best_json_written_with_equal_values(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """BUG-223 exact scenario: stage-14 and stage-14_v1 have equal
+        metrics, stage-14_v2 is regressed."""
+        _make_stage14_summary(run_dir, "", 64.46)
+        _make_stage14_summary(run_dir, "_v1", 64.46)
+        _make_stage14_summary(run_dir, "_v2", 26.80)
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        assert best_path.exists(), "BUG-223: best.json missing when current is tied-best"
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 64.46
+
+
+class TestPromoteBestStage14AnalysisBest:
+    """BUG-225: analysis_best.md must be written from best stage-14 iteration."""
+
+    @pytest.fixture()
+    def max_config(self, rc_config: RCConfig) -> RCConfig:
+        object.__setattr__(rc_config.experiment, "metric_direction", "maximize")
+        return rc_config
+
+    def test_analysis_best_written_from_best_iteration(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """analysis_best.md should come from the best stage-14 iteration."""
+        _make_stage14_summary(run_dir, "", 70.0)
+        _make_stage14_summary(run_dir, "_v1", 95.0)
+        # Write analysis.md in each
+        (run_dir / "stage-14" / "analysis.md").write_text("Degenerate analysis", encoding="utf-8")
+        (run_dir / "stage-14_v1" / "analysis.md").write_text("Best analysis v1", encoding="utf-8")
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        best_analysis = run_dir / "analysis_best.md"
+        assert best_analysis.exists(), "BUG-225: analysis_best.md must be written"
+        assert best_analysis.read_text(encoding="utf-8") == "Best analysis v1"
+
+    def test_analysis_best_written_when_current_is_best(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """Even when stage-14 is already best, analysis_best.md should be written."""
+        _make_stage14_summary(run_dir, "", 90.0)
+        _make_stage14_summary(run_dir, "_v1", 80.0)
+        (run_dir / "stage-14" / "analysis.md").write_text("Best analysis current", encoding="utf-8")
+        (run_dir / "stage-14_v1" / "analysis.md").write_text("Worse analysis", encoding="utf-8")
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        best_analysis = run_dir / "analysis_best.md"
+        assert best_analysis.exists()
+        assert best_analysis.read_text(encoding="utf-8") == "Best analysis current"
+
+    def test_no_analysis_best_when_no_analysis_md(
+        self, run_dir: Path, max_config: RCConfig
+    ) -> None:
+        """If best stage-14 has no analysis.md, no analysis_best.md is written."""
+        _make_stage14_summary(run_dir, "", 90.0)
+
+        rc_runner._promote_best_stage14(run_dir, max_config)  # type: ignore[attr-defined]
+
+        assert not (run_dir / "analysis_best.md").exists()
+
+
+class TestPromoteBestStage14DegenerateDetection:
+    """BUG-226: Degenerate near-zero metrics must not be promoted as best."""
+
+    def test_degenerate_minimize_skipped(self, run_dir: Path, rc_config: RCConfig) -> None:
+        """When minimize, a value 1000x smaller than second-best is degenerate."""
+        # metric_direction defaults to "minimize"
+        _make_stage14_summary(run_dir, "", 7.26e-8)   # degenerate (broken normalization)
+        _make_stage14_summary(run_dir, "_v2", 0.37)   # valid
+
+        rc_runner._promote_best_stage14(run_dir, rc_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        assert best_path.exists()
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 0.37, "Degenerate value should be skipped, valid v2 promoted"
+
+    def test_legitimate_minimize_not_skipped(self, run_dir: Path, rc_config: RCConfig) -> None:
+        """When values are within normal range, smaller is legitimately best."""
+        _make_stage14_summary(run_dir, "", 0.15)
+        _make_stage14_summary(run_dir, "_v1", 0.37)
+
+        rc_runner._promote_best_stage14(run_dir, rc_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 0.15, "Legitimate lower value should be promoted"
+
+    def test_single_candidate_not_affected(self, run_dir: Path, rc_config: RCConfig) -> None:
+        """Single candidate is never skipped regardless of value."""
+        _make_stage14_summary(run_dir, "", 1e-10)
+
+        rc_runner._promote_best_stage14(run_dir, rc_config)  # type: ignore[attr-defined]
+
+        best_path = run_dir / "experiment_summary_best.json"
+        data = json.loads(best_path.read_text(encoding="utf-8"))
+        pm = data["metrics_summary"]["primary_metric"]
+        assert pm["mean"] == 1e-10

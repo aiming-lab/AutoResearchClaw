@@ -34,52 +34,22 @@ openclaw_bridge:
   use_web_fetch: false
   use_browser: false
 
-# ============================================================================
-# LLM Provider Configuration
-# ============================================================================
-# Supported providers:
-#   - "openai"           → OpenAI API (default base_url)
-#   - "openrouter"       → OpenRouter (access to 200+ models via single API)
-#   - "deepseek"         → DeepSeek API
-#   - "openai-compatible" → Any OpenAI-compatible API (requires base_url)
-#   - "acp"              → ACP agent protocol (for local agents)
-#
-# OpenRouter Example (https://openrouter.ai):
-#   Get your API key at https://openrouter.ai/keys
-#   Models: anthropic/claude-3.5-sonnet, google/gemini-pro-1.5, meta-llama/llama-3.1-70b-instruct
-#   See all models: https://openrouter.ai/models
-# ============================================================================
 llm:
-  # Provider options: "openai", "openrouter", "deepseek", "openai-compatible", "acp"
-  provider: "openai"
-  
-  # base_url is auto-set for known providers (openai, openrouter, deepseek)
-  # Only needed for "openai-compatible" provider
+  provider: "openai-compatible"
   base_url: "https://api.openai.com/v1"
-  
-  # API key from environment variable (recommended) or direct value
+  wire_api: "chat_completions"  # Set to "responses" for Responses-only gateways
   api_key_env: "OPENAI_API_KEY"
   api_key: ""
-  
   primary_model: "gpt-4o"
   fallback_models:
     - "gpt-4.1"
     - "gpt-4o-mini"
-  
-  # Semantic Scholar API key (optional, for literature search)
-  s2_api_key: ""
-  notes: ""
-
-# ============================================================================
-# Example: OpenRouter Configuration
-# ============================================================================
-# llm:
-#   provider: "openrouter"
-#   api_key_env: "OPENROUTER_API_KEY"
-#   primary_model: "anthropic/claude-3.5-sonnet"
-#   fallback_models:
-#     - "google/gemini-pro-1.5"
-#     - "meta-llama/llama-3.1-70b-instruct"
+  # --- MiniMax provider example ---
+  # provider: "minimax"
+  # api_key_env: "MINIMAX_API_KEY"
+  # primary_model: "MiniMax-M2.5"
+  # fallback_models:
+  #   - "MiniMax-M2.5-highspeed"
 
 security:
   hitl_required_stages: [5, 9, 20]
@@ -87,23 +57,163 @@ security:
   redact_sensitive_logs: true
 
 experiment:
+  # ★ mode 决定实验结果的真实性
+  #   "sandbox"   — 在本地沙盒中实际执行生成的 Python 代码，产出真实实验数据
+  #   "docker"    — 在 Docker 容器中执行，支持 GPU 直通、依赖自动安装、内存隔离
+  #   "simulated" — 不执行代码，使用公式生成假数据（仅用于框架开发调试，不应用于论文生成）
   mode: "sandbox"
   time_budget_sec: 300
   max_iterations: 10
   metric_key: "primary_metric"
   metric_direction: "minimize"
   sandbox:
+    # Use ".venv/Scripts/python.exe" on Windows
     python_path: ".venv/bin/python3"
     gpu_required: false
     max_memory_mb: 4096
+  # Docker sandbox settings (only used when mode: "docker")
+  # Build image first: docker build -t researchclaw/experiment:latest researchclaw/docker/
   docker:
     image: "researchclaw/experiment:latest"
     gpu_enabled: true
+    # gpu_device_ids: [0]        # empty = all GPUs
     memory_limit_mb: 8192
-    network_policy: "none"
+    network_policy: "setup_only"  # none | setup_only | pip_only | full
+    # pip_pre_install: ["torchdiffeq", "einops"]
     auto_install_deps: true
     shm_size_mb: 2048
     keep_containers: false
+  ssh_remote:
+    host: ""                # SSH hostname or IP
+    user: ""                # SSH username (default: current user)
+    port: 22                # SSH port
+    key_path: ""            # Path to private key (default: ~/.ssh/id_rsa)
+    gpu_ids: []             # e.g. [0, 1] for CUDA_VISIBLE_DEVICES
+    remote_workdir: "/tmp/researchclaw_experiments"
+    remote_python: "python3"
+    setup_commands: []      # e.g. ["source ~/venv/bin/activate", "pip install torch"]
+    # Docker-over-SSH (most secure remote execution)
+    use_docker: false       # Set true to run experiments inside Docker on remote host
+    docker_image: "researchclaw/experiment:latest"
+    docker_network_policy: "none"   # none | full
+    docker_memory_limit_mb: 8192
+    docker_shm_size_mb: 2048
+  # OpenCode Beast Mode — external AI coding agent for complex experiments
+  # Install: npm i -g opencode-ai@latest  (or use `researchclaw setup`)
+  opencode:
+    enabled: true                # Master switch (default: true)
+    auto: true                   # Auto-trigger without confirmation (default: true)
+    complexity_threshold: 0.2    # 0.0-1.0 — higher = only trigger on complex experiments
+    model: ""                    # Override model (empty = use llm.primary_model)
+    timeout_sec: 600             # Max seconds for OpenCode generation
+    max_retries: 1               # Retry count on failure
+    workspace_cleanup: true      # Remove temp workspace after collection
 
+# ============================================================================
+# SSH Remote Examples
+# ============================================================================
+#
+# 1. Lab server (bare Python, basic sandboxing):
+#   experiment:
+#     mode: "ssh_remote"
+#     ssh_remote:
+#       host: "gpu-server.lab.edu"
+#       user: "researcher"
+#       key_path: "~/.ssh/id_rsa"
+#       gpu_ids: [0]
+#       remote_python: "python3"
+#
+# 2. Lab server (Docker — most secure):
+#   experiment:
+#     mode: "ssh_remote"
+#     ssh_remote:
+#       host: "gpu-server.lab.edu"
+#       user: "researcher"
+#       key_path: "~/.ssh/id_rsa"
+#       gpu_ids: [0]
+#       use_docker: true
+#       docker_image: "researchclaw/experiment:latest"
+#       docker_network_policy: "none"
+#
+# 3. Colab via SSH tunnel:
+#   experiment:
+#     mode: "ssh_remote"
+#     ssh_remote:
+#       host: "localhost"
+#       port: 12345
+#       user: "root"
+#       remote_python: "python3"
+#       setup_commands:
+#         - "pip install torch torchvision -q"
+#
+# 4. Colab via Google Drive (most robust, no SSH needed):
+#   experiment:
+#     mode: "colab_drive"
+#     colab_drive:
+#       drive_root: "~/Library/CloudStorage/GoogleDrive-you@gmail.com/My Drive/researchclaw"
+#       poll_interval_sec: 30
+#       timeout_sec: 3600
+#       setup_script: "pip install torch torchvision -q"
+#   # Then in Colab: run the colab_worker.py that appears in your Drive
+
+  colab_drive:
+    drive_root: ""          # Local path to Google Drive mount
+    poll_interval_sec: 30   # How often to check for results
+    timeout_sec: 3600       # Max wait per experiment (1 hour)
+    setup_script: ""        # Shell commands to run before each experiment
+
+  # Scientific Visualization Agent (Code-to-Viz + Nano Banana)
+  # Uses a Decision Agent to analyze paper content and determine:
+  #   - Code figures (bar charts, line plots) → Matplotlib/TikZ
+  #   - Image figures (architecture, flowcharts) → Gemini Nano Banana
+  figure_agent:
+    enabled: true
+    min_figures: 3
+    max_figures: 10
+    max_iterations: 3
+    render_timeout_sec: 30
+    # Security: Docker sandbox for visualization code execution
+    # use_docker: null  # null = auto-detect, true = force, false = disable
+    docker_image: "researchclaw/experiment:latest"
+    # Output format: "python" (Matplotlib/Seaborn) or "latex" (TikZ/PGFPlots)
+    output_format: "python"
+    # Nano Banana (Gemini native image generation)
+    nano_banana_enabled: true
+    # gemini_api_key: ""  # or set GEMINI_API_KEY env var
+    gemini_model: "gemini-2.5-flash-image"
+    strict_mode: false
+    dpi: 300
+
+# === Prompts ===
+# Customize LLM prompts by pointing to your own YAML file.
+# Copy prompts.default.yaml, edit the prompts you want, and set the path here.
 prompts:
-  custom_file: ""
+  custom_file: ""  # e.g. "my_prompts.yaml" (empty = use built-in defaults)
+
+
+# === MetaClaw Integration ===
+# Enable the MetaClaw bridge to get skill injection, PRM quality gates,
+# and continuous learning from research pipeline failures.
+# Requires MetaClaw to be running: metaclaw start --mode skills_only
+metaclaw_bridge:
+  enabled: false
+  proxy_url: "http://localhost:30000"    # MetaClaw proxy endpoint
+  skills_dir: "~/.metaclaw/skills"       # MetaClaw skills directory
+  fallback_url: ""                       # Direct LLM URL if proxy is down
+  fallback_api_key: ""
+
+  # PRM quality gate: LLM-as-judge scoring at gate stages
+  prm:
+    enabled: false
+    api_base: ""                         # OpenAI-compatible API for PRM judge
+    api_key_env: "PRM_API_KEY"
+    api_key: ""
+    model: "gpt-5.4"
+    votes: 3                             # Majority vote count
+    gate_stages: [5, 9, 15, 20]          # Stages to apply PRM gating
+
+  # Lesson-to-skill: auto-convert pipeline failures into MetaClaw skills
+  lesson_to_skill:
+    enabled: true
+    min_severity: "error"                # Only convert error-level lessons
+    max_skills_per_run: 3

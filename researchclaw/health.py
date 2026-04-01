@@ -4,6 +4,7 @@ import importlib
 import json
 import logging
 import os
+import shutil
 import socket
 import sys
 import urllib.error
@@ -516,6 +517,23 @@ def check_experiment_mode(mode: str) -> CheckResult:
     )
 
 
+def check_acp_agent(agent_command: str) -> CheckResult:
+    """Check that the ACP agent CLI is available on PATH."""
+    resolved = shutil.which(agent_command)
+    if resolved:
+        return CheckResult(
+            name="acp_agent",
+            status="pass",
+            detail=f"ACP agent found: {resolved}",
+        )
+    return CheckResult(
+        name="acp_agent",
+        status="fail",
+        detail=f"ACP agent '{agent_command}' not found on PATH",
+        fix=f"Install {agent_command} or update llm.acp.agent in config",
+    )
+
+
 def check_docker_runtime(config: RCConfig) -> CheckResult:
     """Check Docker daemon, image availability, and optional NVIDIA runtime."""
     from researchclaw.experiment.docker_sandbox import DockerSandbox
@@ -559,21 +577,28 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
     fallback_models: tuple[str, ...] = ()
     sandbox_python_path = ""
     experiment_mode = ""
+    provider = ""
+    acp_agent_command = "claude"
 
     try:
         config = RCConfig.load(path, check_paths=False)
+        provider = config.llm.provider
         base_url = config.llm.base_url
         api_key = config.llm.api_key or os.environ.get(config.llm.api_key_env, "")
         model = config.llm.primary_model
         fallback_models = config.llm.fallback_models
         sandbox_python_path = config.experiment.sandbox.python_path
         experiment_mode = config.experiment.mode
+        acp_agent_command = config.llm.acp.agent
     except (FileNotFoundError, OSError, ValueError, yaml.YAMLError) as exc:
         logger.debug("Could not fully load config for doctor checks: %s", exc)
 
-    checks.append(check_llm_connectivity(base_url, api_key))
-    checks.append(check_api_key_valid(base_url, api_key))
-    checks.append(check_model_chain(base_url, api_key, model, fallback_models))
+    if provider == "acp":
+        checks.append(check_acp_agent(acp_agent_command))
+    else:
+        checks.append(check_llm_connectivity(base_url, api_key))
+        checks.append(check_api_key_valid(base_url, api_key))
+        checks.append(check_model_chain(base_url, api_key, model, fallback_models))
     checks.append(check_sandbox_python(sandbox_python_path))
     checks.append(check_matplotlib())
     checks.append(check_experiment_mode(experiment_mode))
@@ -603,9 +628,15 @@ def run_doctor(config_path: str | Path) -> DoctorReport:
 def print_doctor_report(report: DoctorReport) -> None:
     """Pretty-print doctor report to stdout."""
     icon_by_status = {"pass": "✅", "fail": "❌", "warn": "⚠️"}
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        for icon in icon_by_status.values():
+            icon.encode(encoding)
+    except UnicodeEncodeError:
+        icon_by_status = {"pass": "[OK]", "fail": "[FAIL]", "warn": "[WARN]"}
     print(f"ResearchClaw Doctor Report ({report.timestamp})")
     for check in report.checks:
-        icon = icon_by_status.get(check.status, "•")
+        icon = icon_by_status.get(check.status, "-")
         print(f"{icon} {check.name}: {check.detail}")
         if check.fix:
             print(f"   Fix: {check.fix}")

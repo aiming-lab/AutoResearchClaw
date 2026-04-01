@@ -65,6 +65,9 @@ FUNCTION {format.bvolume} { volume empty$ { "" } { "volume " volume * } if$ }
 FUNCTION {format.pages} { pages empty$ { "" } { "pp. " pages * } if$ }
 FUNCTION {format.url} { url empty$ { "" } { "\url{" url * "}" * } if$ }
 
+FUNCTION {output.bibitem}
+{ newline$ "\bibitem{" write$ cite$ write$ "}" write$ newline$ "" before.all 'output.state := }
+
 FUNCTION {article}
 { output.bibitem format.authors "author" output.check new.block format.title "title" output.check new.block journal emphasize "journal" output.check format.bvolume output format.pages output format.date "year" output.check format.url output fin.entry }
 
@@ -83,9 +86,6 @@ FUNCTION {phdthesis} { misc }
 FUNCTION {mastersthesis} { misc }
 FUNCTION {unpublished} { misc }
 FUNCTION {default.type} { misc }
-
-FUNCTION {output.bibitem}
-{ newline$ "\bibitem{" write$ cite$ write$ "}" write$ newline$ "" before.all 'output.state := }
 
 READ
 FUNCTION {sortify} { purify$ "l" change.case$ }

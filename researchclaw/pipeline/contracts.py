@@ -46,7 +46,7 @@ CONTRACTS: dict[Stage, StageContract] = {
     Stage.SEARCH_STRATEGY: StageContract(
         stage=Stage.SEARCH_STRATEGY,
         input_files=("problem_tree.md",),
-        output_files=("search_plan.yaml", "sources.json"),
+        output_files=("search_plan.yaml", "sources.json", "queries.json"),
         dod=">=2 search strategies defined with verified data sources",
         error_code="E03_STRATEGY_BAD",
     ),
@@ -198,7 +198,7 @@ CONTRACTS: dict[Stage, StageContract] = {
     ),
     Stage.CITATION_VERIFY: StageContract(
         stage=Stage.CITATION_VERIFY,
-        input_files=("paper_final.md", "references.bib"),
+        input_files=("paper_final.md",),  # references.bib is optional (BUG-50)
         output_files=("verification_report.json", "references_verified.bib"),
         dod="All citations verified against real APIs; hallucinated refs flagged",
         error_code="E23_VERIFY_FAIL",

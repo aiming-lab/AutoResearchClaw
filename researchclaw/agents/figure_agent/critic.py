@@ -59,12 +59,20 @@ class CriticAgent(BaseAgent):
             # Build script lookup
             script_map: dict[str, dict[str, Any]] = {}
             for s in scripts:
+                # BUG-38: skip non-dict entries
+                if not isinstance(s, dict):
+                    self.logger.warning("Skipping non-dict script entry: %s", type(s))
+                    continue
                 script_map[s.get("figure_id", "")] = s
 
             reviews: list[dict[str, Any]] = []
             all_passed = True
 
             for fig in rendered:
+                # BUG-38: skip non-dict entries
+                if not isinstance(fig, dict):
+                    self.logger.warning("Skipping non-dict rendered entry: %s", type(fig))
+                    continue
                 figure_id = fig.get("figure_id", "unknown")
                 if not fig.get("success"):
                     reviews.append({
@@ -123,7 +131,7 @@ class CriticAgent(BaseAgent):
         metrics_summary: dict[str, Any],
         metric_key: str,
     ) -> dict[str, Any]:
-        """Review a single rendered figure on three dimensions."""
+        """Review a single rendered figure on four dimensions."""
         issues: list[dict[str, str]] = []
 
         # Dimension 1: Numerical accuracy
@@ -143,6 +151,12 @@ class CriticAgent(BaseAgent):
             script_code, fig_info
         )
         issues.extend(quality_issues)
+
+        # Dimension 4: Rendered image validation (pixel-level)
+        output_path = fig_info.get("output_path", "")
+        if output_path:
+            pixel_issues = self._check_rendered_image(output_path)
+            issues.extend(pixel_issues)
 
         # Determine pass/fail
         critical_issues = [i for i in issues if i.get("severity") == "critical"]
@@ -198,6 +212,21 @@ class CriticAgent(BaseAgent):
 
         if not expected_values:
             return issues
+
+        # Check for degenerate data (all identical or all zero)
+        vals_list = sorted(expected_values)
+        if len(vals_list) >= 2 and len(set(round(v, 6) for v in vals_list)) <= 1:
+            issues.append({
+                "type": "numerical_accuracy",
+                "severity": "critical",
+                "message": "All expected metric values are identical — chart will be uninformative",
+            })
+        if all(v == 0 for v in vals_list):
+            issues.append({
+                "type": "numerical_accuracy",
+                "severity": "critical",
+                "message": "All expected metric values are zero — chart will show no meaningful data",
+            })
 
         # Check if script contains the expected values
         found = expected_values & script_numbers
@@ -329,5 +358,66 @@ class CriticAgent(BaseAgent):
                 "severity": "critical",
                 "message": f"Overall quality score too low: {quality_score}/10",
             })
+
+        return issues
+
+    # ------------------------------------------------------------------
+    # Dimension 4: Rendered image validation (pixel-level)
+    # ------------------------------------------------------------------
+
+    def _check_rendered_image(
+        self, output_path: str
+    ) -> list[dict[str, str]]:
+        """Check the rendered PNG for visual defects via pixel analysis.
+
+        Detects:
+        - Near-blank images (>95% white) indicating degenerate/empty charts
+        - Text/graphics touching image edges (possible label clipping)
+        """
+        issues: list[dict[str, str]] = []
+        try:
+            from PIL import Image
+            import numpy as np
+
+            img = Image.open(output_path).convert("RGB")
+            arr = np.array(img)
+            h, w, _ = arr.shape
+
+            # Check 1: Near-blank image (>95% white pixels)
+            white_mask = np.all(arr > 250, axis=2)
+            white_ratio = float(np.mean(white_mask))
+            if white_ratio > 0.95:
+                issues.append({
+                    "type": "rendered_quality",
+                    "severity": "critical",
+                    "message": (
+                        f"Image is {white_ratio:.0%} white — likely degenerate "
+                        f"or empty chart"
+                    ),
+                })
+
+            # Check 2: Non-white pixels touching edges (possible clipping)
+            margin = 3  # pixels
+            for edge_name, edge_slice in [
+                ("top", arr[:margin, :]),
+                ("bottom", arr[-margin:, :]),
+                ("left", arr[:, :margin]),
+                ("right", arr[:, -margin:]),
+            ]:
+                dark_mask = np.any(edge_slice < 80, axis=-1)
+                dark_ratio = float(np.mean(dark_mask))
+                if dark_ratio > 0.05:
+                    issues.append({
+                        "type": "rendered_quality",
+                        "severity": "warning",
+                        "message": (
+                            f"Content touching {edge_name} edge ({dark_ratio:.0%} "
+                            f"dark pixels) — possible label/title clipping"
+                        ),
+                    })
+        except ImportError:
+            logger.debug("PIL not available — skipping rendered image checks")
+        except Exception as exc:
+            logger.debug("Rendered image check failed: %s", exc)
 
         return issues

@@ -18,21 +18,30 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
 from researchclaw.config import DockerSandboxConfig
-from researchclaw.experiment.sandbox import SandboxResult, parse_metrics
+from researchclaw.experiment.sandbox import (
+    SandboxResult,
+    parse_metrics,
+    validate_entry_point,
+    validate_entry_point_resolved,
+)
 
 logger = logging.getLogger(__name__)
 
 _CONTAINER_COUNTER = 0
+_counter_lock = threading.Lock()
 
 
 def _next_container_name() -> str:
     global _CONTAINER_COUNTER  # noqa: PLW0603
-    _CONTAINER_COUNTER += 1
-    return f"rc-exp-{_CONTAINER_COUNTER}-{os.getpid()}"
+    with _counter_lock:
+        _CONTAINER_COUNTER += 1
+        return f"rc-exp-{_CONTAINER_COUNTER}-{os.getpid()}"
 
 
 # Packages already in the Docker image — skip during auto-detect.
@@ -129,6 +138,8 @@ class DockerSandbox:
         *,
         entry_point: str = "main.py",
         timeout_sec: int = 300,
+        args: list[str] | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> SandboxResult:
         """Run a multi-file experiment project inside a container."""
         self._run_counter += 1
@@ -137,19 +148,38 @@ class DockerSandbox:
             shutil.rmtree(staging)
         staging.mkdir(parents=True, exist_ok=True)
 
+        # Pre-copy syntax validation — fail fast before any I/O
+        err = validate_entry_point(entry_point)
+        if err:
+            return SandboxResult(
+                returncode=-1, stdout="", stderr=err,
+                elapsed_sec=0.0, metrics={},
+            )
+
         # Inject harness first (immutable)
         self._inject_harness(staging)
 
-        # Copy project files (skip harness overwrite)
-        for src_file in project_dir.iterdir():
-            if src_file.is_file():
-                dest = staging / src_file.name
-                if dest.name == "experiment_harness.py":
-                    logger.warning(
-                        "Project contains experiment_harness.py — skipping (immutable)"
-                    )
-                    continue
-                dest.write_bytes(src_file.read_bytes())
+        # Copy project files and subdirectories (skip harness overwrite)
+        import shutil as _shutil
+        for src_item in project_dir.iterdir():
+            dest = staging / src_item.name
+            if src_item.name == "experiment_harness.py":
+                logger.warning(
+                    "Project contains experiment_harness.py — skipping (immutable)"
+                )
+                continue
+            if src_item.is_file():
+                dest.write_bytes(src_item.read_bytes())
+            elif src_item.is_dir() and not src_item.name.startswith((".", "__")):
+                _shutil.copytree(src_item, dest, dirs_exist_ok=True)
+
+        # Post-copy resolve check — catches symlink-based escapes
+        err = validate_entry_point_resolved(staging, entry_point)
+        if err:
+            return SandboxResult(
+                returncode=-1, stdout="", stderr=err,
+                elapsed_sec=0.0, metrics={},
+            )
 
         entry = staging / entry_point
         if not entry.exists():
@@ -161,7 +191,13 @@ class DockerSandbox:
                 metrics={},
             )
 
-        return self._execute(staging, entry_point=entry_point, timeout_sec=timeout_sec)
+        return self._execute(
+            staging,
+            entry_point=entry_point,
+            timeout_sec=timeout_sec,
+            entry_args=args,
+            env_overrides=env_overrides,
+        )
 
     # ------------------------------------------------------------------
     # Static helpers
@@ -226,7 +262,13 @@ class DockerSandbox:
     # ------------------------------------------------------------------
 
     def _execute(
-        self, staging_dir: Path, *, entry_point: str, timeout_sec: int
+        self,
+        staging_dir: Path,
+        *,
+        entry_point: str,
+        timeout_sec: int,
+        entry_args: list[str] | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> SandboxResult:
         """Core execution: single container, three-phase via entrypoint.sh."""
         cfg = self.config
@@ -241,6 +283,8 @@ class DockerSandbox:
             staging_dir,
             entry_point=entry_point,
             container_name=container_name,
+            entry_args=entry_args,
+            env_overrides=env_overrides,
         )
 
         start = time.monotonic()
@@ -259,6 +303,7 @@ class DockerSandbox:
             stdout = completed.stdout
             stderr = completed.stderr
             returncode = completed.returncode
+            elapsed = time.monotonic() - start
         except subprocess.TimeoutExpired as exc:
             timed_out = True
             stdout = exc.stdout or ""
@@ -270,6 +315,7 @@ class DockerSandbox:
             returncode = -1
             # Force-kill the container on timeout
             self._kill_container(container_name)
+            elapsed = time.monotonic() - start
         except Exception as exc:  # noqa: BLE001
             elapsed = time.monotonic() - start
             return SandboxResult(
@@ -279,12 +325,12 @@ class DockerSandbox:
                 elapsed_sec=elapsed,
                 metrics={},
             )
-
-        elapsed = time.monotonic() - start
-
-        # Cleanup container (unless keep_containers is set)
-        if not cfg.keep_containers:
-            self._remove_container(container_name)
+        finally:
+            # Always clean up the container regardless of how we exit.
+            # docker rm -f is idempotent: safe even if container was
+            # already removed by --rm, already dead, or never created.
+            if not cfg.keep_containers:
+                self._remove_container(container_name)
 
         # Parse metrics from stdout
         metrics = parse_metrics(stdout)
@@ -321,6 +367,8 @@ class DockerSandbox:
         *,
         entry_point: str,
         container_name: str,
+        entry_args: list[str] | None = None,
+        env_overrides: dict[str, str] | None = None,
     ) -> list[str]:
         """Build the ``docker run`` command list.
 
@@ -343,20 +391,31 @@ class DockerSandbox:
         ]
 
         # --- Network policy ---
+        # On POSIX, run the container as the host user so that files
+        # written to the bind-mounted volume are owned by the caller.
+        # os.getuid / os.getgid are not available on Windows; fall back
+        # to running as the default container user (usually root).
+        def _user_flag() -> list[str]:
+            if sys.platform == "win32":
+                return []
+            return ["--user", f"{os.getuid()}:{os.getgid()}"]
+
         if cfg.network_policy == "none":
             # Fully isolated — no network at any point
             cmd.extend(["--network", "none"])
-            cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+            cmd.extend(_user_flag())
         elif cfg.network_policy in ("setup_only", "pip_only"):
             # Network during Phase 0+1, disabled via iptables before Phase 2.
-            # Run as root so entrypoint.sh can do pip install + iptables.
-            # The experiment script itself runs under exec (still root but
-            # the code is already validated by the pipeline security check).
+            # Run as host user so experiment can write results.json to volume.
+            # iptables requires NET_ADMIN but will gracefully degrade if
+            # the user lacks root — network remains available but the code
+            # has already been validated by the pipeline security check.
             cmd.extend(["-e", "RC_SETUP_ONLY_NETWORK=1"])
+            cmd.extend(_user_flag())
             cmd.extend(["--cap-add=NET_ADMIN"])
         elif cfg.network_policy == "full":
             # Full network throughout — for development/debugging
-            cmd.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
+            cmd.extend(_user_flag())
 
         # Mount pre-cached datasets
         # Priority: /opt/datasets (system) > ~/.cache/datasets (user)
@@ -371,40 +430,35 @@ class DockerSandbox:
             user_datasets.mkdir(parents=True, exist_ok=True)
             cmd.extend(["-v", f"{user_datasets}:/workspace/data:rw"])
 
-        # Mount HuggingFace model cache (read-write for downloading)
+        # Mount HuggingFace model cache (read-only for model weights).
+        # BUG-103 fix: Don't set HF_HOME to the read-only mount — the
+        # transformers library writes token/telemetry files under HF_HOME.
+        # Instead, use HF_HUB_CACHE for read-only model access and let
+        # HF_HOME default to a writable location inside the container.
         hf_mounted = False
+        _hf_hub_cache = "/home/researcher/.cache/huggingface/hub"
         hf_home_env = os.environ.get("HF_HOME", "").strip()
         if hf_home_env:
             xdg_hf = Path(hf_home_env).resolve()
             if xdg_hf.is_dir():
-                cmd.extend(["-v", f"{xdg_hf}:/home/researcher/.cache/huggingface"])
-                cmd.extend(["-e", "HF_HOME=/home/researcher/.cache/huggingface"])
+                cmd.extend(["-v", f"{xdg_hf}:{_hf_hub_cache}:ro"])
+                cmd.extend(["-e", f"HF_HUB_CACHE={_hf_hub_cache}"])
                 hf_mounted = True
         if not hf_mounted:
             hf_cache_host = Path.home() / ".cache" / "huggingface"
             if hf_cache_host.is_dir():
-                cmd.extend(["-v", f"{hf_cache_host}:/home/researcher/.cache/huggingface"])
-                cmd.extend(["-e", "HF_HOME=/home/researcher/.cache/huggingface"])
+                cmd.extend(["-v", f"{hf_cache_host}:{_hf_hub_cache}:ro"])
+                cmd.extend(["-e", f"HF_HUB_CACHE={_hf_hub_cache}"])
 
-        # Pass HF token if available (for gated model downloads)
-        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-        if hf_token:
-            cmd.extend(["-e", f"HF_TOKEN={hf_token}"])
+        # BUG-107 fix: Set TORCH_HOME to writable location so torchvision
+        # can download pretrained model weights (e.g., Inception-v3 for FID).
+        cmd.extend(["-e", "TORCH_HOME=/workspace/.cache/torch"])
 
-        # Mount HuggingFace model cache (read-write for downloading)
-        hf_mounted = False
-        hf_home_env = os.environ.get("HF_HOME", "").strip()
-        if hf_home_env:
-            xdg_hf = Path(hf_home_env).resolve()
-            if xdg_hf.is_dir():
-                cmd.extend(["-v", f"{xdg_hf}:/home/researcher/.cache/huggingface"])
-                cmd.extend(["-e", "HF_HOME=/home/researcher/.cache/huggingface"])
-                hf_mounted = True
-        if not hf_mounted:
-            hf_cache_host = Path.home() / ".cache" / "huggingface"
-            if hf_cache_host.is_dir():
-                cmd.extend(["-v", f"{hf_cache_host}:/home/researcher/.cache/huggingface"])
-                cmd.extend(["-e", "HF_HOME=/home/researcher/.cache/huggingface"])
+        # BUG-R52-03: Set HOME to a writable directory.  The container runs
+        # as the host user (--user UID:GID) whose HOME defaults to "/" when
+        # no matching passwd entry exists.  pip --user then fails with
+        # "Permission denied: '/.local'".
+        cmd.extend(["-e", "HOME=/workspace/.home"])
 
         # Pass HF token if available (for gated model downloads)
         hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -415,13 +469,21 @@ class DockerSandbox:
         if cfg.gpu_enabled:
             if cfg.gpu_device_ids:
                 device_spec = ",".join(str(d) for d in cfg.gpu_device_ids)
-                cmd.extend(["--gpus", f'"device={device_spec}"'])
+                cmd.extend(["--gpus", f"device={device_spec}"])
             else:
                 cmd.extend(["--gpus", "all"])
+
+        if env_overrides:
+            for name, value in sorted(env_overrides.items()):
+                if not value:
+                    continue
+                cmd.extend(["-e", f"{name}={value}"])
 
         # Image + entry point (passed as CMD arg to entrypoint.sh)
         cmd.append(cfg.image)
         cmd.append(entry_point)
+        if entry_args:
+            cmd.extend(entry_args)
 
         return cmd
 
@@ -479,8 +541,13 @@ class DockerSandbox:
         import_re = re.compile(
             r"^\s*(?:import|from)\s+([\w.]+)", re.MULTILINE
         )
+        # Exclude local project modules (any .py file in staging_dir, recursive)
+        # BUG-DA8-13: Use rglob to also scan subdirectories
+        local_modules = {
+            pyf.stem for pyf in staging_dir.rglob("*.py")
+        }
         detected: list[str] = []
-        for pyf in staging_dir.glob("*.py"):
+        for pyf in staging_dir.rglob("*.py"):
             if pyf.name == "setup.py":
                 continue  # Don't scan setup.py for experiment deps
             text = pyf.read_text(encoding="utf-8", errors="replace")
@@ -488,6 +555,8 @@ class DockerSandbox:
                 top_module = m.group(1).split(".")[0]
                 if top_module in _BUILTIN_PACKAGES:
                     continue
+                if top_module in local_modules:
+                    continue  # Skip local project modules
                 pip_name = _IMPORT_TO_PIP.get(top_module, top_module)
                 if pip_name not in detected:
                     detected.append(pip_name)

@@ -1,0 +1,69 @@
+domain_id: chemistry_molprop
+display_name: Molecular Property Prediction
+parent_domain: chemistry
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline model
+  proposed: proposed model
+  variant: ablation
+  input: molecular dataset
+  metric: MAE / RMSE
+
+typical_file_structure:
+  config.py: "Model and training configuration"
+  data.py: "Molecular data loading and featurization"
+  model.py: "Property prediction model"
+  train.py: "Training loop"
+  main.py: "Entry point: load data → featurize → train → evaluate → report"
+
+entry_point: main.py
+
+core_libraries:
+  - rdkit
+  - numpy
+  - scikit-learn
+  - torch
+
+docker_image: researchclaw/sandbox-chemistry:latest
+gpu_required: false
+
+pip_packages:
+  - rdkit
+  - numpy
+  - scikit-learn
+  - torch
+  - pandas
+  - matplotlib
+
+metric_types:
+  - scalar
+
+standard_baselines:
+  - Random Forest + Morgan FP
+  - XGBoost + ECFP
+  - GCN
+  - SchNet
+  - MPNN
+
+evaluation_protocol: "Train/test split or cross-validation. Report MAE, RMSE on test set."
+statistical_tests:
+  - paired_t_test
+
+github_search_terms:
+  - molecular property prediction
+  - rdkit fingerprint model
+  - cheminformatics python
+  - SMILES prediction
+
+paper_keywords:
+  - molecular property prediction
+  - cheminformatics
+  - QSAR
+
+dataset_guidance: |
+  Use standard molecular datasets:
+  - Generate small datasets from SMILES strings in code
+  - Use RDKit for featurization (Morgan fingerprints, descriptors)
+  - Standard datasets: QM9, ESOL, FreeSolv, Lipophilicity
+  - For benchmarking, use simple built-in data or generated molecular data

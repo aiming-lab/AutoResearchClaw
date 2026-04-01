@@ -90,7 +90,7 @@ stages:
       \ stopping criteria (e.g. stop when objective change < 1e-8 for\n  N consecutive iterations) — do NOT just run a fixed\
       \ number of iterations\n{pkg_hint}\nANTI-PATTERNS (do NOT do these):\n- Do NOT generate random numbers and pretend they\
       \ are experiment results\n- Do NOT use `random.uniform()` to simulate a decreasing loss curve\n- Do NOT hardcode metric\
-      \ values or use trivial arithmetic as metrics\n- Do NOT run a fixed number of iterations without any convergence check\n- Do NOT implement convergence_rate or similar metrics as dummy return values\n  (e.g. returning 1.0 or a constant) — measure actual iterations to convergence\n- If you report convergence_rate, define it as iterations_to_convergence / max_iterations\n  or similar — it MUST differ between algorithms\n\nExperiment plan:\n{exp_plan}"
+      \ values or use trivial arithmetic as metrics\n- Do NOT run a fixed number of iterations without any convergence check\n- Do NOT implement convergence_rate or similar metrics as dummy return values\n  (e.g. returning 1.0 or a constant) — measure actual iterations to convergence\n- If you report convergence_rate, define it as iterations_to_convergence / max_iterations\n  or similar — it MUST differ between algorithms\n\nNUMPY 2.x COMPATIBILITY (CRITICAL):\n- np.trapz is REMOVED → use np.trapezoid\n- np.erfinv does NOT exist → use scipy.special.erfinv\n- np.bool, np.int, np.float, np.complex are REMOVED → use Python builtins\n- np.str, np.object are REMOVED → use str, object\n- np.math is REMOVED → use math module\n\nExperiment plan:\n{exp_plan}"
   experiment_design:
     system: You are a principal investigator designing ML experiments.
     user: '{preamble}

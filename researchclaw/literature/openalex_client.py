@@ -21,6 +21,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -42,6 +43,7 @@ _RATE_LIMIT_SEC = 0.2  # OpenAlex is generous; 200ms is more than enough
 
 # Last request timestamp for rate limiting
 _last_request_time: float = 0.0
+_rate_lock = threading.Lock()
 
 
 def search_openalex(
@@ -71,11 +73,13 @@ def search_openalex(
     """
     global _last_request_time  # noqa: PLW0603
 
-    # Rate limiting
-    now = time.monotonic()
-    elapsed = now - _last_request_time
-    if elapsed < _RATE_LIMIT_SEC:
-        time.sleep(_RATE_LIMIT_SEC - elapsed)
+    # Rate limiting (locked to serialize concurrent callers)
+    with _rate_lock:
+        now = time.monotonic()
+        elapsed = now - _last_request_time
+        if elapsed < _RATE_LIMIT_SEC:
+            time.sleep(_RATE_LIMIT_SEC - elapsed)
+        _last_request_time = time.monotonic()
 
     limit = min(limit, _MAX_PER_REQUEST)
 
@@ -97,8 +101,6 @@ def search_openalex(
         params["filter"] = ",".join(filters)
 
     url = f"{_BASE_URL}?{urllib.parse.urlencode(params)}"
-
-    _last_request_time = time.monotonic()
     data = _request_with_retry(url, email)
     if data is None:
         return []
@@ -148,6 +150,14 @@ def _request_with_retry(
                         wait = 2 ** (attempt + 1)
                 else:
                     wait = 2 ** (attempt + 1)
+                # BUG-22: If Retry-After is absurdly long (>300s), skip immediately
+                if wait > 300:
+                    logger.warning(
+                        "[rate-limit] OpenAlex Retry-After=%s (>300s). "
+                        "Skipping request instead of waiting.",
+                        retry_after,
+                    )
+                    return None
                 wait = min(wait, _MAX_WAIT_SEC)
                 jitter = random.uniform(0, wait * 0.2)
                 logger.warning(
@@ -162,7 +172,7 @@ def _request_with_retry(
                 continue
 
             if exc.code in (500, 502, 503, 504):
-                wait = 2 ** attempt
+                wait = min(2 ** attempt, _MAX_WAIT_SEC)
                 jitter = random.uniform(0, wait * 0.2)
                 logger.warning(
                     "OpenAlex HTTP %d. Retry %d/%d in %.0fs...",
@@ -237,6 +247,9 @@ def _parse_openalex_work(item: dict[str, Any]) -> Paper:
     primary_loc = item.get("primary_location") or {}
     source_info = primary_loc.get("source") or {}
     venue = str(source_info.get("display_name") or "").strip()
+    # BUG-33: arXiv category codes (e.g. cs.LG, stat.ML) are not proper venue names
+    if venue and re.match(r"^[a-z]{2,}\.[A-Z]{2}$", venue):
+        venue = ""
 
     # Citation count
     citation_count = int(item.get("cited_by_count") or 0)

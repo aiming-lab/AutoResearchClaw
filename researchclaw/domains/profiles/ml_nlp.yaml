@@ -1,0 +1,63 @@
+domain_id: ml_nlp
+display_name: Natural Language Processing (ML)
+parent_domain: ml
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: baseline
+  proposed: proposed method
+  variant: ablation
+  input: dataset
+  metric: accuracy/F1
+
+typical_file_structure:
+  config.py: "Hyperparameters and model configuration"
+  data.py: "Dataset loading and tokenization"
+  model.py: "Model architecture definition"
+  train.py: "Training loop with metric tracking"
+  main.py: "Entry point: setup → train → evaluate → report"
+
+entry_point: main.py
+
+core_libraries:
+  - torch
+  - transformers
+  - datasets
+  - numpy
+  - scikit-learn
+
+docker_image: researchclaw/sandbox-ml:latest
+gpu_required: true
+
+pip_packages:
+  - torch
+  - transformers
+  - datasets
+  - tokenizers
+  - numpy
+  - scikit-learn
+
+metric_types:
+  - scalar
+  - learning_curve
+
+standard_baselines:
+  - BERT-base
+  - RoBERTa-base
+  - DistilBERT
+  - LSTM
+  - TF-IDF + SVM
+
+evaluation_protocol: "Fine-tune on training set, evaluate on test set. Report mean ± std over 3+ seeds."
+statistical_tests:
+  - paired_t_test
+
+github_search_terms:
+  - text classification transformers
+  - NLP benchmark pytorch
+  - sentiment analysis huggingface
+
+paper_keywords:
+  - natural language processing
+  - text classification
+  - language model

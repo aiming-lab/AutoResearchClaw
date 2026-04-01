@@ -87,9 +87,22 @@ class Paper:
         key = self.cite_key
         authors_str = " and ".join(a.name for a in self.authors) or "Unknown"
 
+        # T1.4: Detect arXiv category codes used as venue (e.g. "cs.CY", "math.OC")
+        # These are NOT journal names and must be treated as arXiv preprints.
+        import re as _re
+        _venue = self.venue or ""
+        _is_arxiv_category = bool(
+            _re.match(
+                r"^(?:cs|math|stat|eess|physics|q-bio|q-fin|astro-ph|cond-mat|"
+                r"gr-qc|hep-ex|hep-lat|hep-ph|hep-th|nlin|nucl-ex|nucl-th|"
+                r"quant-ph)\.[A-Z]{2}$",
+                _venue,
+            )
+        )
+
         # Decide entry type
-        if self.venue and any(
-            kw in self.venue.lower()
+        if _venue and not _is_arxiv_category and any(
+            kw in _venue.lower()
             for kw in (
                 "conference",
                 "proc",
@@ -100,24 +113,32 @@ class Paper:
                 "aaai",
                 "cvpr",
                 "acl",
+                "emnlp",
+                "naacl",
+                "eccv",
+                "iccv",
+                "sigir",
+                "kdd",
+                "www",
+                "ijcai",
             )
         ):
             entry_type = "inproceedings"
-            venue_field = f"  booktitle = {{{self.venue}}},"
-        elif self.arxiv_id and not self.venue:
+            venue_field = f"  booktitle = {{{_venue}}},"
+        elif self.arxiv_id and (not _venue or _is_arxiv_category):
+            # arXiv paper: use standard format with eprint ID
             entry_type = "article"
-            venue_field = "  journal = {arXiv preprint},"
+            venue_field = f"  journal = {{arXiv preprint arXiv:{self.arxiv_id}}},"
         else:
             entry_type = "article"
             venue_field = (
-                f"  journal = {{{self.venue or 'Unknown'}}}," if self.venue else ""
+                f"  journal = {{{_venue or 'Unknown'}}}," if _venue else ""
             )
 
         lines = [f"@{entry_type}{{{key},"]
         lines.append(f"  title = {{{self.title}}},")
         lines.append(f"  author = {{{authors_str}}},")
-        if self.year:
-            lines.append(f"  year = {{{self.year}}},")
+        lines.append(f"  year = {{{self.year or 'Unknown'}}},")
         if venue_field:
             lines.append(venue_field)
         if self.doi:

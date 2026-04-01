@@ -195,6 +195,8 @@ COMMON_SCIENCE: frozenset[str] = frozenset(
         "safetensors",
         "evaluate",
         "rouge_score",
+        # Runtime-injected by the experiment harness
+        "experiment_harness",
     }
 )
 
@@ -552,12 +554,16 @@ def check_class_quality(all_files: dict[str, str]) -> list[str]:
 
             non_dunder = [m for m in methods if not m.startswith("__")]
 
+            has_explicit_bases = bool(node.bases)
+
             class_info[f"{fname}:{cls_name}"] = {
                 "methods": methods,
                 "non_dunder": non_dunder,
                 "body_lines": body_lines,
                 "file": fname,
                 "has_forward_new_module": has_forward_new_module,
+                "class_name": cls_name,
+                "has_explicit_bases": has_explicit_bases,
             }
 
             # --- Check 1: Empty or trivial class ---
@@ -568,7 +574,11 @@ def check_class_quality(all_files: dict[str, str]) -> list[str]:
                 )
 
             # --- Check 2: Too few methods for an algorithm class ---
-            if body_lines > 5 and len(non_dunder) < 2:
+            if (
+                body_lines > 5
+                and len(non_dunder) < 2
+                and not has_explicit_bases
+            ):
                 warnings.append(
                     f"[{fname}] Class '{cls_name}' has only {len(non_dunder)} "
                     f"non-dunder method(s) — algorithm classes should have at "
@@ -583,13 +593,36 @@ def check_class_quality(all_files: dict[str, str]) -> list[str]:
                     f"Move to __init__() and register as submodules."
                 )
 
-    # --- Check 4: Duplicate class implementations ---
+    # --- Check 4: Duplicate class names across files ---
+    duplicated_class_names: set[str] = set()
+    classes_by_name: dict[str, list[dict[str, Any]]] = {}
+    for info in class_info.values():
+        classes_by_name.setdefault(str(info["class_name"]), []).append(info)
+
+    for cls_name, entries in classes_by_name.items():
+        non_trivial = [entry for entry in entries if int(entry["body_lines"]) > 5]
+        files = sorted({str(entry["file"]) for entry in non_trivial})
+        if len(files) >= 2:
+            duplicated_class_names.add(cls_name)
+            warnings.append(
+                f"Class '{cls_name}' is defined in multiple files "
+                f"({', '.join(files)}). Keep each algorithm/helper class in one "
+                f"canonical module and import it elsewhere instead of duplicating "
+                f"the definition."
+            )
+
+    # --- Check 5: Duplicate class implementations ---
     # Compare class body hashes to find copy-paste variants
     class_names = list(class_info.keys())
     for i, name_a in enumerate(class_names):
         info_a = class_info[name_a]
         for name_b in class_names[i + 1:]:
             info_b = class_info[name_b]
+            if (
+                str(info_a["class_name"]) == str(info_b["class_name"])
+                and str(info_a["class_name"]) in duplicated_class_names
+            ):
+                continue
             if (
                 info_a["body_lines"] > 5
                 and info_b["body_lines"] > 5
@@ -604,7 +637,7 @@ def check_class_quality(all_files: dict[str, str]) -> list[str]:
                     f"may be copy-paste variants with no real algorithmic difference"
                 )
 
-    # --- Check 5: Ablation subclasses must override with different logic ---
+    # --- Check 6: Ablation subclasses must override with different logic ---
     # Parse inheritance relationships and compare method ASTs
     for fname_code, code in all_files.items():
         if not fname_code.endswith(".py"):
@@ -670,6 +703,25 @@ def check_class_quality(all_files: dict[str, str]) -> list[str]:
                     # Has methods but none override parent — might be fine
                     # (new methods that parent doesn't have)
                     pass
+
+                # --- Check 7: Ablation subclass must override >=1 parent method ---
+                _lname = cls_name.lower()
+                if ("ablation" in _lname or "no_" in _lname or "without" in _lname):
+                    parent_non_dunder = {
+                        m.name
+                        for m in parent_node.body
+                        if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and not m.name.startswith("__")
+                    }
+                    child_overrides = set(child_methods.keys()) & parent_non_dunder
+                    if not child_overrides and parent_non_dunder:
+                        warnings.append(
+                            f"[{fname_code}] Ablation class '{cls_name}' inherits "
+                            f"from '{base_name}' but does NOT override any of its "
+                            f"methods ({', '.join(sorted(parent_non_dunder))}). "
+                            f"An ablation MUST override the method that removes "
+                            f"the ablated component."
+                        )
 
     return warnings
 
@@ -752,6 +804,85 @@ def _extract_assign_targets(node: ast.AST) -> list[str]:
     return names
 
 
+def auto_fix_unbound_locals(code: str) -> tuple[str, int]:
+    """Programmatically fix UnboundLocalError patterns.
+
+    For each variable assigned only inside an if-branch but used later,
+    insert ``var = None`` before the if-statement.
+
+    Returns (fixed_code, num_fixes).
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code, 0
+
+    lines = code.splitlines(keepends=True)
+    insertions: dict[int, list[str]] = {}  # lineno -> lines to insert before
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+
+        if_only_vars: dict[str, int] = {}
+        top_level_vars: set[str] = set()
+        if_line_map: dict[str, int] = {}  # var -> if-statement lineno
+
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.If):
+                before: dict[str, int] = {}
+                _collect_if_only_assignments(child, before)
+                for var_name, var_line in before.items():
+                    if_only_vars[var_name] = var_line
+                    if_line_map[var_name] = child.lineno
+            elif isinstance(child, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+                for target in _extract_assign_targets(child):
+                    top_level_vars.add(target)
+
+        for var_name, var_line in if_only_vars.items():
+            if var_name in top_level_vars:
+                continue
+            # Confirm it's actually used later
+            used_later = False
+            for later_node in ast.walk(node):
+                if (
+                    isinstance(later_node, ast.Name)
+                    and later_node.id == var_name
+                    and isinstance(later_node.ctx, ast.Load)
+                    and later_node.lineno > var_line
+                ):
+                    used_later = True
+                    break
+            if not used_later:
+                continue
+
+            if_lineno = if_line_map.get(var_name)
+            if if_lineno is None:
+                continue
+            # Determine indentation of the if-statement
+            if if_lineno <= len(lines):
+                if_line = lines[if_lineno - 1]
+                indent = if_line[: len(if_line) - len(if_line.lstrip())]
+            else:
+                indent = "    "
+            insertions.setdefault(if_lineno, [])
+            fix_line = f"{indent}{var_name} = None\n"
+            if fix_line not in insertions[if_lineno]:
+                insertions[if_lineno].append(fix_line)
+
+    if not insertions:
+        return code, 0
+
+    # Apply insertions in reverse line order to keep line numbers stable
+    num_fixes = sum(len(v) for v in insertions.values())
+    for lineno in sorted(insertions, reverse=True):
+        idx = lineno - 1
+        for fix_line in reversed(insertions[lineno]):
+            lines.insert(idx, fix_line)
+
+    return "".join(lines), num_fixes
+
+
 def check_api_correctness(code: str, fname: str = "main.py") -> list[str]:
     """Detect common API misuse patterns.
 
@@ -802,6 +933,197 @@ def check_api_correctness(code: str, fname: str = "main.py") -> list[str]:
                 f"may produce identical results across calls — pass seed as parameter"
             )
 
+    # --- Import-usage mismatch detection ---
+    # Detect `from X import Y` followed by `X.Y(...)` — guaranteed NameError
+    import_from_map: dict[str, set[str]] = {}  # module -> {names}
+    import_module_set: set[str] = set()  # modules imported with `import X`
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        m = _re.match(r"from\s+([\w.]+)\s+import\s+(.+)", stripped)
+        if m:
+            mod = m.group(1)
+            names = {n.strip().split(" as ")[-1].strip()
+                     for n in m.group(2).split(",")}
+            import_from_map.setdefault(mod, set()).update(names)
+        elif _re.match(r"import\s+([\w.]+)", stripped) and "from" not in stripped:
+            m2 = _re.match(r"import\s+([\w.]+)", stripped)
+            if m2:
+                import_module_set.add(m2.group(1).split(".")[0])
+
+    # Now scan for qualified calls to modules that were only from-imported
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        for mod, _names in import_from_map.items():
+            top_mod = mod.split(".")[0]
+            # Only flag if the module was NOT also imported via `import X`
+            if top_mod in import_module_set:
+                continue
+            # Check for `module.name(...)` usage when `name` was from-imported
+            for name in _names:
+                pattern = _re.escape(f"{mod}.{name}") + r"\s*\("
+                if _re.search(pattern, stripped):
+                    warnings.append(
+                        f"[{fname}:{i}] Import-usage mismatch: '{name}' was imported "
+                        f"via `from {mod} import {name}` but called as `{mod}.{name}()` "
+                        f"— this will raise NameError. Use `{name}()` directly."
+                    )
+
+    return warnings
+
+
+def check_undefined_calls(code: str, fname: str = "main.py") -> list[str]:
+    """Detect calls to undefined functions/names in experiment code.
+
+    Catches the pattern where a function is called but never defined or imported,
+    which would cause NameError at runtime.
+    """
+    warnings: list[str] = []
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return warnings
+
+    # Common builtins that are always available
+    builtins = {
+        "print", "len", "range", "enumerate", "zip", "map", "filter", "sorted",
+        "list", "dict", "set", "tuple", "str", "int", "float", "bool", "bytes",
+        "type", "isinstance", "issubclass", "hasattr", "getattr", "setattr",
+        "delattr", "callable", "iter", "next", "reversed", "slice", "super",
+        "property", "staticmethod", "classmethod", "abs", "all", "any", "bin",
+        "chr", "ord", "hex", "oct", "pow", "round", "sum", "min", "max", "open",
+        "input", "repr", "hash", "id", "dir", "vars", "globals", "locals",
+        "format", "ascii", "object", "Exception", "ValueError", "TypeError",
+        "KeyError", "IndexError", "AttributeError", "RuntimeError", "StopIteration",
+        "NotImplementedError", "AssertionError", "ImportError", "FileNotFoundError",
+        "OSError", "IOError", "ZeroDivisionError", "OverflowError", "MemoryError",
+        "RecursionError", "SystemExit", "KeyboardInterrupt", "GeneratorExit",
+        "BaseException", "Warning", "DeprecationWarning", "UserWarning",
+        "FutureWarning", "PendingDeprecationWarning", "SyntaxWarning",
+        "RuntimeWarning", "ResourceWarning", "BytesWarning", "UnicodeWarning",
+        "breakpoint", "memoryview", "bytearray", "frozenset", "complex",
+        "divmod", "eval", "exec", "compile", "__import__", "help", "exit", "quit",
+    }
+
+    # Collect all defined names in the module
+    defined_names: set[str] = set()
+
+    for node in ast.walk(tree):
+        # Function definitions
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defined_names.add(node.name)
+        # Class definitions
+        elif isinstance(node, ast.ClassDef):
+            defined_names.add(node.name)
+        # Imports
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname if alias.asname else alias.name.split(".")[0]
+                defined_names.add(name)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                name = alias.asname if alias.asname else alias.name
+                if name != "*":
+                    defined_names.add(name)
+        # Assignments (including comprehensions)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    defined_names.add(target.id)
+                elif isinstance(target, ast.Tuple):
+                    for elt in target.elts:
+                        if isinstance(elt, ast.Name):
+                            defined_names.add(elt.id)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name):
+                defined_names.add(node.target.id)
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name):
+                defined_names.add(node.target.id)
+        # For loop targets
+        elif isinstance(node, ast.For):
+            if isinstance(node.target, ast.Name):
+                defined_names.add(node.target.id)
+            elif isinstance(node.target, ast.Tuple):
+                for elt in node.target.elts:
+                    if isinstance(elt, ast.Name):
+                        defined_names.add(elt.id)
+        # With statement targets
+        elif isinstance(node, ast.With):
+            for item in node.items:
+                if item.optional_vars and isinstance(item.optional_vars, ast.Name):
+                    defined_names.add(item.optional_vars.id)
+        # Exception handlers
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                defined_names.add(node.name)
+        # Named expressions (walrus operator)
+        elif isinstance(node, ast.NamedExpr):
+            if isinstance(node.target, ast.Name):
+                defined_names.add(node.target.id)
+
+    # Also collect function parameters
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for arg in node.args.args:
+                defined_names.add(arg.arg)
+            for arg in node.args.posonlyargs:
+                defined_names.add(arg.arg)
+            for arg in node.args.kwonlyargs:
+                defined_names.add(arg.arg)
+            if node.args.vararg:
+                defined_names.add(node.args.vararg.arg)
+            if node.args.kwarg:
+                defined_names.add(node.args.kwarg.arg)
+
+    # Now find all function calls to bare names (not attributes like obj.method())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            # Only check bare name calls, not attribute calls (obj.method())
+            if isinstance(node.func, ast.Name):
+                call_name = node.func.id
+                if (
+                    call_name not in defined_names
+                    and call_name not in builtins
+                ):
+                    warnings.append(
+                        f"[{fname}:{node.lineno}] Call to undefined function "
+                        f"'{call_name}()' — this will raise NameError at runtime. "
+                        f"Either define the function or remove the call."
+                    )
+
+    return warnings
+
+
+def check_filename_collisions(files: dict[str, str]) -> list[str]:
+    """BUG-202: Detect local .py filenames that shadow pip/stdlib packages.
+
+    The LLM commonly generates ``config.py``, ``models.py``, etc. which get
+    shadowed by pip-installed packages (e.g. ``pip install config``).  The
+    result is an import crash at runtime.
+    """
+    # Filenames (without .py) that are known to collide with pip/stdlib packages.
+    _SHADOW_RISK: set[str] = {
+        # pip packages frequently installed as transitive deps
+        "config", "test", "tests", "types", "typing_extensions",
+        # stdlib modules the LLM might accidentally shadow
+        "io", "logging", "json", "time", "random", "copy", "math",
+        "os", "sys", "collections", "functools", "abc", "re",
+        "statistics", "signal", "pickle", "itertools",
+        "string", "tokenize", "token", "email", "calendar",
+        "numbers", "operator", "queue", "code", "profile",
+    }
+    warnings: list[str] = []
+    for fname in files:
+        stem = fname.removesuffix(".py") if fname.endswith(".py") else None
+        if stem and stem in _SHADOW_RISK:
+            warnings.append(
+                f"[{fname}] Filename shadows stdlib/pip package '{stem}'. "
+                f"Rename to e.g. '{stem}_config.py' or 'experiment_{stem}.py' "
+                f"to avoid import collisions at runtime."
+            )
     return warnings
 
 
@@ -814,9 +1136,11 @@ def deep_validate_files(
     """
     warnings: list[str] = []
     warnings.extend(check_class_quality(files))
+    warnings.extend(check_filename_collisions(files))
     for fname, code in files.items():
         if not fname.endswith(".py"):
             continue
         warnings.extend(check_variable_scoping(code, fname))
         warnings.extend(check_api_correctness(code, fname))
+        warnings.extend(check_undefined_calls(code, fname))
     return warnings

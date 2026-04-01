@@ -1,0 +1,26 @@
+domain_id: biology_genomics
+display_name: Genomics Analysis
+parent_domain: biology
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: standard pipeline
+  proposed: proposed method
+  variant: parameter variant
+  input: sequence data
+  metric: accuracy / F1
+typical_file_structure:
+  config.py: "Analysis parameters"
+  data.py: "Sequence data loading"
+  methods.py: "Analysis methods"
+  main.py: "Entry point"
+entry_point: main.py
+core_libraries: [biopython, numpy, scikit-learn, pandas]
+docker_image: researchclaw/sandbox-biology:latest
+gpu_required: false
+pip_packages: [biopython, numpy, scikit-learn, pandas, matplotlib]
+metric_types: [scalar]
+standard_baselines: [BLAST, BWA, GATK]
+evaluation_protocol: "Compare methods on standard genomic tasks."
+statistical_tests: [paired_t_test]
+github_search_terms: [genomics python, sequence analysis biopython]
+paper_keywords: [genomics, sequence analysis]

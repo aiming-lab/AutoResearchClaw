@@ -36,6 +36,43 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Skills directories to scan (project-level .claude/skills/ and repo root)
+_PROJECT_SKILLS_DIRS: tuple[str, ...] = (
+    ".claude/skills",
+)
+
+
+def _load_project_skills() -> list[str]:
+    """Load skill content from project-level ``.claude/skills/`` directories.
+
+    Scans for SKILL.md files in subdirectories (excluding the main
+    ``researchclaw`` skill which is a CLI usage guide, not a pipeline skill).
+    Only loads skills that contain pipeline-relevant content (indicated by
+    ``metadata`` frontmatter or ``arc-`` / ``a-evolve`` in the name).
+    """
+    skills: list[str] = []
+    # Walk up from this file to find project root (contains .claude/)
+    root = Path(__file__).resolve().parent.parent
+    for rel_dir in _PROJECT_SKILLS_DIRS:
+        skills_dir = root / rel_dir
+        if not skills_dir.is_dir():
+            continue
+        for skill_sub in sorted(skills_dir.iterdir()):
+            if not skill_sub.is_dir():
+                continue
+            # Skip the main researchclaw CLI skill — it's not a pipeline overlay
+            if skill_sub.name == "researchclaw":
+                continue
+            skill_file = skill_sub / "SKILL.md"
+            if skill_file.is_file():
+                try:
+                    text = skill_file.read_text(encoding="utf-8").strip()
+                    if text:
+                        skills.append(text)
+                except OSError:
+                    continue
+    return skills
+
 
 class LessonCategory(str, Enum):
     """Issue classification for extracted lessons."""
@@ -414,28 +451,145 @@ class EvolutionStore:
         return [entry for _, entry in scored[:max_lessons]]
 
     def build_overlay(
-        self, stage_name: str, *, max_lessons: int = 5
+        self,
+        stage_name: str,
+        *,
+        max_lessons: int = 5,
+        skills_dir: str = "",
     ) -> str:
         """Generate a prompt overlay string for a given stage.
 
-        Returns empty string if no relevant lessons exist.
+        Combines two sources:
+        1. Current-run lessons from ``lessons.jsonl`` (intra-run learning).
+        2. Cross-run MetaClaw ``arc-*`` skills from *skills_dir* (inter-run
+           learning via the MetaClaw skill-generation feedback loop).
+
+        Project-level and user-level skills are handled separately by the
+        SkillRegistry in ``_helpers._get_skill_registry()``.
+
+        Returns empty string if no relevant lessons or skills exist.
         """
+        parts: list[str] = []
+
+        # --- Section 1: intra-run lessons ---
         lessons = self.query_for_stage(stage_name, max_lessons=max_lessons)
-        if not lessons:
-            return ""
-        parts = ["## Lessons from Prior Runs"]
-        for i, lesson in enumerate(lessons, 1):
-            severity_icon = {"error": "❌", "warning": "⚠️", "info": "ℹ️"}.get(
-                lesson.severity, "•"
-            )
+        if lessons:
+            parts.append("## Lessons from Prior Runs")
+            for i, lesson in enumerate(lessons, 1):
+                severity_icon = {"error": "❌", "warning": "⚠️", "info": "ℹ️"}.get(
+                    lesson.severity, "•"
+                )
+                parts.append(
+                    f"{i}. {severity_icon} [{lesson.category}] {lesson.description}"
+                )
             parts.append(
-                f"{i}. {severity_icon} [{lesson.category}] {lesson.description}"
+                "\nUse these lessons to avoid repeating past mistakes."
             )
-        parts.append(
-            "\nUse these lessons to avoid repeating past mistakes."
-        )
+
+        # --- Section 2: cross-run MetaClaw arc-* skills ---
+        arc_skills: list[str] = []
+        if skills_dir:
+            from pathlib import Path as _Path
+
+            sd = _Path(skills_dir).expanduser()
+            if sd.is_dir():
+                for skill_dir in sorted(sd.iterdir()):
+                    if skill_dir.is_dir() and skill_dir.name.startswith("arc-"):
+                        skill_file = skill_dir / "SKILL.md"
+                        if skill_file.is_file():
+                            try:
+                                text = skill_file.read_text(encoding="utf-8").strip()
+                                if text:
+                                    arc_skills.append(text)
+                            except OSError:
+                                continue
+
+        if arc_skills:
+            parts.append("\n## Learned Skills from Prior Runs")
+            for skill_text in arc_skills[:5]:
+                parts.append(skill_text)
+            parts.append(
+                "\nApply these skills proactively to improve quality."
+            )
+
         return "\n".join(parts)
 
     def count(self) -> int:
         """Return total number of stored lessons."""
         return len(self.load_all())
+
+    def export_to_memory(self, memory_store: object) -> int:
+        """Export lessons to a memory store (duck-typed to avoid circular imports).
+
+        The *memory_store* must expose an ``add(content, category, metadata)`` method
+        (compatible with ``researchclaw.memory.store.MemoryStore``).
+
+        Returns the number of lessons exported.
+        """
+        add_fn = getattr(memory_store, "add", None)
+        if add_fn is None or not callable(add_fn):
+            logger.warning("export_to_memory: memory_store has no add() method")
+            return 0
+        lessons = self.load_all()
+        exported = 0
+        for lesson in lessons:
+            weight = _time_weight(lesson.timestamp)
+            if weight <= 0.0:
+                continue
+            try:
+                # Map lesson categories to valid MemoryStore categories
+                _CAT_MAP = {
+                    "system": "experiment", "analysis": "experiment",
+                    "literature": "ideation", "pipeline": "experiment",
+                    "experiment": "experiment", "writing": "writing",
+                    "ideation": "ideation",
+                }
+                _mem_cat = _CAT_MAP.get(lesson.category, "experiment")
+                add_fn(
+                    content=lesson.description,
+                    category=_mem_cat,
+                    metadata={
+                        "source": "evolution",
+                        "stage": lesson.stage_name,
+                        "severity": lesson.severity,
+                        "run_id": lesson.run_id,
+                        "timestamp": lesson.timestamp,
+                    },
+                )
+                exported += 1
+            except Exception:
+                logger.debug("Failed to export lesson: %s", lesson.description[:80])
+        return exported
+
+    def get_lessons_for_stage_with_memory(
+        self,
+        stage_name: str,
+        memory_store: object,
+        *,
+        max_lessons: int = 5,
+    ) -> str:
+        """Combine evolution overlay with memory context for a stage.
+
+        *memory_store* must expose a ``recall(query, category, max_results)`` method
+        returning objects with a ``.content`` attribute.
+        """
+        overlay = self.build_overlay(stage_name, max_lessons=max_lessons)
+        recall_fn = getattr(memory_store, "recall", None)
+        if recall_fn is None or not callable(recall_fn):
+            return overlay
+        try:
+            memories = recall_fn(
+                query=stage_name,
+                category=None,
+                max_results=max_lessons,
+            )
+            if memories:
+                parts = ["\n## Recalled Memories"]
+                for i, mem in enumerate(memories, 1):
+                    content = getattr(mem, "content", str(mem))
+                    parts.append(f"{i}. {content}")
+                memory_text = "\n".join(parts)
+                return f"{overlay}\n{memory_text}" if overlay else memory_text
+        except Exception:
+            logger.debug("Failed to recall memories for stage %s", stage_name)
+        return overlay
