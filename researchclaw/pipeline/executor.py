@@ -242,7 +242,8 @@ def _run_hitl_pre_stage(
 
 
 def _run_hitl_post_stage(
-    stage: Stage, result: StageResult, run_dir: Path, adapters: AdapterBundle
+    stage: Stage, result: StageResult, run_dir: Path, adapters: AdapterBundle,
+    config: RCConfig | None = None,
 ) -> StageResult:
     """HITL post-stage hook: pause after execution for review.
 
@@ -406,7 +407,7 @@ def _run_hitl_post_stage(
         session.enter_collaboration(stage_num, stage.name)
         try:
             result = _run_collaboration_loop(
-                stage, result, run_dir, adapters, session
+                stage, result, run_dir, adapters, session, config=config
             )
         except Exception as _collab_exc:
             logger.warning("Collaboration failed: %s", _collab_exc)
@@ -429,6 +430,8 @@ def _run_collaboration_loop(
     run_dir: Path,
     adapters: AdapterBundle,
     session: Any,
+    *,
+    config: RCConfig | None = None,
 ) -> StageResult:
     """Run an interactive collaboration loop for a stage.
 
@@ -448,13 +451,13 @@ def _run_collaboration_loop(
     llm_client = None
     topic = ""
     try:
-        from researchclaw.llm.client import LLMClient
-        # LLM client is created fresh for collaboration
-        llm_client = None  # Will use chat without LLM if unavailable
-        topic = getattr(
-            getattr(adapters, "_config", None), "research", None
-        )
-        topic = topic.topic if topic else "Research"
+        if config is not None:
+            from researchclaw.llm import create_llm_client
+            llm_client = create_llm_client(config)
+            topic_obj = getattr(config, "research", None)
+            topic = topic_obj.topic if topic_obj else "Research"
+        else:
+            topic = "Research"
     except Exception:
         topic = "Research"
 
@@ -735,6 +738,6 @@ def execute_stage(
         pass
 
     # --- HITL post-stage hook ---
-    result = _run_hitl_post_stage(stage, result, run_dir, adapters)
+    result = _run_hitl_post_stage(stage, result, run_dir, adapters, config=config)
 
     return result
