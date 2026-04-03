@@ -12,6 +12,7 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -373,15 +374,18 @@ class ACPClient:
 
     def _send_prompt_via_file(self, acpx: str, prompt: str) -> str:
         """Write prompt to a temp file, ask the agent to read and respond."""
+        prompt_dir = Path(self._abs_cwd()) / ".researchclaw" / "acp_prompts"
+        prompt_dir.mkdir(parents=True, exist_ok=True)
         fd, prompt_path = tempfile.mkstemp(
-            suffix=".md", prefix="rc_prompt_",
+            suffix=".md", prefix="rc_prompt_", dir=str(prompt_dir),
         )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(prompt)
 
+            prompt_ref = os.path.relpath(prompt_path, self._abs_cwd())
             short_prompt = (
-                f"Read the file at {prompt_path} in its entirety. "
+                f"Read the file at {prompt_ref} in its entirety. "
                 f"Follow ALL instructions contained in that file and "
                 f"respond exactly as requested. Do NOT summarize, "
                 f"just produce the requested output."
@@ -401,7 +405,7 @@ class ACPClient:
                 ) from exc
 
             if result.returncode != 0:
-                stderr = (result.stderr or "").strip()
+                stderr = self._format_failure_output(result)
                 raise RuntimeError(
                     f"ACP prompt failed (exit {result.returncode}): {stderr}"
                 )
@@ -412,6 +416,25 @@ class ACPClient:
                 os.unlink(prompt_path)
             except OSError:
                 pass
+
+    @staticmethod
+    def _format_failure_output(result: subprocess.CompletedProcess[str]) -> str:
+        """Return the most useful available subprocess error text.
+
+        ``acpx`` sometimes emits only session metadata to stderr while the
+        actionable failure details are written to stdout by the underlying
+        agent. Include both streams when needed so retries and debugging have
+        the real error context.
+        """
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        if stderr and stdout:
+            return f"{stderr}\n[stdout]\n{stdout}"
+        if stderr:
+            return stderr
+        if stdout:
+            return stdout
+        return "no output"
 
     @staticmethod
     def _extract_response(raw_output: str | None) -> str:

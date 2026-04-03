@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import urllib.error
 import urllib.request
 from http.client import HTTPMessage
@@ -423,6 +424,69 @@ def test_acp_command_line_too_long_falls_back_to_file_transport():
     result = client._send_prompt("short prompt")
     assert result == "ok-from-file"
     assert call_count == 1
+
+
+def test_acp_file_transport_stages_prompt_inside_workspace(tmp_path: Path):
+    from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+    client = ACPClient(ACPConfig(agent="codex", cwd=str(tmp_path)))
+    client._acpx = "acpx"
+    client._session_ready = True
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        captured["cmd"] = cmd
+        prompt_dir = tmp_path / ".researchclaw" / "acp_prompts"
+        assert prompt_dir.is_dir()
+        staged = list(prompt_dir.glob("rc_prompt_*.md"))
+        assert len(staged) == 1
+        prompt_file = staged[0]
+        captured["prompt_file"] = prompt_file
+        assert prompt_file.read_text(encoding="utf-8") == "long prompt body"
+        prompt_text = cmd[-1]
+        assert isinstance(prompt_text, str)
+        assert str(prompt_file) not in prompt_text
+        assert ".researchclaw/acp_prompts/" in prompt_text
+
+        class _Result:
+            returncode = 0
+            stdout = "response"
+            stderr = ""
+
+        return _Result()
+
+    import subprocess as _subprocess
+    from unittest import mock
+
+    with mock.patch.object(_subprocess, "run", side_effect=fake_run):
+        result = client._send_prompt_via_file("acpx", "long prompt body")
+
+    assert result == "response"
+    prompt_file = captured["prompt_file"]
+    assert isinstance(prompt_file, Path)
+    assert not prompt_file.exists()
+
+
+def test_acp_file_transport_failure_includes_stdout_context(tmp_path: Path):
+    from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+    client = ACPClient(ACPConfig(agent="codex", cwd=str(tmp_path)))
+    client._acpx = "acpx"
+    client._session_ready = True
+
+    class _Result:
+        returncode = 1
+        stdout = "codex error: file access denied"
+        stderr = "[acpx] session connected"
+
+    import subprocess as _subprocess
+    from unittest import mock
+    import pytest
+
+    with mock.patch.object(_subprocess, "run", return_value=_Result()):
+        with pytest.raises(RuntimeError, match="file access denied"):
+            client._send_prompt_via_file("acpx", "long prompt body")
 
 
 def test_acp_windows_cmd_wrapper_uses_lower_inline_limit(monkeypatch: pytest.MonkeyPatch):
