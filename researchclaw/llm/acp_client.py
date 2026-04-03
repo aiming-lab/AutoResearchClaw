@@ -197,7 +197,13 @@ class ACPClient:
         return os.path.abspath(self.config.cwd)
 
     def _ensure_session(self) -> None:
-        """Find or create the named acpx session."""
+        """Find or create the named acpx session.
+
+        After creating or reconnecting a session, sends a disposable warm-up
+        prompt.  Without this, the agent's cold-start greeting (e.g. "The
+        model has been set to …") is returned as the response to the first
+        real prompt, swallowing the actual request.
+        """
         if self._session_ready:
             return
         acpx = self._resolve_acpx()
@@ -225,6 +231,20 @@ class ACPClient:
                 raise RuntimeError(
                     f"Failed to create ACP session: {result.stderr.strip()}"
                 )
+
+        # Warm-up: consume the agent's cold-start greeting so it does not
+        # pollute the first real prompt's response.
+        try:
+            subprocess.run(
+                [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
+                 self.config.agent, "-s", self.config.session_name,
+                 "Respond with OK"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=60,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("ACP warm-up prompt failed (non-fatal)")
+
         self._session_ready = True
         logger.info("ACP session '%s' ready (%s)", self.config.session_name, self.config.agent)
 
