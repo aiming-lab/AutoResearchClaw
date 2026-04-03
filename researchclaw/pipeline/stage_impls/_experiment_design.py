@@ -30,6 +30,47 @@ from researchclaw.prompts import PromptManager
 logger = logging.getLogger(__name__)
 
 
+def _normalize_plan_field(value: Any) -> list:
+    """Normalize a plan field (baselines, proposed_methods, ablations, datasets)
+    from any shape the LLM might produce into a flat list of items.
+
+    Handles: list[str], list[dict], dict[str, Any], str, None.
+    When the input is a dict, we preserve the full structure by converting each
+    key-value pair into a dict item (with at least a 'name' key), rather than
+    discarding either keys or values.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, dict):
+        result = []
+        for k, v in value.items():
+            if isinstance(v, dict):
+                # e.g. {"baseline_1": {"params": ...}} -> {"name": "baseline_1", "params": ...}
+                item = dict(v)
+                item.setdefault("name", str(k))
+                result.append(item)
+            else:
+                # e.g. {"baseline_1": "description"} -> {"name": "baseline_1", "description": str(v)}
+                result.append({"name": str(k), "description": str(v) if v else ""})
+        return result
+    if isinstance(value, list):
+        return list(value)
+    return [value]
+
+
+def _plan_field_names(items: list) -> list[str]:
+    """Extract string names from a normalized plan field for display/dedup."""
+    result = []
+    for item in items:
+        if isinstance(item, dict):
+            result.append(item.get("name", str(item)))
+        else:
+            result.append(str(item))
+    return result
+
+
 def _execute_experiment_design(
     stage_dir: Path,
     run_dir: Path,
@@ -348,19 +389,11 @@ def _execute_experiment_design(
                 plan["datasets"] = [
                     b.get("name", "Unknown") for b in _benchmark_plan.selected_benchmarks
                 ]
-                # Normalize existing baselines to list of strings
-                # BUG-35: LLM may emit baselines as dict, list of dicts,
-                # or list of strings — normalize all to list[str].
-                _baselines_from_plan = plan.get("baselines", [])
-                if isinstance(_baselines_from_plan, dict):
-                    _baselines_from_plan = list(_baselines_from_plan.keys())
-                elif isinstance(_baselines_from_plan, list):
-                    _baselines_from_plan = [
-                        item["name"] if isinstance(item, dict) else str(item)
-                        for item in _baselines_from_plan
-                    ]
-                else:
-                    _baselines_from_plan = []
+                # Normalize existing baselines — LLM may emit dict, list of
+                # dicts, or list of strings.
+                _baselines_from_plan = _plan_field_names(
+                    _normalize_plan_field(plan.get("baselines", []))
+                )
                 plan["baselines"] = [
                     bl.get("name", "Unknown") for bl in _benchmark_plan.selected_baselines
                 ] + _baselines_from_plan
@@ -400,15 +433,9 @@ def _execute_experiment_design(
     if _time_budget > 7200:
         _max_conditions = 20
 
-    _baselines = plan.get("baselines", [])
-    if isinstance(_baselines, dict):
-        _baselines = list(_baselines.values())
-    _proposed = plan.get("proposed_methods", [])
-    if isinstance(_proposed, dict):
-        _proposed = list(_proposed.values())
-    _ablations = plan.get("ablations", [])
-    if isinstance(_ablations, dict):
-        _ablations = list(_ablations.values())
+    _baselines = _normalize_plan_field(plan.get("baselines", []))
+    _proposed = _normalize_plan_field(plan.get("proposed_methods", []))
+    _ablations = _normalize_plan_field(plan.get("ablations", []))
     _total = len(_baselines) + len(_proposed) + len(_ablations)
 
     if _total > _max_conditions:

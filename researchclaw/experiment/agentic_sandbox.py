@@ -200,7 +200,7 @@ class AgenticSandbox:
         cmd.extend([self.config.image, "tail", "-f", "/dev/null"])
 
         logger.info("Starting agentic container: %s", container)
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
     def _docker_exec(
         self,
@@ -215,6 +215,8 @@ class AgenticSandbox:
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )

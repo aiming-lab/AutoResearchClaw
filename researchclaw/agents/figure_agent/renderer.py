@@ -265,6 +265,8 @@ class RendererAgent(BaseAgent):
                 [self._python, str(script_path.resolve())],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self._timeout,
                 # BUG-20: Use output_dir as CWD so relative paths
                 # like fig.savefig("comparison.png") resolve correctly
@@ -328,6 +330,8 @@ class RendererAgent(BaseAgent):
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self._timeout,
                 check=False,
             )

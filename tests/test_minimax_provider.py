@@ -259,7 +259,9 @@ class TestMiniMaxRawCall:
         assert resp.content == "pong"
         assert resp.model == "MiniMax-M2.5"
 
-    def test_json_mode_adds_response_format(self, monkeypatch):
+    def test_json_mode_uses_system_prompt_fallback(self, monkeypatch):
+        """MiniMax models don't support response_format — json_mode should
+        fall back to a system-prompt hint instead of sending the parameter."""
         client = _make_minimax_client()
         captured: dict[str, Any] = {}
 
@@ -277,7 +279,11 @@ class TestMiniMaxRawCall:
             0.5,
             True,
         )
-        assert captured["body"]["response_format"] == {"type": "json_object"}
+        # Should NOT have response_format (causes HTTP 400 on MiniMax)
+        assert "response_format" not in captured["body"]
+        # Should inject JSON hint into system message instead
+        msgs = captured["body"]["messages"]
+        assert any("JSON" in m.get("content", "") for m in msgs if m["role"] == "system")
 
 
 # ---------------------------------------------------------------------------

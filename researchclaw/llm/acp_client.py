@@ -17,6 +17,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import weakref
 from dataclasses import dataclass
 from typing import Any
@@ -350,16 +352,80 @@ class ACPClient:
             pass
         self._session_ready = False
 
+    def _run_acp_with_heartbeat(
+        self, cmd: list[str], *, label: str = "ACP prompt",
+    ) -> subprocess.CompletedProcess[str]:
+        """Run an ACP subprocess with periodic heartbeat logging.
+
+        Instead of a silent blocking ``subprocess.run``, this uses ``Popen``
+        with a background reader thread and logs a progress heartbeat every
+        30 seconds so the user knows the agent is still working.
+        """
+        timeout = self.config.timeout_sec
+        heartbeat_interval = 30  # seconds
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        def _reader(stream: Any, buf: list[str]) -> None:
+            try:
+                for line in stream:
+                    buf.append(line)
+            except Exception:  # noqa: BLE001
+                pass
+
+        t_out = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks), daemon=True)
+        t_err = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        start = time.monotonic()
+        while True:
+            try:
+                proc.wait(timeout=heartbeat_interval)
+                break  # process finished
+            except subprocess.TimeoutExpired:
+                elapsed = time.monotonic() - start
+                if elapsed >= timeout:
+                    proc.kill()
+                    t_out.join(timeout=5)
+                    t_err.join(timeout=5)
+                    raise subprocess.TimeoutExpired(
+                        cmd, timeout,
+                        output="".join(stdout_chunks),
+                        stderr="".join(stderr_chunks),
+                    )
+                logger.info(
+                    "%s still running... %.0fs elapsed (timeout: %ds)",
+                    label, elapsed, timeout,
+                )
+
+        t_out.join(timeout=5)
+        t_err.join(timeout=5)
+
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=proc.returncode or 0,
+            stdout="".join(stdout_chunks),
+            stderr="".join(stderr_chunks),
+        )
+
     def _send_prompt_cli(self, acpx: str, prompt: str) -> str:
         """Send prompt as a CLI argument (original path)."""
+        cmd = [
+            acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
+            self.config.agent, "-s", self.config.session_name, prompt,
+        ]
         try:
-            result = subprocess.run(
-                [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
-                 self.config.agent, "-s", self.config.session_name,
-                 prompt],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=self.config.timeout_sec,
-            )
+            result = self._run_acp_with_heartbeat(cmd, label="ACP prompt (cli)")
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
                 f"ACP prompt timed out after {self.config.timeout_sec}s"
@@ -387,14 +453,13 @@ class ACPClient:
                 f"just produce the requested output."
             )
 
+            cmd = [
+                acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
+                self.config.agent, "-s", self.config.session_name,
+                short_prompt,
+            ]
             try:
-                result = subprocess.run(
-                    [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
-                     self.config.agent, "-s", self.config.session_name,
-                     short_prompt],
-                    capture_output=True, text=True, encoding="utf-8",
-                    errors="replace", timeout=self.config.timeout_sec,
-                )
+                result = self._run_acp_with_heartbeat(cmd, label="ACP prompt (file)")
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeError(
                     f"ACP prompt timed out after {self.config.timeout_sec}s"

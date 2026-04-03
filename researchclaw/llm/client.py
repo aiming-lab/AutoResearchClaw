@@ -428,13 +428,21 @@ class LLMClient:
                 # response_format parameter and return HTTP 400.
                 # Fall back to system-prompt injection for known-incompatible
                 # models (Claude, DeepSeek, Qwen, etc.) and the responses API.
+                _model_lower = model.lower()
                 _no_response_format = (
-                    model.startswith("claude")
-                    or model.startswith("deepseek")
-                    or model.startswith("qwen")
-                    or model.startswith("yi-")
-                    or model.startswith("glm")
-                    or model.startswith("moonshot")
+                    _model_lower.startswith("claude")
+                    or _model_lower.startswith("deepseek")
+                    or _model_lower.startswith("qwen")
+                    or _model_lower.startswith("yi-")
+                    or _model_lower.startswith("glm")
+                    or _model_lower.startswith("moonshot")
+                    or _model_lower.startswith("minimax")
+                    or _model_lower.startswith("doubao")
+                    or _model_lower.startswith("abab")
+                    or _model_lower.startswith("hunyuan")
+                    or _model_lower.startswith("ernie")
+                    or _model_lower.startswith("spark")
+                    or _model_lower.startswith("gemma")
                     or self._normalize_wire_api(self.config.wire_api) == "responses"
                 )
                 if _no_response_format:

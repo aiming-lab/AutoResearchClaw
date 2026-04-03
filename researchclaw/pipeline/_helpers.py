@@ -763,17 +763,26 @@ def _chat_with_prompt(
 
     messages = [{"role": "user", "content": user}]
     last_exc: Exception | None = None
+    _effective_json_mode = json_mode
     for attempt in range(1 + retries):
         try:
-            if json_mode and max_tokens is not None:
+            if _effective_json_mode and max_tokens is not None:
                 return llm.chat(messages, system=system, json_mode=True, max_tokens=max_tokens, strip_thinking=strip_thinking)
-            if json_mode:
+            if _effective_json_mode:
                 return llm.chat(messages, system=system, json_mode=True, strip_thinking=strip_thinking)
             if max_tokens is not None:
                 return llm.chat(messages, system=system, max_tokens=max_tokens, strip_thinking=strip_thinking)
             return llm.chat(messages, system=system, strip_thinking=strip_thinking)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
+            # Auto-disable json_mode on HTTP 400 — likely provider incompatibility
+            _err_str = str(exc)
+            if _effective_json_mode and "400" in _err_str:
+                logger.warning(
+                    "HTTP 400 with json_mode=True — disabling json_mode for retry "
+                    "(provider may not support response_format)."
+                )
+                _effective_json_mode = False
             if attempt < retries:
                 delay = 2 ** (attempt + 1)
                 logger.warning(
