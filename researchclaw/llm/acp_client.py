@@ -16,7 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
+
 import weakref
 from dataclasses import dataclass
 from typing import Any
@@ -232,13 +232,22 @@ class ACPClient:
                     f"Failed to create ACP session: {result.stderr.strip()}"
                 )
 
-        # Warm-up: consume the agent's cold-start greeting so it does not
-        # pollute the first real prompt's response.
+        # Warm-up: consume the agent's cold-start greeting and set
+        # text-only mode so it does not use tools or pollute responses.
+        _warmup = (
+            "You are being used as a text-generation backend for a "
+            "research pipeline. For ALL subsequent prompts in this "
+            "session, you MUST respond with text output ONLY. "
+            "Do NOT use any tools — no file reads, no file writes, "
+            "no searches, no terminal commands. Generate your "
+            "complete response as plain text. Confirm with: OK"
+        )
         try:
             subprocess.run(
-                [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
+                [acpx, "--approve-all", "--max-turns", "1",
+                 "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "-s", self.config.session_name,
-                 "Respond with OK"],
+                 _warmup],
                 capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=60,
             )
@@ -288,9 +297,10 @@ class ACPClient:
     def _send_prompt(self, prompt: str) -> str:
         """Send a prompt via acpx and return the response text.
 
-        For large prompts that would exceed the OS argument-length limit
-        (``E2BIG``), the prompt is written to a temp file and the agent
-        is asked to read it.
+        On Windows, multi-line prompts passed as CLI arguments are mangled
+        by ``.cmd`` wrappers (newlines truncated by ``cmd.exe``), so we
+        always use file-based transport there.  On other platforms, inline
+        CLI arguments are used when the prompt is small enough.
 
         If the session has died (common after long-running stages), retries
         up to ``_MAX_RECONNECT_ATTEMPTS`` times with automatic reconnection.
@@ -304,14 +314,18 @@ class ACPClient:
         if not acpx:
             raise RuntimeError("acpx not found")
 
+        # On Windows, .cmd/.bat wrappers route through cmd.exe which
+        # silently truncates multi-line CLI arguments.  Always use file
+        # transport to avoid mangled prompts.
         prompt_bytes = len(prompt.encode("utf-8"))
         prompt_limit = self._cli_prompt_limit(acpx)
-        use_file = prompt_bytes > prompt_limit
+        use_file = prompt_bytes > prompt_limit or (
+            sys.platform == "win32" and "\n" in prompt
+        )
         if use_file:
             logger.info(
-                "Prompt too large for CLI arg (%d bytes > %d). Using temp file.",
+                "Using file-based prompt transport (%d bytes).",
                 prompt_bytes,
-                prompt_limit,
             )
 
         last_exc: RuntimeError | None = None
@@ -374,7 +388,8 @@ class ACPClient:
         """Send prompt as a CLI argument (original path)."""
         try:
             result = subprocess.run(
-                [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
+                [acpx, "--approve-all", "--max-turns", "1",
+                 "--ttl", "0", "--cwd", self._abs_cwd(),
                  self.config.agent, "-s", self.config.session_name,
                  prompt],
                 capture_output=True, text=True, encoding="utf-8",
@@ -392,46 +407,29 @@ class ACPClient:
         return self._extract_response(result.stdout)
 
     def _send_prompt_via_file(self, acpx: str, prompt: str) -> str:
-        """Write prompt to a temp file, ask the agent to read and respond."""
-        fd, prompt_path = tempfile.mkstemp(
-            suffix=".md", prefix="rc_prompt_",
-        )
+        """Send prompt via stdin pipe (``-f -``) to avoid CLI arg limits."""
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(prompt)
+            result = subprocess.run(
+                [acpx, "--approve-all", "--max-turns", "1",
+                 "--ttl", "0", "--cwd", self._abs_cwd(),
+                 self.config.agent, "-s", self.config.session_name,
+                 "-f", "-"],
+                input=prompt,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=self.config.timeout_sec,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"ACP prompt timed out after {self.config.timeout_sec}s"
+            ) from exc
 
-            short_prompt = (
-                f"Read the file at {prompt_path} in its entirety. "
-                f"Follow ALL instructions contained in that file and "
-                f"respond exactly as requested. Do NOT summarize, "
-                f"just produce the requested output."
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            raise RuntimeError(
+                f"ACP prompt failed (exit {result.returncode}): {stderr}"
             )
 
-            try:
-                result = subprocess.run(
-                    [acpx, "--approve-all", "--ttl", "0", "--cwd", self._abs_cwd(),
-                     self.config.agent, "-s", self.config.session_name,
-                     short_prompt],
-                    capture_output=True, text=True, encoding="utf-8",
-                    errors="replace", timeout=self.config.timeout_sec,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise RuntimeError(
-                    f"ACP prompt timed out after {self.config.timeout_sec}s"
-                ) from exc
-
-            if result.returncode != 0:
-                stderr = (result.stderr or "").strip()
-                raise RuntimeError(
-                    f"ACP prompt failed (exit {result.returncode}): {stderr}"
-                )
-
-            return self._extract_response(result.stdout)
-        finally:
-            try:
-                os.unlink(prompt_path)
-            except OSError:
-                pass
+        return self._extract_response(result.stdout)
 
     @staticmethod
     def _extract_response(raw_output: str | None) -> str:
