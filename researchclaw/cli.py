@@ -211,9 +211,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     run_id = _generate_run_id(config.research.topic)
     run_dir = Path(output or f"artifacts/{run_id}")
 
-    # BUG-119: When --resume without --output, search for the most recent
-    # existing run directory that matches the topic and has a checkpoint.
-    if resume and not output:
+    # BUG-119 / #216: When --resume or --from-stage is used without --output,
+    # search for the most recent existing run directory that matches the topic
+    # and has a checkpoint. Without this, --from-stage creates a fresh empty
+    # directory and the StageContract input_files check fails immediately.
+    if (resume or from_stage_name) and not output:
         topic_hash = hashlib.sha256(config.research.topic.encode()).hexdigest()[:6]
         artifacts_root = Path("artifacts")
         if artifacts_root.is_dir():
