@@ -139,6 +139,27 @@ researchclaw run --config config.arc.yaml --topic "Your research idea" --auto-ap
 
 输出 → `artifacts/rc-YYYYMMDD-HHMMSS-<hash>/deliverables/` — 可编译的 LaTeX、BibTeX、实验代码、图表。
 
+### 快速 API 对话检测
+
+在跑完整流水线前，可先用内置 chat 命令验证 LLM 接口是否可用：
+
+```bash
+# 连通性检测（人类可读）
+researchclaw chat --config config.arc.yaml --check
+
+# 连通性检测（脚本/CI 友好的 JSON 输出）
+researchclaw chat --config config.arc.yaml --check --json
+
+# 单条消息测试
+researchclaw chat --config config.arc.yaml -m "你好，请回复 pong。"
+
+# 单条消息测试（JSON 输出）
+researchclaw chat --config config.arc.yaml -m "你好，请回复 pong。" --json
+
+# 交互对话模式（输入 /exit 退出）
+researchclaw chat --config config.arc.yaml
+```
+
 <details>
 <summary>📝 最小必要配置</summary>
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -195,6 +196,129 @@ def test_main_dispatches_validate_command(monkeypatch: pytest.MonkeyPatch) -> No
     parsed = captured["args"]
     assert parsed.config == "cfg.yaml"
     assert parsed.no_check_paths is True
+
+
+def test_main_dispatches_chat_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_cmd_chat(args):
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(rc_cli, "cmd_chat", fake_cmd_chat)
+    code = rc_cli.main(
+        [
+            "chat",
+            "--config",
+            "cfg.yaml",
+            "--check",
+            "--message",
+            "hello",
+            "--system",
+            "you are concise",
+            "--max-turns",
+            "3",
+            "--json",
+        ]
+    )
+    assert code == 0
+    parsed = captured["args"]
+    assert parsed.config == "cfg.yaml"
+    assert parsed.check is True
+    assert parsed.message == "hello"
+    assert parsed.system == "you are concise"
+    assert parsed.max_turns == 3
+    assert parsed.json is True
+
+
+def test_cmd_chat_check_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_valid_config(config_path)
+
+    class _FakeClient:
+        def preflight(self) -> tuple[bool, str]:
+            return True, "OK - test"
+
+    import researchclaw.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "create_llm_client", lambda cfg: _FakeClient())
+
+    args = argparse.Namespace(
+        config=str(config_path),
+        check=True,
+        message=None,
+        system=None,
+        max_turns=0,
+    )
+    code = rc_cli.cmd_chat(args)
+    assert code == 0
+    assert "API check passed" in capsys.readouterr().out
+
+
+def test_cmd_chat_check_json_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_valid_config(config_path)
+
+    class _FakeClient:
+        def preflight(self) -> tuple[bool, str]:
+            return True, "OK - test"
+
+    import researchclaw.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "create_llm_client", lambda cfg: _FakeClient())
+
+    args = argparse.Namespace(
+        config=str(config_path),
+        check=True,
+        message=None,
+        system=None,
+        max_turns=0,
+        json=True,
+    )
+    code = rc_cli.cmd_chat(args)
+    assert code == 0
+    out = capsys.readouterr().out.strip()
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["mode"] == "check"
+    assert "message" in payload
+
+
+def test_cmd_chat_one_shot_prints_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_valid_config(config_path)
+
+    class _FakeResp:
+        content = "pong"
+
+    class _FakeClient:
+        def preflight(self) -> tuple[bool, str]:
+            return True, "OK"
+
+        def chat(self, messages, **kwargs):  # noqa: ANN001
+            return _FakeResp()
+
+    import researchclaw.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "create_llm_client", lambda cfg: _FakeClient())
+
+    args = argparse.Namespace(
+        config=str(config_path),
+        check=False,
+        message="ping",
+        system=None,
+        max_turns=0,
+        json=False,
+    )
+    code = rc_cli.cmd_chat(args)
+    assert code == 0
+    assert "pong" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

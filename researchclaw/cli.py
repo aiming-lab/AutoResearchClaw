@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -777,6 +778,119 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chat(args: argparse.Namespace) -> int:
+    """LLM/API chat utility for connectivity checks and quick dialogues."""
+    resolved = _resolve_config_or_exit(args)
+    if resolved is None:
+        return 1
+
+    config = RCConfig.load(resolved, check_paths=False)
+    check_only = cast(bool, args.check)
+    one_shot_message = cast(str | None, args.message)
+    system_prompt = cast(str | None, args.system)
+    max_turns = int(cast(int, args.max_turns))
+    json_output = cast(bool, getattr(args, "json", False))
+
+    from researchclaw.llm import create_llm_client
+
+    client = create_llm_client(config)
+
+    if check_only:
+        ok, msg = client.preflight()
+        payload = {
+            "ok": ok,
+            "mode": "check",
+            "message": msg,
+            "provider": config.llm.provider,
+            "model": config.llm.primary_model,
+        }
+        if json_output:
+            print(json.dumps(payload, ensure_ascii=False))
+            return 0 if ok else 1
+        if ok:
+            print(f"API check passed: {msg}")
+            return 0
+        print(f"API check failed: {msg}", file=sys.stderr)
+        return 1
+
+    if one_shot_message:
+        try:
+            resp = client.chat(
+                [{"role": "user", "content": one_shot_message}],
+                system=system_prompt,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if json_output:
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "mode": "oneshot",
+                            "error": str(exc),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                return 1
+            print(f"Chat request failed: {exc}", file=sys.stderr)
+            return 1
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "mode": "oneshot",
+                        "response": resp.content,
+                        "model": resp.model,
+                        "prompt_tokens": resp.prompt_tokens,
+                        "completion_tokens": resp.completion_tokens,
+                        "total_tokens": resp.total_tokens,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        print(resp.content)
+        return 0
+
+    if json_output:
+        print(
+            "Error: --json is supported with --check or --message only.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("ResearchClaw chat mode (type /exit to quit)")
+    print("Tip: use --check for API connectivity only.\n")
+
+    history: list[dict[str, str]] = []
+    turns = 0
+    while True:
+        if max_turns > 0 and turns >= max_turns:
+            print("\nReached max turns, exiting.")
+            return 0
+        try:
+            user_input = input("you> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+
+        if not user_input:
+            continue
+        if user_input.lower() in ("/exit", "/quit", "/q"):
+            return 0
+
+        history.append({"role": "user", "content": user_input})
+        try:
+            resp = client.chat(history, system=system_prompt)
+        except Exception as exc:  # noqa: BLE001
+            print(f"assistant> [error] {exc}", file=sys.stderr)
+            continue
+        history.append({"role": "assistant", "content": resp.content})
+        print(f"assistant> {resp.content}\n")
+        turns += 1
+
+
 # ── Research Enhancement commands (Agent D) ───────────────────────
 
 
@@ -1031,6 +1145,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     _ = rpt_p.add_argument("--output", "-o", help="Write report to file")
 
+    chat_p = sub.add_parser("chat", help="Test LLM API connectivity and chat")
+    _ = chat_p.add_argument(
+        "--config", "-c", default=None,
+        help="Config file (default: auto-detect config.arc.yaml or config.yaml)",
+    )
+    _ = chat_p.add_argument(
+        "--check", action="store_true",
+        help="Run API preflight connectivity check only",
+    )
+    _ = chat_p.add_argument(
+        "--message", "-m", default=None,
+        help="Send one message and print the response",
+    )
+    _ = chat_p.add_argument(
+        "--system", default=None,
+        help="Optional system prompt for one-shot/interactive chat",
+    )
+    _ = chat_p.add_argument(
+        "--max-turns", type=int, default=0,
+        help="Interactive mode: stop after N turns (0 = unlimited)",
+    )
+    _ = chat_p.add_argument(
+        "--json", action="store_true",
+        help="Output structured JSON (supported with --check or --message)",
+    )
+
     # A: Web platform
     srv_p = sub.add_parser("serve", help="Start the web server")
     _ = srv_p.add_argument("--config", "-c", default="config.yaml", help="Config file path")
@@ -1140,6 +1280,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_setup(args)
     elif command == "report":
         return cmd_report(args)
+    elif command == "chat":
+        return cmd_chat(args)
     elif command == "serve":
         return cmd_serve(args)
     elif command == "dashboard":

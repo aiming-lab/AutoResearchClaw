@@ -138,6 +138,27 @@ researchclaw run --config config.arc.yaml --topic "Your research idea" --auto-ap
 
 Output → `artifacts/rc-YYYYMMDD-HHMMSS-<hash>/deliverables/` — compile-ready LaTeX, BibTeX, experiment code, charts.
 
+### Quick API Chat Check
+
+Use the built-in CLI chat utility to verify your LLM endpoint before running the full pipeline:
+
+```bash
+# Connectivity check (human-readable)
+researchclaw chat --config config.arc.yaml --check
+
+# Connectivity check (JSON for scripts/CI)
+researchclaw chat --config config.arc.yaml --check --json
+
+# One-shot chat test
+researchclaw chat --config config.arc.yaml -m "Hello, please reply with pong."
+
+# One-shot chat test (JSON output)
+researchclaw chat --config config.arc.yaml -m "Hello, please reply with pong." --json
+
+# Interactive chat mode (type /exit to quit)
+researchclaw chat --config config.arc.yaml
+```
+
 <details>
 <summary>📝 Minimum required config</summary>
 
