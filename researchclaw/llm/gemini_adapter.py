@@ -122,7 +122,11 @@ class GeminiAdapter:
         else:
             first_candidate = candidates[0]
             parts = first_candidate.get("content", {}).get("parts", [])
-            content = parts[0].get("text", "") if parts else ""
+            content = "".join(
+                part.get("text", "")
+                for part in parts
+                if isinstance(part, dict) and "text" in part
+            )
 
             gemini_finish = first_candidate.get("finishReason", "STOP")
             if gemini_finish == "MAX_TOKENS":
