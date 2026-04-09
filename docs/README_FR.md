@@ -756,6 +756,24 @@ Inspire par :
 
 ---
 
+## ⚖️ Éthique et utilisation responsable
+
+AutoResearchClaw est un outil d'aide à la recherche, pas un substitut aux chercheurs humains. Nous demandons à tous les utilisateurs de respecter les principes suivants :
+
+**Intégrité académique.** Les articles générés par AutoResearchClaw doivent être traités comme des brouillons nécessitant une révision, une vérification et une modification humaines approfondies avant soumission. Les auteurs figurant sur un article assument l'entière responsabilité de son contenu, de ses affirmations et de son exactitude. L'utilisation de texte généré par IA sans supervision humaine adéquate ni divulgation peut enfreindre les politiques d'intégrité académique de votre institution ou de la conférence visée.
+
+**Transparence et divulgation.** Nous recommandons vivement de divulguer l'utilisation d'AutoResearchClaw (ou de toute assistance IA) dans les manuscrits, conformément aux politiques de la conférence visée (par exemple, NeurIPS, ICML, ICLR et d'autres grandes conférences exigent désormais la divulgation de l'aide à la rédaction par IA). Le Co-Pilot humain-dans-la-boucle existe précisément pour maintenir un contrôle humain significatif sur les décisions de recherche.
+
+**Citations et attribution.** AutoResearchClaw vérifie les citations via un pipeline à 4 couches, mais aucun système automatisé n'est parfait. Les utilisateurs doivent vérifier manuellement avant soumission que toutes les citations sont réelles, pertinentes et correctement référencées. Les citations fabriquées ou mal attribuées sapent la confiance scientifique.
+
+**Risque d'abus.** Comme tout outil puissant, AutoResearchClaw peut être détourné pour produire en masse des recherches de faible qualité ou trompeuses. Nous ne soutenons pas l'utilisation de ce système pour générer des usines à articles, des soumissions frauduleuses ou du contenu destiné à manipuler l'évaluation par les pairs. En cas d'abus systématique, nous nous réservons le droit de mettre à jour la licence ou les conditions d'utilisation.
+
+**Double usage.** Les systèmes de recherche autonomes soulèvent des questions plus larges sur l'avenir du travail scientifique, les normes d'attribution d'auteur et les processus d'évaluation. Nous encourageons les discussions communautaires sur ces sujets et nous engageons à développer cette technologie de manière responsable.
+
+En utilisant AutoResearchClaw, vous acceptez de l'utiliser d'une manière conforme à ces principes ainsi qu'aux directives éthiques de votre institution et de votre communauté de recherche.
+
+---
+
 ## 📄 Licence
 
 MIT — voir [LICENSE](../LICENSE) pour les details.

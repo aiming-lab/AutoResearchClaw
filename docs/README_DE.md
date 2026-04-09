@@ -756,6 +756,24 @@ Inspiriert von:
 
 ---
 
+## ⚖️ Ethik und verantwortungsvolle Nutzung
+
+AutoResearchClaw ist ein Forschungshilfswerkzeug, kein Ersatz für menschliche Forscher. Wir bitten alle Nutzer, die folgenden Grundsätze einzuhalten:
+
+**Akademische Integrität.** Von AutoResearchClaw generierte Arbeiten sollten als Entwürfe behandelt werden, die vor der Einreichung einer gründlichen menschlichen Überprüfung, Verifizierung und Überarbeitung bedürfen. Die auf einer Arbeit aufgeführten Autoren tragen die volle Verantwortung für deren Inhalt, Aussagen und Korrektheit. Die Verwendung von KI-generiertem Text ohne angemessene menschliche Aufsicht oder Offenlegung kann gegen die akademischen Integritätsrichtlinien Ihrer Institution oder der Zielkonferenz verstoßen.
+
+**Transparenz und Offenlegung.** Wir empfehlen dringend, die Nutzung von AutoResearchClaw (oder jeder KI-Unterstützung) in Manuskripten offenzulegen, gemäß den Richtlinien der Zielkonferenz (z. B. verlangen NeurIPS, ICML, ICLR und andere große Konferenzen jetzt die Offenlegung von KI-Schreibhilfe). Der Human-in-the-Loop Co-Pilot existiert gerade deshalb, um eine sinnvolle menschliche Kontrolle über Forschungsentscheidungen aufrechtzuerhalten.
+
+**Zitation und Zuordnung.** AutoResearchClaw verifiziert Zitate über eine 4-Schichten-Pipeline, aber kein automatisiertes System ist perfekt. Nutzer müssen vor der Einreichung manuell überprüfen, dass alle Zitate echt, relevant und korrekt referenziert sind. Gefälschte oder falsch zugeordnete Zitate untergraben das wissenschaftliche Vertrauen.
+
+**Missbrauchsrisiko.** Wie jedes leistungsstarke Werkzeug kann AutoResearchClaw missbraucht werden, um minderwertige oder irreführende Forschung in großem Maßstab zu produzieren. Wir unterstützen nicht die Verwendung dieses Systems zur Erzeugung von Papierfabriken, betrügerischen Einreichungen oder Inhalten, die darauf abzielen, das Peer-Review-Verfahren zu manipulieren. Bei systematischem Missbrauch behalten wir uns das Recht vor, die Lizenz oder Nutzungsbedingungen zu aktualisieren.
+
+**Doppelter Verwendungszweck.** Autonome Forschungssysteme werfen breitere Fragen über die Zukunft der wissenschaftlichen Arbeit, Autorenschaftsnormen und Begutachtungsprozesse auf. Wir begrüßen Diskussionen der Gemeinschaft zu diesen Themen und setzen uns für eine verantwortungsvolle Entwicklung dieser Technologie ein.
+
+Durch die Nutzung von AutoResearchClaw stimmen Sie zu, es in einer Weise zu verwenden, die mit diesen Grundsätzen sowie den ethischen Richtlinien Ihrer Institution und Forschungsgemeinschaft vereinbar ist.
+
+---
+
 ## 📄 Lizenz
 
 MIT — siehe [LICENSE](../LICENSE) fuer Details.
