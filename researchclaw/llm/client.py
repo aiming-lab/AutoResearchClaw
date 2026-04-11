@@ -349,7 +349,7 @@ class LLMClient:
                         delay,
                     )
                     time.sleep(delay)
-                    last_err = f"HTTP {e.code}: {msg}"
+                    last_err = f"HTTP {e.code}: {body}"
                     continue
 
                 raise  # Other HTTP errors
@@ -375,9 +375,9 @@ class LLMClient:
                         type(exc).__name__,
                         delay,
                     )
+                    last_err = f"Timeout/OSError: {exc}"
                     time.sleep(delay)
                     continue
-                    last_err = f"Timeout/OSError: {exc}"
                 raise
 
         # All retries exhausted
