@@ -298,6 +298,7 @@ class LLMClient:
         json_mode: bool,
     ) -> LLMResponse:
         """Call with exponential backoff retry."""
+        last_err = "unknown"
         for attempt in range(self.config.max_retries):
             try:
                 return self._raw_call(
@@ -354,12 +355,14 @@ class LLMClient:
                         status,
                         delay,
                     )
+                    last_err = f"HTTP {e.code}: {body[:200]}"
                     time.sleep(delay)
                     continue
 
                 raise  # Other HTTP errors
-            except urllib.error.URLError:
+            except urllib.error.URLError as e:
                 if attempt < self.config.max_retries - 1:
+                    last_err = f"URLError: {e}"
                     delay = min(
                         self.config.retry_base_delay * (2**attempt),
                         _MAX_BACKOFF_SEC,
@@ -370,6 +373,7 @@ class LLMClient:
             except (TimeoutError, OSError) as exc:
                 # Covers TimeoutError, ConnectionResetError, IncompleteRead, etc.
                 if attempt < self.config.max_retries - 1:
+                    last_err = f"Timeout/OSError: {exc}"
                     delay = self.config.retry_base_delay * (2**attempt)
                     logger.info(
                         "Retry %d/%d for %s (%s). Waiting %.1fs.",
@@ -385,7 +389,7 @@ class LLMClient:
 
         # All retries exhausted
         raise RuntimeError(
-            f"LLM call failed after {self.config.max_retries} retries for model {model}"
+            f"LLM call failed after {self.config.max_retries} retries for model {model}. Last error: {last_err}"
         )
 
     def _raw_call(
