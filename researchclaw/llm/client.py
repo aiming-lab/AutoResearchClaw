@@ -6,7 +6,7 @@ Features:
   - Cloudflare User-Agent bypass
   - Exponential backoff retry with jitter
   - JSON mode support
-  - Streaming disabled (sync only)
+  - SSE streaming support to avoid proxy timeouts
 """
 
 from __future__ import annotations
@@ -88,6 +88,7 @@ class LLMConfig:
     # MetaClaw bridge: fallback URL if primary (proxy) is unreachable
     fallback_url: str = ""
     fallback_api_key: str = ""
+    stream: bool = True  # Use SSE streaming to avoid proxy timeouts
 
 
 class LLMClient:
@@ -388,6 +389,59 @@ class LLMClient:
             f"LLM call failed after {self.config.max_retries} retries for model {model}"
         )
 
+    def _read_stream(
+        self,
+        resp: Any,
+        model: str,
+    ) -> LLMResponse:
+        """Read an SSE stream and assemble an LLMResponse."""
+        content_chunks: list[str] = []
+        finish_reason = ""
+        usage: dict[str, int] = {}
+        resp_model = model
+
+        for raw_line in resp:
+            # SSE lines are bytes
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\n\r")
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload.strip() == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+
+            # Extract model name from first chunk
+            if "model" in chunk:
+                resp_model = chunk["model"]
+
+            # Accumulate content deltas
+            choices = chunk.get("choices") or []
+            for choice in choices:
+                delta = choice.get("delta") or {}
+                if "content" in delta and delta["content"]:
+                    content_chunks.append(delta["content"])
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+
+            # Some providers send usage in the final chunk
+            if "usage" in chunk and chunk["usage"]:
+                usage = chunk["usage"]
+
+        content = "".join(content_chunks)
+        return LLMResponse(
+            content=content,
+            model=resp_model,
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            finish_reason=finish_reason,
+            truncated=(finish_reason == "length"),
+            raw={},
+        )
+
     def _raw_call(
         self,
         model: str,
@@ -472,6 +526,16 @@ class LLMClient:
                 else:
                     body["response_format"] = {"type": "json_object"}
 
+            # Enable streaming to avoid proxy timeouts on long generations
+            _use_stream = (
+                self.config.stream
+                and self._normalize_wire_api(self.config.wire_api) != "responses"
+            )
+            if _use_stream:
+                body["stream"] = True
+                # Request usage stats in the final streamed chunk
+                body["stream_options"] = {"include_usage": True}
+
             payload = json.dumps(body).encode("utf-8")
             url = self._endpoint_url(self.config.base_url)
 
@@ -489,7 +553,11 @@ class LLMClient:
                 with urllib.request.urlopen(
                     req, timeout=self.config.timeout_sec
                 ) as resp:
-                    data = json.loads(resp.read())
+                    if _use_stream:
+                        data = None
+                        stream_result = self._read_stream(resp, model)
+                    else:
+                        data = json.loads(resp.read())
             except (urllib.error.URLError, OSError) as exc:
                 # MetaClaw bridge: fallback to direct LLM if proxy unreachable
                 if self.config.fallback_url:
@@ -511,9 +579,17 @@ class LLMClient:
                     with urllib.request.urlopen(
                         fallback_req, timeout=self.config.timeout_sec
                     ) as resp:
-                        data = json.loads(resp.read())
+                        if _use_stream:
+                            data = None
+                            stream_result = self._read_stream(resp, model)
+                        else:
+                            data = json.loads(resp.read())
                 else:
                     raise
+
+            # If we used streaming, return the assembled result directly
+            if _use_stream:
+                return stream_result
 
         if not isinstance(data, dict):
             raise ValueError(
