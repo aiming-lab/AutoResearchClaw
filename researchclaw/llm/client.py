@@ -159,6 +159,8 @@ class LLMClient:
             wire_api=getattr(rc_config.llm, "wire_api", "chat_completions"),
             primary_model=rc_config.llm.primary_model or "gpt-4o",
             fallback_models=list(rc_config.llm.fallback_models or []),
+            max_retries=getattr(rc_config.llm, "max_retries", 3),
+            timeout_sec=getattr(rc_config.llm, "timeout_sec", 300),
             fallback_url=fallback_url,
             fallback_api_key=fallback_api_key,
         )
@@ -289,6 +291,7 @@ class LLMClient:
         json_mode: bool,
     ) -> LLMResponse:
         """Call with exponential backoff retry."""
+        last_err = "unknown"
         for attempt in range(self.config.max_retries):
             try:
                 return self._raw_call(
@@ -346,11 +349,13 @@ class LLMClient:
                         delay,
                     )
                     time.sleep(delay)
+                    last_err = f"HTTP {e.code}: {msg}"
                     continue
 
                 raise  # Other HTTP errors
-            except urllib.error.URLError:
+            except urllib.error.URLError as e:
                 if attempt < self.config.max_retries - 1:
+                    last_err = f"URLError: {e}"
                     delay = min(
                         self.config.retry_base_delay * (2**attempt),
                         _MAX_BACKOFF_SEC,
@@ -372,11 +377,12 @@ class LLMClient:
                     )
                     time.sleep(delay)
                     continue
+                    last_err = f"Timeout/OSError: {exc}"
                 raise
 
         # All retries exhausted
         raise RuntimeError(
-            f"LLM call failed after {self.config.max_retries} retries for model {model}"
+            f"LLM call failed after {self.config.max_retries} retries for model {model}. Last error: {last_err}"
         )
 
     def _raw_call(
@@ -460,6 +466,7 @@ class LLMClient:
 
             payload = json.dumps(body).encode("utf-8")
             url = self._endpoint_url(self.config.base_url)
+            print(f"[DEBUG] LLM call to {url} model={model} max_tokens={max_tokens}")
 
             headers = {
                 "Authorization": f"Bearer {self.config.api_key}",
