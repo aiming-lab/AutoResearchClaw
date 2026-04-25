@@ -11,6 +11,8 @@ dependencies = [
 ]
 readme = "README.md"
 license = {text = "MIT"}
+homepage = "https://github.com/aiming-lab/AutoResearchClaw"
+repository = "https://github.com/aiming-lab/AutoResearchClaw"
 
 [project.optional-dependencies]
 anthropic = ["httpx>=0.24"]
