@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import shutil
 import time as _time
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from researchclaw.pipeline._helpers import (
     _ensure_sandbox_deps,
     _extract_code_block,
     _extract_multi_file_blocks,
+    _flatten_structured_metrics,
     _get_evolution_overlay,
     _load_hardware_profile,
     _parse_metrics_from_stdout,
@@ -312,7 +314,17 @@ def _execute_experiment_run(
                         pass
             _ensure_sandbox_deps(_all_code, config.experiment.sandbox.python_path)
 
-        sandbox = create_sandbox(config.experiment, runs_dir / "sandbox")
+        # Clear the sandbox dir before run so stale results.json from a prior
+        # failed run can't contaminate the discovery glob below. Fail loudly
+        # on cleanup failure — silently ignoring would let the mtime anchor
+        # be old enough to admit stale files.
+        _sandbox_dir = runs_dir / "sandbox"
+        if _sandbox_dir.exists():
+            shutil.rmtree(_sandbox_dir)
+        _sandbox_dir.mkdir(parents=True)
+        _run_anchor_mtime = _sandbox_dir.stat().st_mtime
+
+        sandbox = create_sandbox(config.experiment, _sandbox_dir)
         # Use run_project for multi-file, run for single-file
         if exp_dir_path and Path(exp_dir_path).is_dir():
             result = sandbox.run_project(
@@ -322,11 +334,24 @@ def _execute_experiment_run(
             result = sandbox.run(
                 code_text, timeout_sec=config.experiment.time_budget_sec
             )
-        # Try to read structured results.json from sandbox working dir
+        # The sandbox subprocess writes to _project, _project_1, _project_2, …
+        # (an auto-suffixed working dir per run). Generated experiment code
+        # commonly writes results.json at either the project root (`_project/`)
+        # or under a results subdir (`_project/results/`). Check both; only
+        # accept candidates written after the current run started.
         structured_results: dict[str, Any] | None = None
-        sandbox_project = runs_dir / "sandbox" / "_project"
-        results_json_path = sandbox_project / "results.json"
-        if results_json_path.exists():
+        _candidates: list[Path] = []
+        for _proj in _sandbox_dir.glob("_project*"):
+            for _rel in ("results.json", "results/results.json"):
+                _rj = _proj / _rel
+                if _rj.is_file() and _rj.stat().st_mtime >= _run_anchor_mtime:
+                    _candidates.append(_rj)
+        results_json_path = (
+            max(_candidates, key=lambda p: p.stat().st_mtime)
+            if _candidates
+            else None
+        )
+        if results_json_path is not None:
             try:
                 structured_results = json.loads(
                     results_json_path.read_text(encoding="utf-8")
@@ -390,6 +415,14 @@ def _execute_experiment_run(
         }
         if structured_results is not None:
             run_payload["structured_results"] = structured_results
+            # Promote flattened per-condition metrics into the canonical metrics
+            # dict so downstream stages see them by default. The experiment's
+            # own results.json is the authoritative source; stdout-parsed
+            # metrics are a fallback only.
+            _sr_flat = _flatten_structured_metrics(structured_results)
+            if _sr_flat:
+                effective_metrics = {**(effective_metrics or {}), **_sr_flat}
+                run_payload["metrics"] = effective_metrics
         # Auto-generate results.json from parsed metrics if sandbox didn't produce one
         if structured_results is None and effective_metrics:
             auto_results = {"source": "stdout_parsed", "metrics": effective_metrics}
