@@ -67,12 +67,14 @@ class ExperimentRepairResult:
     final_assessment: ExperimentQualityAssessment | None = None
     cycle_history: list[RepairCycleResult] = field(default_factory=list)
     best_experiment_summary: dict | None = None
+    skipped_reason: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "success": self.success,
             "total_cycles": self.total_cycles,
             "final_mode": self.final_mode.value,
+            "skipped_reason": self.skipped_reason,
             "cycle_history": [
                 {
                     "cycle": cr.cycle,
@@ -316,6 +318,24 @@ def run_repair_loop(
         return ExperimentRepairResult(
             success=True, total_cycles=0, final_mode=qa.mode,
             final_assessment=qa, best_experiment_summary=summary,
+        )
+
+    # Simulated mode produces deterministic placeholder metrics by design
+    # (see _execute_experiment_run, mode == "simulated" branch). There is no
+    # sandbox-executable experiment to repair against, so calling
+    # create_sandbox() would raise "Unsupported experiment mode" three times
+    # and force a wasted pivot. Skip the loop and let Stage 15 see exactly
+    # what Stage 14 produced.
+    if getattr(config.experiment, "mode", None) == "simulated":
+        logger.info(
+            "[%s] Repair loop skipped: mode='simulated' has no real sandbox "
+            "to repair against.",
+            run_id,
+        )
+        return ExperimentRepairResult(
+            success=False, total_cycles=0, final_mode=qa.mode,
+            final_assessment=qa, best_experiment_summary=summary,
+            skipped_reason="simulated_mode",
         )
 
     # Load experiment code

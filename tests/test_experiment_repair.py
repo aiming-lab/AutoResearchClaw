@@ -434,7 +434,9 @@ class TestRunRepairLoop:
         class FakeConfig:
             class experiment:
                 time_budget_sec = 2400
-                mode = "simulated"
+                # Use "sandbox" so the simulated-mode skip guard does not
+                # short-circuit this regression test of the full repair loop.
+                mode = "sandbox"
                 repair = ExperimentRepairConfig(enabled=True, max_cycles=1, use_opencode=False)
                 opencode = OpenCodeConfig(enabled=False)
                 metric_key = "primary_metric"
@@ -496,6 +498,46 @@ print("condition=Ablation metric=85.0")
         assert repair_dir.exists()
         assert (repair_dir / "experiment" / "main.py").exists()
         assert (repair_dir / "experiment_summary.json").exists()
+
+    def test_simulated_mode_skips_repair(self, tmp_path):
+        """Simulated mode has no sandbox-executable experiment to repair.
+
+        The repair loop must short-circuit BEFORE loading experiment code,
+        creating an LLM client, or attempting to call create_sandbox().
+        Otherwise create_sandbox() raises 'Unsupported experiment mode'
+        three times and forces a wasted pivot back to ITERATIVE_REFINE.
+        """
+        run_dir = self._make_run_dir(tmp_path, n_conditions=1)
+
+        from researchclaw.config import ExperimentRepairConfig
+
+        class FakeConfig:
+            class experiment:
+                time_budget_sec = 2400
+                mode = "simulated"
+                repair = ExperimentRepairConfig(enabled=True, max_cycles=3)
+
+            class llm:
+                pass
+
+        with patch("researchclaw.llm.create_llm_client") as mock_create_llm, \
+             patch("researchclaw.experiment.factory.create_sandbox") as mock_create_sb:
+            result = run_repair_loop(run_dir, FakeConfig(), "test-sim")
+
+        assert result.success is False
+        assert result.total_cycles == 0
+        assert result.skipped_reason == "simulated_mode"
+        assert result.cycle_history == []
+        assert result.final_assessment is not None
+        assert result.best_experiment_summary is not None
+        # Guard must fire before the LLM client and sandbox would be created.
+        mock_create_llm.assert_not_called()
+        mock_create_sb.assert_not_called()
+        # to_dict() must include skipped_reason so the persisted
+        # experiment_repair_result.json can surface the skip.
+        d = result.to_dict()
+        assert d["skipped_reason"] == "simulated_mode"
+        assert d["total_cycles"] == 0
 
 
 # ---------------------------------------------------------------------------
