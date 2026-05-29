@@ -284,6 +284,35 @@ def test_sandbox_config_defaults_match_expected_values():
     assert defaults.gpu_required is False
     assert defaults.max_memory_mb == 4096
     assert "numpy" in defaults.allowed_imports
+    # New field defaults to the production sandbox image path; preserves the
+    # prior hardcoded value that lived only inside the prompt block.
+    assert defaults.dataset_cache_root == "/opt/datasets"
+
+
+def test_sandbox_config_dataset_cache_root_overrides_default(tmp_path: Path):
+    data = _valid_config_data()
+    data["experiment"] = {
+        "mode": "sandbox",
+        "sandbox": {"dataset_cache_root": "/tmp/arc_sandbox_trial/datasets"},
+    }
+
+    config = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+
+    assert (
+        config.experiment.sandbox.dataset_cache_root
+        == "/tmp/arc_sandbox_trial/datasets"
+    )
+
+
+def test_sandbox_config_dataset_cache_root_falls_back_to_default(tmp_path: Path):
+    data = _valid_config_data()
+    # Omit dataset_cache_root entirely — the loader should fall back to the
+    # SandboxConfig default rather than raising or returning None.
+    data["experiment"] = {"mode": "sandbox", "sandbox": {}}
+
+    config = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+
+    assert config.experiment.sandbox.dataset_cache_root == "/opt/datasets"
 
 
 def test_to_dict_roundtrip_rehydrates_equivalent_rcconfig(tmp_path: Path):

@@ -71,6 +71,13 @@ experiment:
     python_path: ".venv/bin/python3"
     gpu_required: false
     max_memory_mb: 4096
+    # Filesystem path under which torchvision dataset raw files are pre-staged.
+    # Generated experiment code is instructed to load datasets from this path
+    # with download=False; sandbox mode runs with network_policy="none" so no
+    # downloads are possible. If a dataset file is missing the experiment is
+    # required to raise FileNotFoundError and exit non-zero rather than fall
+    # back to synthetic data. Default matches the production sandbox image.
+    dataset_cache_root: "/opt/datasets"
   # Docker sandbox settings (only used when mode: "docker")
   # Build image first: docker build -t researchclaw/experiment:latest researchclaw/docker/
   docker:

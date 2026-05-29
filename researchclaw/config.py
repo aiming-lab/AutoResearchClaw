@@ -226,6 +226,12 @@ class SandboxConfig:
         "sklearn",
     )
     max_memory_mb: int = 4096
+    # Filesystem path under which torchvision dataset raw files are pre-staged
+    # for sandbox mode (network_policy="none"). Generated experiment code is
+    # instructed to load datasets with root=<this path>, download=False, and
+    # to raise FileNotFoundError rather than fall back to synthetic data if
+    # the cache is missing. Default matches the production sandbox image.
+    dataset_cache_root: str = "/opt/datasets"
 
 
 @dataclass(frozen=True)
@@ -1251,6 +1257,9 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
                 sandbox_data.get("allowed_imports", SandboxConfig.allowed_imports)
             ),
             max_memory_mb=_safe_int(sandbox_data.get("max_memory_mb"), 4096),
+            dataset_cache_root=sandbox_data.get(
+                "dataset_cache_root", SandboxConfig.dataset_cache_root
+            ),
         ),
         docker=DockerSandboxConfig(
             image=docker_data.get("image", "researchclaw/experiment:latest"),
