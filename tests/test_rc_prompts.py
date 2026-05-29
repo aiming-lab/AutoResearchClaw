@@ -148,6 +148,65 @@ class TestPromptManagerDefaults:
         assert "numpy" in block
         assert "torch" in block  # mentioned as prohibited
 
+    def test_block_network_disabled_guidance_uses_default_root(self) -> None:
+        # When the caller passes the SandboxConfig default the rendered block
+        # still names /opt/datasets, matching the prior hardcoded value.
+        pm = PromptManager()
+        block = pm.block(
+            "network_disabled_guidance", dataset_cache_root="/opt/datasets"
+        )
+        # All six dataset examples should reference the configured root.
+        assert block.count("/opt/datasets") >= 6
+        # Critical invariants preserved.
+        assert "network_policy='none'" in block
+        assert "download=False" in block
+        assert "Do NOT use `download=True`" in block
+        # The unrendered placeholder must not leak through.
+        assert "{dataset_cache_root}" not in block
+
+    def test_block_network_disabled_guidance_uses_custom_root(self) -> None:
+        # A custom dataset cache root flows through every dataset example.
+        pm = PromptManager()
+        block = pm.block(
+            "network_disabled_guidance",
+            dataset_cache_root="/tmp/arc_sandbox_trial/datasets",
+        )
+        assert block.count("/tmp/arc_sandbox_trial/datasets") >= 6
+        # The previous hardcoded path must no longer appear.
+        assert "/opt/datasets" not in block
+        # Invariants still hold.
+        assert "download=False" in block
+        assert "Do NOT use `download=True`" in block
+        assert "{dataset_cache_root}" not in block
+
+    def test_block_network_disabled_guidance_forbids_synthetic_fallback(
+        self,
+    ) -> None:
+        # The fail-loud bullet is an intentional behavior change shipped with
+        # the dataset_cache_root parameterisation: missing pre-cached data must
+        # raise FileNotFoundError rather than silently substituting synthetic
+        # tensors. Lock it in for both default and custom cache roots.
+        pm = PromptManager()
+        for root in ("/opt/datasets", "/tmp/arc_sandbox_trial/datasets"):
+            block = pm.block("network_disabled_guidance", dataset_cache_root=root)
+            lowered = block.lower()
+            assert "fall back to synthetic data" in lowered
+            assert "filenotfounderror" in lowered
+            assert "exit non-zero" in lowered
+
+    def test_block_network_disabled_guidance_requires_dataset_used_stamp(
+        self,
+    ) -> None:
+        # Downstream metric capture relies on a single-line stdout stamp of
+        # the form `DATASET_USED: <name>` as a provenance signal independent
+        # of whatever JSON result schema the generated code chooses.
+        pm = PromptManager()
+        for root in ("/opt/datasets", "/tmp/arc_sandbox_trial/datasets"):
+            block = pm.block("network_disabled_guidance", dataset_cache_root=root)
+            assert "DATASET_USED:" in block
+            assert "dataset provenance stamp" in block.lower()
+            assert "exactly once" in block.lower()
+
     def test_sub_prompt_code_repair(self) -> None:
         pm = PromptManager()
         rp = pm.sub_prompt(

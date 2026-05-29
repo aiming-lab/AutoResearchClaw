@@ -694,17 +694,39 @@ def _parse_metrics_from_stdout(stdout: str) -> dict[str, Any]:
     - ``UCB (Stochastic) cumulative_regret: 361.9233``
     - ``condition=name metric=value`` (per-condition output)
     - ``condition=name/metric_name metric=value``
+    - ``PER_SEED [...] (cond|condition)=NAME seed=N <key>: <value> ...``
+      (multi-metric per-seed lines from structured experiment output)
+    - ``CONDITION_SUMMARY [...] (cond|condition)=NAME <key>: <value> ...``
+    - ``GAP_TO_BN [...] (cond|condition)=NAME <key>: <value> ...``
 
-    Returns a flat dict of metric_name -> value.
+    Returns a flat dict of metric_name -> value. Per-condition / per-seed
+    metrics are namespaced ``"<cond>/<seed>/<key>"`` or ``"<cond>/<key>"``
+    so they cannot collide with bare ``<key>: <value>`` simple-pair output.
+
     Filters out log/status lines using :func:`is_metric_name`.
     """
     # BUG-173: regex for condition=name metric=value format
     _CONDITION_RE = re.compile(
         r"^condition=(\S+)\s+metric=([0-9eE.+-]+)\s*$"
     )
+    # Structured per-condition / per-seed line patterns. The cond=/condition=
+    # alias is needed because the stage-10 prompt names the token "condition="
+    # but real generated code often emits "cond=" (observed in the Phase-2
+    # sandbox readiness trial).
+    _STRUCTURED_PREFIXES = ("PER_SEED", "CONDITION_SUMMARY", "GAP_TO_BN")
+    _COND_KEY_RE = re.compile(r"\b(?:cond|condition)=(\S+)")
+    _SEED_KEY_RE = re.compile(r"\bseed=(\d+)")
+    # Matches "<word>: <number>" with optional sign / decimal / exponent.
+    _METRIC_PAIR_RE = re.compile(
+        r"\b(\w+):\s*([\-+]?\d+(?:\.\d+)?(?:[eE][\-+]?\d+)?)"
+    )
+    # Tokens that are line-tagging metadata, not metric keys, even though they
+    # appear in the same "<word>: <value>" shape.
+    _STRUCTURED_NON_METRIC_KEYS = {"cond", "condition", "seed", "dataset"}
+
     metrics: dict[str, Any] = {}
-    for line in stdout.splitlines():
-        line = line.strip()
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
         # --- Format 2: condition=xxx metric=yyy ---
         m = _CONDITION_RE.match(line)
         if m:
@@ -714,6 +736,23 @@ def _parse_metrics_from_stdout(stdout: str) -> dict[str, Any]:
                 metrics[cond_name] = fval
             except (ValueError, TypeError):
                 pass
+            continue
+        # --- Format 3: structured per-condition lines ---
+        if line.startswith(_STRUCTURED_PREFIXES):
+            cond_match = _COND_KEY_RE.search(line)
+            if cond_match:
+                cond = cond_match.group(1)
+                seed_match = _SEED_KEY_RE.search(line)
+                seed_part = f"/{seed_match.group(1)}" if seed_match else ""
+                for key, val in _METRIC_PAIR_RE.findall(line):
+                    if key in _STRUCTURED_NON_METRIC_KEYS:
+                        continue
+                    try:
+                        metrics[f"{cond}{seed_part}/{key}"] = float(val)
+                    except (ValueError, TypeError):
+                        pass
+            # Structured lines are NOT also processed as simple <key>: <value>
+            # to avoid the leading prefix word being consumed as a metric name.
             continue
         # --- Format 1: name: value ---
         if ":" not in line:
@@ -734,6 +773,71 @@ def _parse_metrics_from_stdout(stdout: str) -> dict[str, Any]:
         except (ValueError, TypeError):
             pass
     return metrics
+
+
+def _flatten_structured_metrics(sr: Any) -> dict[str, float]:
+    """Flatten a sandbox-written ``results.json`` into a metric dict.
+
+    Handles four observed schemas:
+
+    1. ``{"metrics": {<key>: <number>}}`` — the auto-fallback shape.
+    2. ``{"conditions": [{"name": ..., "metrics": {...}}]}`` — list shape.
+    3. ``{"conditions": {<name>: {"metrics": {...}}}}`` — dict shape.
+    4. ``{"per_condition": ...}`` / ``{"condition_summaries": ...}`` — synonyms.
+
+    Per-condition keys are namespaced ``"<cond_name>/<metric_key>"``. Inside
+    each condition's ``metrics`` dict, one-level-shallow recursion picks up
+    nested stat blocks like ``{"accuracy": {"mean": 0.92, "std": 0.01}}`` —
+    those become ``"<cond>/accuracy_mean"``, ``"<cond>/accuracy_std"``.
+    Deeper nesting is intentionally ignored to keep the helper predictable.
+
+    Non-numeric values are silently dropped.
+    """
+    out: dict[str, float] = {}
+    if not isinstance(sr, dict):
+        return out
+
+    def _scrape_metrics_dict(d: dict, prefix: str) -> None:
+        """Append numeric leaves from a metric-dict to ``out`` with ``prefix/``."""
+        for key, val in d.items():
+            full = f"{prefix}/{key}" if prefix else str(key)
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                out[full] = float(val)
+            elif isinstance(val, dict):
+                # One-level-shallow recursion: ``accuracy: {mean: 0.92, std: 0.01}``
+                # → ``<prefix>/accuracy_mean``, ``<prefix>/accuracy_std``.
+                for sub_key, sub_val in val.items():
+                    if isinstance(sub_val, (int, float)) and not isinstance(sub_val, bool):
+                        out[f"{full}_{sub_key}"] = float(sub_val)
+
+    # Shape 1: top-level metrics dict
+    top_metrics = sr.get("metrics")
+    if isinstance(top_metrics, dict):
+        _scrape_metrics_dict(top_metrics, prefix="")
+
+    # Shapes 2-4: per-condition container under one of several aliases.
+    container = (
+        sr.get("conditions")
+        or sr.get("per_condition")
+        or sr.get("condition_summaries")
+    )
+    items: list[tuple[str, dict]] = []
+    if isinstance(container, dict):
+        items = [(str(k), v) for k, v in container.items() if isinstance(v, dict)]
+    elif isinstance(container, list):
+        for entry in container:
+            if isinstance(entry, dict):
+                name = str(entry.get("name") or entry.get("id") or "unknown")
+                items.append((name, entry))
+
+    for cond_name, cond_data in items:
+        # Prefer an explicit ``metrics`` sub-dict; fall back to the whole entry.
+        cond_metrics = cond_data.get("metrics")
+        if not isinstance(cond_metrics, dict):
+            cond_metrics = cond_data
+        _scrape_metrics_dict(cond_metrics, prefix=cond_name)
+
+    return out
 
 
 # ---------------------------------------------------------------------------

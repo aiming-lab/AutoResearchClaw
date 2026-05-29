@@ -1613,6 +1613,421 @@ class TestParseMetricsFromStdout:
         metrics = _parse_metrics_from_stdout(stdout)
         assert len(metrics) == 0
 
+    def test_parses_per_seed_with_cond_alias(self) -> None:
+        from researchclaw.pipeline.executor import _parse_metrics_from_stdout
+
+        stdout = (
+            "PER_SEED dataset=mnist cond=baseline_bn_mlp seed=0 "
+            "test_accuracy: 0.92 step_time_ms: 1.7"
+        )
+        metrics = _parse_metrics_from_stdout(stdout)
+        assert metrics["baseline_bn_mlp/0/test_accuracy"] == pytest.approx(0.92)
+        assert metrics["baseline_bn_mlp/0/step_time_ms"] == pytest.approx(1.7)
+        # Metadata tokens must NOT be captured as metrics.
+        assert "cond" not in metrics
+        assert "seed" not in metrics
+        assert "dataset" not in metrics
+
+    def test_parses_per_seed_with_condition_alias(self) -> None:
+        from researchclaw.pipeline.executor import _parse_metrics_from_stdout
+
+        stdout = (
+            "PER_SEED dataset=mnist condition=baseline_bn_mlp seed=1 "
+            "test_accuracy: 0.91"
+        )
+        metrics = _parse_metrics_from_stdout(stdout)
+        assert metrics["baseline_bn_mlp/1/test_accuracy"] == pytest.approx(0.91)
+
+    def test_parses_condition_summary(self) -> None:
+        from researchclaw.pipeline.executor import _parse_metrics_from_stdout
+
+        stdout = (
+            "CONDITION_SUMMARY dataset=mnist condition=bn_mlp "
+            "accuracy_mean: 0.92 accuracy_std: 0.005 success_rate: 1.0"
+        )
+        metrics = _parse_metrics_from_stdout(stdout)
+        assert metrics["bn_mlp/accuracy_mean"] == pytest.approx(0.92)
+        assert metrics["bn_mlp/accuracy_std"] == pytest.approx(0.005)
+        assert metrics["bn_mlp/success_rate"] == pytest.approx(1.0)
+
+    def test_parses_gap_to_bn_signed(self) -> None:
+        from researchclaw.pipeline.executor import _parse_metrics_from_stdout
+
+        stdout = (
+            "GAP_TO_BN dataset=mnist cond=rmsnorm_mlp "
+            "accuracy_gap_to_bn_baseline_mean: -0.01"
+        )
+        metrics = _parse_metrics_from_stdout(stdout)
+        assert metrics["rmsnorm_mlp/accuracy_gap_to_bn_baseline_mean"] == pytest.approx(-0.01)
+
+    def test_structured_line_without_cond_is_skipped(self) -> None:
+        from researchclaw.pipeline.executor import _parse_metrics_from_stdout
+
+        stdout = "PER_SEED seed=0 test_accuracy: 0.92"
+        metrics = _parse_metrics_from_stdout(stdout)
+        # No cond= or condition= token → row produces no metrics, no crash.
+        assert metrics == {}
+
+    def test_simple_pair_still_works_alongside_structured(self) -> None:
+        """Regression: bare ``key: value`` still parses even when the same
+        stdout also has structured PER_SEED lines."""
+        from researchclaw.pipeline.executor import _parse_metrics_from_stdout
+
+        stdout = (
+            "ANNEAL_STEP_THRESHOLD: 163\n"
+            "PER_SEED cond=bn_mlp seed=0 test_accuracy: 0.92"
+        )
+        metrics = _parse_metrics_from_stdout(stdout)
+        assert metrics["ANNEAL_STEP_THRESHOLD"] == pytest.approx(163.0)
+        assert metrics["bn_mlp/0/test_accuracy"] == pytest.approx(0.92)
+
+
+class TestFlattenStructuredMetrics:
+    """Tests for _flatten_structured_metrics() helper."""
+
+    def test_top_level_metrics_dict(self) -> None:
+        from researchclaw.pipeline._helpers import _flatten_structured_metrics
+
+        sr = {"metrics": {"acc": 0.92, "loss": 0.03}}
+        flat = _flatten_structured_metrics(sr)
+        assert flat == {"acc": 0.92, "loss": 0.03}
+
+    def test_conditions_dict_with_metrics_subkey(self) -> None:
+        """Schema 3: ``{"conditions": {<name>: {"metrics": {...}}}}``."""
+        from researchclaw.pipeline._helpers import _flatten_structured_metrics
+
+        sr = {
+            "conditions": {
+                "baseline_bn_mlp": {"metrics": {"accuracy": 0.92, "step_time_ms": 1.7}},
+                "baseline_rmsnorm_mlp": {"metrics": {"accuracy": 0.91}},
+            }
+        }
+        flat = _flatten_structured_metrics(sr)
+        assert flat["baseline_bn_mlp/accuracy"] == 0.92
+        assert flat["baseline_bn_mlp/step_time_ms"] == 1.7
+        assert flat["baseline_rmsnorm_mlp/accuracy"] == 0.91
+
+    def test_conditions_list_with_name(self) -> None:
+        """Schema 2: ``{"conditions": [{"name": ..., "metrics": {...}}]}``."""
+        from researchclaw.pipeline._helpers import _flatten_structured_metrics
+
+        sr = {
+            "conditions": [
+                {"name": "bn", "metrics": {"acc": 0.92}},
+                {"name": "rmsnorm", "metrics": {"acc": 0.91}},
+            ]
+        }
+        flat = _flatten_structured_metrics(sr)
+        assert flat == {"bn/acc": 0.92, "rmsnorm/acc": 0.91}
+
+    def test_condition_summaries_synonym(self) -> None:
+        """Schema 4: ``condition_summaries`` alias for ``conditions``."""
+        from researchclaw.pipeline._helpers import _flatten_structured_metrics
+
+        sr = {
+            "condition_summaries": {
+                "bn": {"metrics": {"acc": 0.92}},
+            }
+        }
+        flat = _flatten_structured_metrics(sr)
+        assert flat == {"bn/acc": 0.92}
+
+    def test_nested_stat_block_one_level_recursion(self) -> None:
+        """Shallow recursion: ``accuracy: {mean: 0.92, std: 0.01}`` becomes
+        ``<cond>/accuracy_mean`` and ``<cond>/accuracy_std``."""
+        from researchclaw.pipeline._helpers import _flatten_structured_metrics
+
+        sr = {
+            "conditions": {
+                "bn": {
+                    "metrics": {
+                        "accuracy": {"mean": 0.92, "std": 0.01},
+                        "loss": 0.03,
+                    }
+                }
+            }
+        }
+        flat = _flatten_structured_metrics(sr)
+        assert flat["bn/accuracy_mean"] == 0.92
+        assert flat["bn/accuracy_std"] == 0.01
+        assert flat["bn/loss"] == 0.03
+
+    def test_non_numeric_values_silently_dropped(self) -> None:
+        from researchclaw.pipeline._helpers import _flatten_structured_metrics
+
+        sr = {
+            "conditions": {
+                "bn": {
+                    "metrics": {
+                        "acc": 0.92,
+                        "device": "mps",  # string — dropped
+                        "converged": True,  # bool — dropped (bool is int subclass)
+                        "history": [0.1, 0.2],  # list — dropped
+                    }
+                }
+            }
+        }
+        flat = _flatten_structured_metrics(sr)
+        assert flat == {"bn/acc": 0.92}
+
+    def test_falls_back_to_whole_entry_when_no_metrics_subkey(self) -> None:
+        """If a condition entry has no ``metrics`` sub-dict, treat the whole
+        entry as the metric dict (drops non-numeric fields automatically)."""
+        from researchclaw.pipeline._helpers import _flatten_structured_metrics
+
+        sr = {
+            "conditions": {
+                "bn": {"acc": 0.92, "name": "bn"},  # no nested "metrics" key
+            }
+        }
+        flat = _flatten_structured_metrics(sr)
+        assert flat["bn/acc"] == 0.92
+        assert "bn/name" not in flat  # non-numeric, dropped
+
+    def test_non_dict_input_returns_empty(self) -> None:
+        from researchclaw.pipeline._helpers import _flatten_structured_metrics
+
+        assert _flatten_structured_metrics(None) == {}
+        assert _flatten_structured_metrics([1, 2, 3]) == {}
+        assert _flatten_structured_metrics("not-a-dict") == {}
+
+    def test_empty_dict_returns_empty(self) -> None:
+        from researchclaw.pipeline._helpers import _flatten_structured_metrics
+
+        assert _flatten_structured_metrics({}) == {}
+
+
+class TestSandboxResultsDiscovery:
+    """Tests for Patch A: sandbox cleanup + _project*/results.json discovery.
+
+    These exercise _execute_experiment_run's pre-run cleanup and structured
+    results lookup via a stub sandbox object, avoiding any reliance on real
+    subprocess execution.
+    """
+
+    def _make_stub_sandbox(
+        self,
+        results_payload: dict,
+        project_suffix: str = "_project_1",
+        results_relpath: str = "results.json",
+    ):
+        """Return a class that mimics enough of the sandbox protocol to
+        exercise the post-run results.json discovery glob.
+
+        On ``run_project``, the stub creates
+        ``<workdir>/<project_suffix>/<results_relpath>`` with the given payload
+        and returns a benign result object. ``results_relpath`` defaults to
+        ``"results.json"`` (project-root write) but may also be e.g.
+        ``"results/results.json"`` to exercise the subdir case.
+        """
+        from types import SimpleNamespace
+
+        class _StubSandbox:
+            def __init__(_self, workdir):
+                _self.workdir = workdir
+
+            def run_project(_self, project_path, timeout_sec):
+                target_path = _self.workdir / project_suffix / results_relpath
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_text(
+                    json.dumps(results_payload), encoding="utf-8"
+                )
+                return SimpleNamespace(
+                    metrics={},
+                    stdout="",
+                    stderr="",
+                    returncode=0,
+                    elapsed_sec=0.1,
+                    timed_out=False,
+                )
+
+            def run(_self, code, timeout_sec):  # pragma: no cover (multi-file path used)
+                return _self.run_project(None, timeout_sec)
+
+        return _StubSandbox
+
+    def _setup_run_dir(self, tmp_path):
+        """Build a minimal run dir with stage-09 exp_plan.yaml + stage-10 experiment/."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        s9 = run_dir / "stage-09"
+        s9.mkdir()
+        (s9 / "exp_plan.yaml").write_text("topic: t\nbaselines: [a]\n", encoding="utf-8")
+        s10 = run_dir / "stage-10" / "experiment"
+        s10.mkdir(parents=True)
+        (s10 / "main.py").write_text("print('hi')\n", encoding="utf-8")
+        # Stage 11 schedule (resource planning output, optional but harmless).
+        s11 = run_dir / "stage-11"
+        s11.mkdir()
+        (s11 / "schedule.json").write_text(
+            json.dumps({"tasks": [{"id": "t1"}]}), encoding="utf-8"
+        )
+        return run_dir
+
+    def _stub_config(self):
+        from researchclaw.config import (
+            ExperimentConfig, SandboxConfig, ExperimentRepairConfig,
+            OpenCodeConfig, CodeAgentConfig,
+        )
+
+        # Construct an ExperimentConfig with mode=sandbox and a python path.
+        sandbox = SandboxConfig(python_path="/usr/bin/env python3")
+        exp = ExperimentConfig(
+            mode="sandbox",
+            time_budget_sec=60,
+            max_iterations=1,
+            sandbox=sandbox,
+            repair=ExperimentRepairConfig(enabled=False),
+            opencode=OpenCodeConfig(enabled=False),
+            code_agent=CodeAgentConfig(enabled=False),
+        )
+        return exp
+
+    def test_discovers_results_in_project_1_subdir(
+        self, tmp_path, monkeypatch, rc_config, adapters
+    ):
+        """Primary correctness: even when the sandbox writes to ``_project_1``
+        (suffixed), discovery finds it and promotes structured metrics into
+        the run-1.json payload."""
+        run_dir = self._setup_run_dir(tmp_path)
+        stage_dir = run_dir / "stage-12"
+        stage_dir.mkdir()
+
+        # Stub create_sandbox to return our writer.
+        results_payload = {
+            "device": "cpu",
+            "dataset_used": "MNIST",
+            "conditions": {
+                "bn": {"metrics": {"acc": 0.92}},
+                "rmsnorm": {"metrics": {"acc": 0.91}},
+            },
+        }
+        StubSandbox = self._make_stub_sandbox(results_payload, project_suffix="_project_1")
+        monkeypatch.setattr(
+            "researchclaw.experiment.factory.create_sandbox",
+            lambda cfg, workdir: StubSandbox(workdir),
+        )
+        # Avoid the dep-install subprocess.
+        monkeypatch.setattr(
+            "researchclaw.pipeline.stage_impls._execution._ensure_sandbox_deps",
+            lambda code, py: [],
+        )
+
+        # Use a real-ish RCConfig but swap in our sandbox experiment config.
+        cfg = rc_config
+        cfg = cfg.__class__(
+            **{**cfg.__dict__, "experiment": self._stub_config()}
+        )
+
+        result = rc_executor._execute_experiment_run(
+            stage_dir, run_dir, cfg, adapters, llm=None
+        )
+
+        assert result.status == StageStatus.DONE
+        run1 = json.loads((stage_dir / "runs" / "run-1.json").read_text())
+        # Structured metrics are promoted into the canonical metrics dict.
+        assert run1["metrics"]["bn/acc"] == pytest.approx(0.92)
+        assert run1["metrics"]["rmsnorm/acc"] == pytest.approx(0.91)
+        # And the raw structured_results is also attached for downstream consumers.
+        assert run1["structured_results"]["dataset_used"] == "MNIST"
+        # runs/results.json was copied from the experiment-authored source
+        # (NOT the "stdout_parsed" auto-fallback).
+        results = json.loads((stage_dir / "runs" / "results.json").read_text())
+        assert results.get("source") != "stdout_parsed"
+        assert results["dataset_used"] == "MNIST"
+
+    def test_discovers_results_in_results_subdir(
+        self, tmp_path, monkeypatch, rc_config, adapters
+    ):
+        """Real generated experiments often write to a ``results/`` subdir
+        (observed in the Phase-2 sandbox readiness trial). Discovery must
+        check both ``<proj>/results.json`` and ``<proj>/results/results.json``."""
+        run_dir = self._setup_run_dir(tmp_path)
+        stage_dir = run_dir / "stage-12"
+        stage_dir.mkdir()
+
+        results_payload = {
+            "dataset_used": "MNIST",
+            "per_condition": {  # one of the schemas the flattener handles
+                "bn": {"accuracy_mean": 0.92, "accuracy_std": 0.005},
+            },
+        }
+        StubSandbox = self._make_stub_sandbox(
+            results_payload,
+            project_suffix="_project_1",
+            results_relpath="results/results.json",  # NESTED
+        )
+        monkeypatch.setattr(
+            "researchclaw.experiment.factory.create_sandbox",
+            lambda cfg, workdir: StubSandbox(workdir),
+        )
+        monkeypatch.setattr(
+            "researchclaw.pipeline.stage_impls._execution._ensure_sandbox_deps",
+            lambda code, py: [],
+        )
+
+        cfg = rc_config.__class__(
+            **{**rc_config.__dict__, "experiment": self._stub_config()}
+        )
+
+        result = rc_executor._execute_experiment_run(
+            stage_dir, run_dir, cfg, adapters, llm=None
+        )
+
+        assert result.status == StageStatus.DONE
+        run1 = json.loads((stage_dir / "runs" / "run-1.json").read_text())
+        # per_condition entry without an explicit "metrics" sub-dict — the
+        # flattener falls back to treating the entry as the metrics dict.
+        assert run1["metrics"]["bn/accuracy_mean"] == pytest.approx(0.92)
+        assert run1["metrics"]["bn/accuracy_std"] == pytest.approx(0.005)
+        results = json.loads((stage_dir / "runs" / "results.json").read_text())
+        assert results.get("source") != "stdout_parsed"
+        assert results["dataset_used"] == "MNIST"
+
+    def test_cleanup_removes_stale_sibling_before_run(
+        self, tmp_path, monkeypatch, rc_config, adapters
+    ):
+        """Regression: a leftover ``_project/results.json`` from a prior run
+        must NOT be returned by the discovery (sandbox dir is freshly created
+        before run, so no pre-existing files survive)."""
+        run_dir = self._setup_run_dir(tmp_path)
+        stage_dir = run_dir / "stage-12"
+        stage_dir.mkdir()
+        runs_dir = stage_dir / "runs"
+        # Plant a stale results.json from a "prior run" before the test invokes
+        # the executor. The cleanup at the top of the sandbox branch must wipe it.
+        stale_sandbox = runs_dir / "sandbox" / "_project"
+        stale_sandbox.mkdir(parents=True)
+        (stale_sandbox / "results.json").write_text(
+            json.dumps({"metrics": {"stale": 999.0}}), encoding="utf-8"
+        )
+
+        # Stub sandbox writes a FRESH results.json into _project_1 with different content.
+        fresh_payload = {"conditions": {"bn": {"metrics": {"acc": 0.5}}}}
+        StubSandbox = self._make_stub_sandbox(fresh_payload, project_suffix="_project_1")
+        monkeypatch.setattr(
+            "researchclaw.experiment.factory.create_sandbox",
+            lambda cfg, workdir: StubSandbox(workdir),
+        )
+        monkeypatch.setattr(
+            "researchclaw.pipeline.stage_impls._execution._ensure_sandbox_deps",
+            lambda code, py: [],
+        )
+
+        cfg = rc_config.__class__(
+            **{**rc_config.__dict__, "experiment": self._stub_config()}
+        )
+
+        result = rc_executor._execute_experiment_run(
+            stage_dir, run_dir, cfg, adapters, llm=None
+        )
+
+        assert result.status == StageStatus.DONE
+        run1 = json.loads((stage_dir / "runs" / "run-1.json").read_text())
+        # The stale "stale: 999.0" must NOT appear; only the fresh fresh_payload should.
+        assert "stale" not in run1["metrics"]
+        assert run1["metrics"]["bn/acc"] == pytest.approx(0.5)
+
 
 class TestDetectRuntimeIssues:
     """Tests for _detect_runtime_issues() helper."""
