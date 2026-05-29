@@ -16,8 +16,10 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -470,7 +472,7 @@ class OpenCodeBridge:
         # Use -m flag to specify model (more reliable than opencode.json)
         resolved_model = self._resolve_opencode_model()
         opencode_cmd = shutil.which("opencode") or "opencode"
-        cmd = [opencode_cmd, "run", "-m", resolved_model, "--format", "json", prompt]
+        cmd = self._build_opencode_command(opencode_cmd, resolved_model, prompt)
 
         t0 = time.monotonic()
         try:
@@ -498,6 +500,38 @@ class OpenCodeBridge:
         except Exception as exc:  # noqa: BLE001
             elapsed = time.monotonic() - t0
             return False, f"Unexpected error: {exc}", elapsed
+
+    @staticmethod
+    def _build_opencode_command(
+        opencode_cmd: str, resolved_model: str, prompt: str
+    ) -> list[str]:
+        """Build the argv for ``opencode run``, wrapping with a pseudo-TTY on Linux.
+
+        The ``opencode`` CLI requires a TTY: when invoked via ``subprocess.run``
+        with piped stdout/stderr it can return exit 0 with empty output and no
+        generated files. On Linux we wrap the call with util-linux
+        ``script -q -e -c "<cmd>" /dev/null`` to provide a pseudo-TTY:
+
+        * ``-q`` suppresses ``script``'s start/done messages,
+        * ``-c`` runs the requested command,
+        * ``-e`` returns the child's exit status (without it ``script`` can
+          return 0 even when the child command fails, which would mask an
+          ``opencode`` failure as success — the very silent-success behaviour
+          this wrapper exists to avoid).
+
+        The wrapper is gated on Linux specifically because the
+        ``script -q -e -c ... /dev/null`` form is util-linux syntax; BSD/macOS
+        ``script`` implementations are not compatible with it. On non-Linux
+        platforms, and when ``script`` is unavailable, we fall back to invoking
+        ``opencode`` directly — i.e. the prior behaviour, no regression.
+        """
+        direct = [opencode_cmd, "run", "-m", resolved_model, "--format", "json", prompt]
+
+        script_path = shutil.which("script")
+        if sys.platform.startswith("linux") and script_path:
+            inner = " ".join(shlex.quote(part) for part in direct)
+            return [script_path, "-q", "-e", "-c", inner, "/dev/null"]
+        return direct
 
     # -- file collection -------------------------------------------------------
 
