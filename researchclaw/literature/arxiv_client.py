@@ -19,6 +19,7 @@ import logging
 import re
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -249,8 +250,11 @@ def download_pdf(
             dirpath = Path(dirpath)
             dirpath.mkdir(parents=True, exist_ok=True)
             fname = filename or f"{arxiv_id.replace('/', '_')}.pdf"
-            result.download_pdf(dirpath=str(dirpath), filename=fname)
             pdf_path = dirpath / fname
+            if not result.pdf_url:
+                logger.warning("No PDF URL for %s", arxiv_id)
+                return None
+            urllib.request.urlretrieve(result.pdf_url, str(pdf_path))
             logger.info("Downloaded arXiv PDF: %s → %s", arxiv_id, pdf_path)
             return pdf_path
     except Exception as exc:  # noqa: BLE001
