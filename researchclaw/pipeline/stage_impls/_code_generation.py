@@ -321,9 +321,14 @@ def _execute_code_generation(
             else "none"  # sandbox mode has no network
         )
         if _net_policy == "none":
-            # Network disabled: inject strict offline-only guidance
+            # Network disabled: inject strict offline-only guidance.
+            # Pass the configured dataset cache root so the prompt points the
+            # model at the right pre-staged path; defaults to /opt/datasets.
             try:
-                extra_guidance += _pm.block("network_disabled_guidance")
+                extra_guidance += _pm.block(
+                    "network_disabled_guidance",
+                    dataset_cache_root=config.experiment.sandbox.dataset_cache_root,
+                )
             except Exception:  # noqa: BLE001
                 pass
         elif _net_policy == "full":
