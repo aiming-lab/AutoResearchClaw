@@ -1,0 +1,123 @@
+domain_id: clinical_sleep
+display_name: Clinical Sleep and Perioperative Monitoring
+parent_domain: clinical
+
+experiment_paradigm: comparison
+condition_terminology:
+  baseline: reference clinical workflow
+  proposed: proposed monitoring or analysis method
+  variant: ablation / threshold variant
+  input: de-identified physiologic signal or synthetic clinical cohort
+  metric: sensitivity / specificity / AUROC / calibration error
+
+typical_file_structure:
+  config.py: "Study parameters, cohort simulation settings, and safety thresholds"
+  data.py: "Synthetic or de-identified signal loading with schema validation"
+  preprocessing.py: "Signal cleaning, artifact handling, and epoch alignment"
+  evaluate.py: "Clinical metrics, calibration, and false-alarm analysis"
+  main.py: "Entry point: load data -> preprocess -> run method -> evaluate"
+
+entry_point: main.py
+
+core_libraries:
+  - numpy
+  - scipy
+  - pandas
+  - scikit-learn
+  - matplotlib
+
+docker_image: researchclaw/sandbox-generic:latest
+gpu_required: false
+
+pip_packages:
+  - numpy
+  - scipy
+  - pandas
+  - scikit-learn
+  - matplotlib
+
+metric_types:
+  - scalar
+  - structured
+  - confusion
+
+standard_baselines:
+  - clinician-scored PSG or HSAT respiratory-event labels
+  - rule-based apnea-hypopnea event detector
+  - standard signal-quality and motion-artifact rejection baseline
+  - logistic-regression or threshold-based risk classifier
+
+evaluation_protocol: >
+  Use synthetic data or explicitly de-identified physiologic signal exports.
+  Compare predictions against a stated reference standard such as clinician-scored
+  PSG/HSAT epochs, validated respiratory-event labels, or documented simulation
+  ground truth. Report sensitivity, specificity, AUROC, calibration, confidence
+  intervals, and false-alarm burden. Separate research findings from clinical
+  recommendations and do not present generated outputs as patient-specific advice.
+
+statistical_tests:
+  - bootstrap_confidence_interval
+  - mcnemar_test
+  - calibration_curve
+  - bland_altman_analysis
+
+output_formats:
+  - latex_table
+  - confusion_matrix
+  - calibration_plot
+  - time_series_epoch_plot
+
+figure_types:
+  - confusion_matrix
+  - roc_curve
+  - calibration_curve
+  - epoch_timeline
+  - bland_altman_plot
+
+github_search_terms:
+  - sleep apnea detection python
+  - polysomnography signal processing
+  - physiological signal monitoring python
+  - perioperative respiratory monitoring
+  - anesthesia airway monitoring
+
+paper_keywords:
+  - sleep apnea
+  - polysomnography
+  - PSG
+  - HSAT
+  - perioperative monitoring
+  - anesthesia
+  - airway management
+  - respiratory depression
+  - physiological signal processing
+
+compute_budget_guidance: |
+  Clinical signal experiments should be lightweight and reproducible:
+  - Prefer synthetic cohorts or small de-identified excerpts for tests
+  - Keep epoch-level analyses bounded (for example, one overnight simulation)
+  - Use bootstrapping with a capped number of resamples when time-limited
+
+dataset_guidance: |
+  Clinical safety and privacy rules:
+  - Do NOT generate, request, or expose identifiable patient information
+  - Use synthetic data by default unless a de-identified public dataset is explicitly provided
+  - State the reference standard: PSG, HSAT, clinician-scored event labels, or simulation ground truth
+  - Keep research outputs separate from diagnosis, treatment, or monitoring recommendations
+
+code_generation_hints: |
+  Clinical sleep / anesthesia monitoring code requirements:
+  1. Use explicit units for every physiologic signal (seconds, BPM, SpO2 %, event count/hour).
+  2. Validate input schema before analysis; reject missing timestamps or unlabeled units.
+  3. Align predictions and reference labels by fixed epochs before scoring.
+  4. Report sensitivity, specificity, AUROC, positive predictive value, negative predictive value, and false alarms per hour where applicable.
+  5. Include uncertainty: bootstrap confidence intervals or clearly marked simulation variability.
+  6. Add a safety note in generated reports: this is research/engineering output, not patient-specific medical advice.
+  7. Output results.json with keys for metrics, reference_standard, cohort_size, signal_units, and safety_limitations.
+
+result_analysis_hints: |
+  Clinical result analysis:
+  - Prioritize false negatives and false alarms, not only average accuracy
+  - Stratify errors by sleep stage, body position, motion artifact, or signal quality when available
+  - Discuss calibration and threshold sensitivity before proposing deployment
+  - State whether the result is validated against PSG/HSAT, clinician labels, or synthetic ground truth

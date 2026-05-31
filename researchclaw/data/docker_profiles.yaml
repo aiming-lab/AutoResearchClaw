@@ -142,5 +142,6 @@ domain_map:
   mathematics_optimization: math
   mathematics_general: math
   security_detection: security
+  clinical_sleep: generic
   robotics_control: robotics
   generic: generic

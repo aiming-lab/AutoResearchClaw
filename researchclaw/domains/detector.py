@@ -269,6 +269,14 @@ _KEYWORD_RULES: list[tuple[list[str], str]] = [
       "neural dynamics", "population coding", "neural decoding",
       "raster plot", "firing rate", "synaptic", "connectome"],
      "neuroscience_computational"),
+    # Clinical sleep / perioperative monitoring. Keep these terms specific so
+    # general EEG/fMRI neuroscience topics still route to neuroscience_imaging.
+    (["polysomnography", "sleep apnea", "sleep staging", "sleep stage",
+      "apnea-hypopnea", "apnea hypopnea", "ahi score", "hsat",
+      "obstructive sleep apnea", "respiratory depression",
+      "sedation monitoring", "perioperative respiratory",
+      "airway management", "anesthesia monitoring"],
+     "clinical_sleep"),
     (["fmri", "eeg", "meg", "neuroimaging", "brain imaging",
       "nilearn", "mne-python", "bold signal", "brain network",
       "functional connectivity"], "neuroscience_imaging"),
@@ -413,6 +421,7 @@ Available domains:
 - security_detection: Security/intrusion detection
 - neuroscience_computational: Computational neuroscience (spiking networks, neural dynamics, population coding)
 - neuroscience_imaging: Brain imaging analysis (fMRI, EEG, MEG, functional connectivity)
+- clinical_sleep: Clinical sleep / perioperative monitoring (PSG, HSAT, sleep apnea, respiratory depression)
 - robotics_control: Robotics and control
 - generic: Cannot classify / cross-domain
 

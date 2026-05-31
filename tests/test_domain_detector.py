@@ -76,6 +76,7 @@ class TestProfileLoading:
             "biology_singlecell",
             "economics_empirical",
             "security_detection",
+            "clinical_sleep",
             "robotics_control",
         ]:
             profile = get_profile(domain_id)
@@ -133,6 +134,15 @@ class TestKeywordDetection:
 
     def test_security_keywords(self):
         assert _keyword_detect("intrusion detection system for network traffic") == "security_detection"
+
+    def test_clinical_sleep_keywords(self):
+        assert _keyword_detect("sleep apnea detection from polysomnography") == "clinical_sleep"
+        assert _keyword_detect("EEG sleep staging for apnea screening") == "clinical_sleep"
+        assert _keyword_detect("perioperative respiratory depression during sedation monitoring") == "clinical_sleep"
+        assert _keyword_detect("airway management risk prediction after anesthesia") == "clinical_sleep"
+
+    def test_general_eeg_still_routes_to_neuroscience(self):
+        assert _keyword_detect("EEG functional connectivity analysis with MNE") == "neuroscience_imaging"
 
     def test_robotics_keywords(self):
         assert _keyword_detect("robot manipulation with MuJoCo") == "robotics_control"
@@ -301,6 +311,11 @@ class TestDetectionAccuracy:
         # Security topics
         ("Network intrusion detection system", "security_detection"),
         ("Malware classification using random forest", "security_detection"),
+        # Clinical sleep / perioperative monitoring topics
+        ("Sleep apnea detection from polysomnography", "clinical_sleep"),
+        ("EEG sleep staging for apnea screening", "clinical_sleep"),
+        ("Perioperative respiratory depression during sedation monitoring", "clinical_sleep"),
+        ("Airway management risk prediction after anesthesia", "clinical_sleep"),
         # Robotics topics
         ("Robot manipulation policy learning", "robotics_control"),
         ("Locomotion control with MuJoCo", "robotics_control"),
