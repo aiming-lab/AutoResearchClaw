@@ -1,0 +1,153 @@
+domain_id: medical_observational
+display_name: Medical Observational Research
+parent_domain: medicine
+
+# Deployment defaults. This profile is a methodology-safety overlay for
+# retrospective clinical/epidemiology manuscripts, not a conference ML track.
+preferred_experiment_mode: sandbox
+preferred_project_mode: co-pilot
+preferred_target_conference: generic
+default_time_budget_sec: 1800
+default_max_iterations: 3
+default_metric_key: primary_effect_estimate
+default_metric_direction: maximize
+
+experiment_paradigm: progressive_spec
+condition_terminology:
+  baseline: unadjusted clinical comparison
+  proposed: adjusted analysis plan
+  variant: sensitivity or subgroup analysis
+  input: de-identified clinical dataset or synthetic schema
+  metric: effect estimate with confidence interval
+
+typical_file_structure:
+  config.py: "Study design, eligibility criteria, variable definitions, and ethics status"
+  data_plan.py: "Data access plan, de-identification checks, and missingness assessment"
+  cleaning.py: "Range checks, unit harmonization, exclusion log, and audit trail"
+  analysis.py: "Table 1, primary model, sensitivity analysis, and missing-data strategy"
+  reporting.py: "STROBE checklist, patient flow counts, and methods/results text"
+  main.py: "Entry point: validate plan -> clean -> analyze -> report"
+
+entry_point: main.py
+
+core_libraries:
+  - pandas
+  - numpy
+  - scipy
+  - statsmodels
+  - matplotlib
+
+docker_image: researchclaw/sandbox-generic:latest
+gpu_required: false
+
+pip_packages:
+  - pandas
+  - numpy
+  - scipy
+  - statsmodels
+  - matplotlib
+
+metric_types:
+  - table
+  - structured
+  - scalar
+
+standard_baselines:
+  - Unadjusted group comparison
+  - Complete-case primary analysis
+  - Multivariable adjusted regression
+  - Missing-data sensitivity analysis
+
+evaluation_protocol: >
+  Plan the study as a de-identified observational clinical analysis. Before
+  modelling, document ethics/IRB status, data access, eligibility criteria,
+  exposure/outcome definitions, confounder candidates, missingness, and every
+  cleaning decision. Report Table 1, effect estimates with 95% confidence
+  intervals, sensitivity analyses, and STROBE-aligned participant flow.
+
+statistical_tests:
+  - chi_square_or_fisher_exact
+  - t_test_or_mann_whitney_u
+  - standardized_mean_difference
+  - multivariable_logistic_regression
+  - cox_regression_if_time_to_event
+  - multiple_imputation_sensitivity_if_justified
+
+output_formats:
+  - table_1
+  - strobe_flow_counts
+  - effect_estimate_table
+  - methods_paragraph
+
+figure_types:
+  - strobe_flow_diagram
+  - forest_plot
+  - missingness_bar_chart
+  - kaplan_meier_curve_if_applicable
+
+github_search_terms:
+  - STROBE observational study python
+  - clinical table 1 statsmodels
+  - retrospective cohort missing data analysis
+  - patient flow diagram observational study
+
+paper_keywords:
+  - retrospective cohort
+  - case-control study
+  - cross-sectional study
+  - STROBE
+  - clinical registry
+  - EHR
+  - de-identified data
+
+compute_budget_guidance: |
+  Medical observational analyses are usually CPU-bound:
+  - Keep synthetic demo datasets small enough for quick tests.
+  - Prefer transparent statistical models over opaque black-box predictors.
+  - Reserve expensive bootstrap or imputation loops for sensitivity analyses.
+
+dataset_guidance: |
+  Medical observational data handling:
+  - Use synthetic data or a de-identified schema for examples and tests.
+  - Do not use real patient data in generated demos.
+  - If the user provides real data, require explicit confirmation that it is
+    de-identified and approved for secondary analysis before producing code.
+  - Never invent patient records, IRB identifiers, hospital names, or outcomes.
+
+hp_reporting_guidance: |
+  Report study-design parameters:
+  HYPERPARAMETERS: {'study_design': ..., 'n_initial': ..., 'n_excluded': ...,
+  'exposure': ..., 'outcome': ..., 'confounders': [...],
+  'missing_data_strategy': ..., 'ethics_status': ...}
+
+code_generation_hints: |
+  Medical observational code requirements:
+
+  1. Start with a data-access and ethics gate. Record IRB/ethics status,
+     waiver status, de-identification status, and whether real data may be used.
+  2. Define eligibility criteria, exposure, outcome, confounders, effect
+     modifiers, and follow-up window before analysis.
+  3. Implement range checks, impossible-value checks, unit harmonization,
+     duplicate detection, and an exclusion/cleaning log.
+  4. Produce Table 1 with group summaries, p values where appropriate, and
+     standardized mean differences.
+  5. Use complete-case analysis as the default primary analysis. Add multiple
+     imputation only when missingness assumptions are documented and justified.
+  6. Output results.json with keys: ethics, data_plan, cleaning_log_summary,
+     table_1, strobe_flow, primary_model, sensitivity_analyses, and limitations.
+
+  ANTI-PATTERNS (DO NOT do these):
+  - Do not use real patient data in examples or tests.
+  - Do not fabricate IRB approval numbers, patient counts, hospital names, or
+    clinical outcomes.
+  - Do not claim clinical effectiveness from observational associations alone.
+  - Do not skip de-identification and privacy checks.
+
+result_analysis_hints: |
+  Medical observational result analysis:
+  - Tie every claim to a specific table, model coefficient, confidence interval,
+    or sensitivity result.
+  - Separate association from causation unless the design supports causal claims.
+  - Report missingness and exclusions before interpreting effect estimates.
+  - State STROBE limitations, residual confounding, selection bias, and data
+    quality limits explicitly.

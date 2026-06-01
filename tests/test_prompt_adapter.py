@@ -173,6 +173,59 @@ class TestEconomicsAdapter:
 
 
 # ---------------------------------------------------------------------------
+# Medical Observational Adapter tests
+# ---------------------------------------------------------------------------
+
+
+class TestMedicalObservationalAdapter:
+    def test_medical_observational_adapter_loaded(self):
+        profile = get_profile("medical_observational")
+        if profile is None:
+            pytest.skip("medical_observational profile not found")
+
+        adapter = get_adapter(profile)
+        from researchclaw.domains.adapters.medical_observational import (
+            MedicalObservationalPromptAdapter,
+        )
+        assert isinstance(adapter, MedicalObservationalPromptAdapter)
+
+    def test_medical_design_blocks_include_ethics_privacy_and_strobe(self):
+        profile = get_profile("medical_observational")
+        if profile is None:
+            pytest.skip("medical_observational profile not found")
+
+        adapter = get_adapter(profile)
+        blocks = adapter.get_experiment_design_blocks({})
+        combined = (
+            blocks.experiment_design_context
+            + blocks.statistical_test_guidance
+        ).lower()
+
+        assert "irb" in combined
+        assert "de-identification" in combined
+        assert "strobe" in combined
+        assert "missing" in combined
+        assert "variable definition" in combined
+
+    def test_medical_code_blocks_prevent_real_patient_data(self):
+        profile = get_profile("medical_observational")
+        if profile is None:
+            pytest.skip("medical_observational profile not found")
+
+        adapter = get_adapter(profile)
+        blocks = adapter.get_code_generation_blocks({})
+        combined = (
+            blocks.dataset_guidance
+            + blocks.code_generation_hints
+            + blocks.output_format_guidance
+        ).lower()
+
+        assert "synthetic" in combined
+        assert "do not use real patient data" in combined
+        assert "strobe_flow" in combined
+
+
+# ---------------------------------------------------------------------------
 # get_adapter dispatch tests
 # ---------------------------------------------------------------------------
 
