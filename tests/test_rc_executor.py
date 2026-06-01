@@ -3599,3 +3599,148 @@ class TestExperimentValidatorPrecision:
             in issue
             for issue in issues
         )
+
+
+# ============================================================
+# IMP-21: Stage 6 (knowledge_extract) refuses to run on empty shortlist
+# ============================================================
+
+
+class TestIMP21_KnowledgeExtractEmptyShortlistGate:
+    """IMP-21: Stage 6 must short-circuit when Stage 5
+    (literature_screen) has produced no shortlist (PAUSED state with
+    ``decision="rejected_all"``). Without this gate, Stage 6 spends an
+    LLM turn extracting cards from empty input, produces low-quality
+    fallback content, and lets downstream stages cascade on garbage.
+
+    We use ``StageStatus.PAUSED`` (not ``BLOCKED_APPROVAL``) because the
+    runner halts on PAUSED unconditionally, whereas BLOCKED_APPROVAL only
+    halts when ``stop_on_gate=True`` — and ``--auto-approve`` explicitly
+    sets ``stop_on_gate=False``, which is the exact scenario this gate
+    must prevent the cascade for. Mirrors the existing Stage 5 pattern
+    (literature_screen returns PAUSED with ``decision="rejected_all"``).
+    """
+
+    def test_returns_paused_when_shortlist_missing(
+        self, rc_config: RCConfig, adapters: AdapterBundle, run_dir: Path
+    ) -> None:
+        """No stage-05*/shortlist.jsonl exists → PAUSED (halts pipeline)."""
+        from researchclaw.pipeline.stage_impls._literature import (
+            _execute_knowledge_extract,
+        )
+
+        stage_dir = run_dir / "stage-06"
+        stage_dir.mkdir()
+
+        result = _execute_knowledge_extract(
+            stage_dir=stage_dir,
+            run_dir=run_dir,
+            config=rc_config,
+            adapters=adapters,
+            llm=None,  # gate must trigger before any LLM call
+        )
+
+        assert result.status == StageStatus.PAUSED
+        assert result.stage == Stage.KNOWLEDGE_EXTRACT
+        assert result.error is not None
+        assert "shortlist" in result.error.lower()
+        assert result.decision == "upstream_blocked"
+        meta_path = stage_dir / "knowledge_meta.json"
+        assert meta_path.is_file(), "Gate must write knowledge_meta.json"
+        meta = json.loads(meta_path.read_text())
+        assert meta["outcome"] == "upstream_empty_shortlist"
+        assert meta["shortlist_rows"] == 0
+
+    def test_returns_paused_when_shortlist_empty_string(
+        self, rc_config: RCConfig, adapters: AdapterBundle, run_dir: Path
+    ) -> None:
+        """stage-05/shortlist.jsonl exists but is 0-byte → PAUSED."""
+        from researchclaw.pipeline.stage_impls._literature import (
+            _execute_knowledge_extract,
+        )
+
+        s5_dir = run_dir / "stage-05"
+        s5_dir.mkdir()
+        (s5_dir / "shortlist.jsonl").write_text("", encoding="utf-8")
+
+        stage_dir = run_dir / "stage-06"
+        stage_dir.mkdir()
+
+        result = _execute_knowledge_extract(
+            stage_dir=stage_dir,
+            run_dir=run_dir,
+            config=rc_config,
+            adapters=adapters,
+            llm=None,
+        )
+
+        assert result.status == StageStatus.PAUSED
+        assert "stage-06/knowledge_meta.json" in result.evidence_refs
+
+    def test_returns_paused_when_shortlist_only_whitespace(
+        self, rc_config: RCConfig, adapters: AdapterBundle, run_dir: Path
+    ) -> None:
+        """stage-05/shortlist.jsonl is just whitespace → PAUSED."""
+        from researchclaw.pipeline.stage_impls._literature import (
+            _execute_knowledge_extract,
+        )
+
+        s5_dir = run_dir / "stage-05"
+        s5_dir.mkdir()
+        (s5_dir / "shortlist.jsonl").write_text("\n\n  \n", encoding="utf-8")
+
+        stage_dir = run_dir / "stage-06"
+        stage_dir.mkdir()
+
+        result = _execute_knowledge_extract(
+            stage_dir=stage_dir,
+            run_dir=run_dir,
+            config=rc_config,
+            adapters=adapters,
+            llm=None,
+        )
+
+        assert result.status == StageStatus.PAUSED
+
+    def test_proceeds_when_shortlist_has_at_least_one_row(
+        self, rc_config: RCConfig, adapters: AdapterBundle, run_dir: Path
+    ) -> None:
+        """stage-05/shortlist.jsonl has >=1 valid row → gate passes,
+        stage proceeds (but exits early since llm=None and no real
+        cards can be generated, so we just assert it didn't BLOCK)."""
+        from researchclaw.pipeline.stage_impls._literature import (
+            _execute_knowledge_extract,
+        )
+
+        s5_dir = run_dir / "stage-05"
+        s5_dir.mkdir()
+        (s5_dir / "shortlist.jsonl").write_text(
+            json.dumps(
+                {
+                    "paper_id": "oalex-W123",
+                    "title": "A Real Paper About Label Noise",
+                    "abstract": "We study symmetric noise on MNIST.",
+                    "year": 2024,
+                    "cite_key": "doe2024noise",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        stage_dir = run_dir / "stage-06"
+        stage_dir.mkdir()
+
+        result = _execute_knowledge_extract(
+            stage_dir=stage_dir,
+            run_dir=run_dir,
+            config=rc_config,
+            adapters=adapters,
+            llm=None,  # no LLM, but gate must not trigger
+        )
+
+        # Gate did NOT trigger — stage proceeded past the check.
+        # Without an LLM, the stage falls back to a template-card path,
+        # which is its existing behaviour (not gated by IMP-21).
+        assert result.status != StageStatus.PAUSED
+        assert result.stage == Stage.KNOWLEDGE_EXTRACT

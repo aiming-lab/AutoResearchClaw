@@ -1049,3 +1049,80 @@ class TestPromoteBestStage14DegenerateDetection:
         data = json.loads(best_path.read_text(encoding="utf-8"))
         pm = data["metrics_summary"]["primary_metric"]
         assert pm["mean"] == 1e-10
+
+
+# ============================================================
+# IMP-21: Runner-level integration test — Stage 6 gate must halt
+# the pipeline under --auto-approve (stop_on_gate=False)
+# ============================================================
+
+
+def test_imp21_stage6_empty_shortlist_gate_halts_pipeline_under_auto_approve(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    """IMP-21 regression: when Stage 6 returns PAUSED via the empty-shortlist
+    gate, the runner MUST halt the pipeline even with stop_on_gate=False
+    (the --auto-approve scenario). Stage 7 (KNOWLEDGE_GRAPH) and beyond
+    must NOT execute, otherwise the cascade-on-garbage problem returns.
+
+    This test would fail if the gate returned BLOCKED_APPROVAL instead of
+    PAUSED — BLOCKED_APPROVAL only halts when stop_on_gate=True, and
+    --auto-approve sets stop_on_gate=False.
+    """
+
+    def mock_execute_stage(stage: Stage, **kwargs: Any) -> StageResult:
+        _ = kwargs
+        if stage == Stage.KNOWLEDGE_EXTRACT:
+            # Simulate the IMP-21 gate firing on empty shortlist
+            return StageResult(
+                stage=Stage.KNOWLEDGE_EXTRACT,
+                status=StageStatus.PAUSED,
+                artifacts=("knowledge_meta.json",),
+                error=(
+                    "Cannot extract knowledge cards: shortlist.jsonl is "
+                    "empty or missing. Resolve Stage 5 first."
+                ),
+                evidence_refs=("stage-06/knowledge_meta.json",),
+                decision="upstream_blocked",
+            )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-imp21-gate",
+        config=rc_config,
+        adapters=adapters,
+        stop_on_gate=False,  # the --auto-approve scenario
+        auto_approve_gates=True,
+    )
+
+    # Pipeline halts at Stage 6
+    assert results[-1].stage == Stage.KNOWLEDGE_EXTRACT
+    assert results[-1].status == StageStatus.PAUSED
+    assert results[-1].decision == "upstream_blocked"
+    assert len(results) == int(Stage.KNOWLEDGE_EXTRACT)
+
+    # Stage 7 (SYNTHESIS) and downstream stages MUST NOT have run
+    executed_stages = {r.stage for r in results}
+    for downstream in (
+        Stage.SYNTHESIS,
+        Stage.HYPOTHESIS_GEN,
+        Stage.EXPERIMENT_DESIGN,
+        Stage.PAPER_OUTLINE,
+        Stage.EXPORT_PUBLISH,
+    ):
+        assert downstream not in executed_stages, (
+            f"IMP-21 regression: {downstream.name} should not have run after "
+            f"Stage 6 PAUSED (cascade-on-garbage prevention failed)"
+        )
+
+    # Pipeline summary reports paused outcome
+    summary = json.loads(
+        (run_dir / "pipeline_summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["final_status"] == "paused"
+    assert summary["stages_paused"] == 1
