@@ -81,7 +81,7 @@ class LLMConfig:
     temperature: float = 0.7
     max_retries: int = 3
     retry_base_delay: float = 2.0
-    timeout_sec: int = 300
+    timeout_sec: int = 600  # default matches from_rc_config() fallback
     user_agent: str = _DEFAULT_USER_AGENT
     # MetaClaw bridge: extra headers for proxy requests
     extra_headers: dict[str, str] = field(default_factory=dict)

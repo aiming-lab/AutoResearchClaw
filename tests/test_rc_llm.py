@@ -80,6 +80,7 @@ def test_llm_config_defaults():
     assert config.primary_model == "gpt-4o"
     assert config.max_tokens == 4096
     assert config.temperature == 0.7
+    assert config.timeout_sec == 600  # aligns with from_rc_config() fallback
 
 
 def test_llm_config_custom_values():
