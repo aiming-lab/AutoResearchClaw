@@ -58,6 +58,46 @@ def _find_acpx() -> str | None:
     return None
 
 
+# acpx can emit large or sensitive output, so tail-cap each captured stream
+# rather than dumping it whole into the exception message or the logs.
+_MAX_ERR_EXCERPT_CHARS = 2000
+
+
+def _tail_excerpt(text: str | None, limit: int = _MAX_ERR_EXCERPT_CHARS) -> str:
+    """Return *text* stripped and tail-capped to *limit* chars for diagnostics."""
+    s = (text or "").strip()
+    if len(s) <= limit:
+        return s
+    return f"[truncated to last {limit} chars] {s[-limit:]}"
+
+
+def _acp_failure_message(
+    returncode: int,
+    stdout: str | None,
+    stderr: str | None,
+    preserve_markers: tuple[str, ...] = (),
+) -> str:
+    """Build a bounded, labeled failure message from both acpx streams.
+
+    acpx frequently writes the real error to stdout while stderr is empty
+    (or the reverse), so surface both (tail-capped) to keep an exit-N
+    failure diagnosable without flooding logs or leaking unbounded output.
+
+    Any *preserve_markers* substring present in the raw (untruncated)
+    streams is surfaced verbatim, so a marker sitting before the tail-cap
+    window cannot be dropped. ``_send_prompt`` greps ``str(exc)`` for these
+    markers to drive reconnection (stale session) and stdin fallback
+    (command too long); truncating them away would silently disable both.
+    """
+    raw_lower = f"{stderr or ''}\n{stdout or ''}".lower()
+    matched = [m for m in preserve_markers if m.lower() in raw_lower]
+    marker_note = f"[markers: {', '.join(matched)}] " if matched else ""
+    return (
+        f"ACP prompt failed (exit {returncode}): {marker_note}"
+        f"[stderr] {_tail_excerpt(stderr)} [stdout] {_tail_excerpt(stdout)}"
+    )
+
+
 class ACPClient:
     """LLM client that uses acpx to communicate with ACP agents.
 
@@ -478,8 +518,13 @@ class ACPClient:
             ) from exc
 
         if result.returncode != 0:
-            stderr = (result.stderr or "").strip()
-            raise RuntimeError(f"ACP prompt failed (exit {result.returncode}): {stderr}")
+            markers = self._RECONNECT_ERRORS + self._CMD_TOO_LONG_HINTS
+            raise RuntimeError(
+                _acp_failure_message(
+                    result.returncode, result.stdout, result.stderr,
+                    preserve_markers=markers,
+                )
+            )
 
         return self._extract_response(result.stdout)
 
@@ -501,9 +546,12 @@ class ACPClient:
             ) from exc
 
         if result.returncode != 0:
-            stderr = (result.stderr or "").strip()
+            markers = self._RECONNECT_ERRORS + self._CMD_TOO_LONG_HINTS
             raise RuntimeError(
-                f"ACP prompt failed (exit {result.returncode}): {stderr}"
+                _acp_failure_message(
+                    result.returncode, result.stdout, result.stderr,
+                    preserve_markers=markers,
+                )
             )
 
         return self._extract_response(result.stdout)

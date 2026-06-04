@@ -433,6 +433,100 @@ def test_acp_windows_cmd_wrapper_uses_lower_inline_limit(monkeypatch: pytest.Mon
     assert limit == ACPClient._MAX_CMD_WRAPPER_PROMPT_BYTES
 
 
+def test_tail_excerpt_caps_long_text_and_keeps_tail():
+    from researchclaw.llm.acp_client import _tail_excerpt
+
+    assert _tail_excerpt("boom") == "boom"
+    assert _tail_excerpt(None) == ""
+
+    long_text = "HEAD" + ("x" * 5000) + "TAIL"
+    capped = _tail_excerpt(long_text, limit=100)
+    assert capped.startswith("[truncated to last 100 chars] ")
+    assert capped.endswith("TAIL")
+    assert "HEAD" not in capped
+    assert len(capped) <= len("[truncated to last 100 chars] ") + 100
+
+
+def test_acp_failure_message_labels_both_streams():
+    from researchclaw.llm.acp_client import _acp_failure_message
+
+    msg = _acp_failure_message(1, stdout="OUT-DETAIL", stderr="ERR-DETAIL")
+    assert msg.startswith("ACP prompt failed (exit 1): ")
+    assert "[stderr] ERR-DETAIL" in msg
+    assert "[stdout] OUT-DETAIL" in msg
+
+
+def test_acp_failure_message_preserves_reconnect_marker_before_tail_window():
+    from researchclaw.llm.acp_client import ACPClient, _acp_failure_message
+
+    markers = ACPClient._RECONNECT_ERRORS + ACPClient._CMD_TOO_LONG_HINTS
+    # Reconnect marker at the head of a long stream, beyond the tail-cap window.
+    stdout = "agent needs reconnect\n" + ("noise " * 2000)
+    msg = _acp_failure_message(1, stdout=stdout, stderr="", preserve_markers=markers)
+    assert "[truncated to last 2000 chars]" in msg  # body was capped
+    assert "[markers: agent needs reconnect]" in msg  # marker survived
+    # _send_prompt's case-sensitive reconnect check would still match.
+    assert any(pat in msg for pat in ACPClient._RECONNECT_ERRORS)
+
+
+def test_acp_failure_message_preserves_command_too_long_hint():
+    from researchclaw.llm.acp_client import ACPClient, _acp_failure_message
+
+    markers = ACPClient._RECONNECT_ERRORS + ACPClient._CMD_TOO_LONG_HINTS
+    stderr = "E2BIG: argument list too long\n" + ("z" * 5000)
+    msg = _acp_failure_message(1, stdout="", stderr=stderr, preserve_markers=markers)
+    assert "[truncated to last 2000 chars]" in msg
+    # _send_prompt lowercases the message for the command-too-long check.
+    assert any(h in msg.lower() for h in ACPClient._CMD_TOO_LONG_HINTS)
+
+
+def test_acp_buried_reconnect_marker_still_triggers_reconnect():
+    """Marker before the tail-cap window must still drive the reconnect path.
+
+    Regression guard for the truncation issue Codex flagged: a stale-session
+    marker that sits ahead of the tail window must remain greppable in
+    str(exc) so _send_prompt reconnects and retries instead of raising.
+    """
+    from researchclaw.llm.acp_client import (
+        ACPClient,
+        ACPConfig,
+        _acp_failure_message,
+    )
+
+    client = ACPClient(ACPConfig(agent="codex"))
+    client._acpx = "acpx"
+    client._session_ready = True
+    client._ensure_session = lambda: None  # type: ignore[assignment]
+
+    reconnects = 0
+
+    def fake_force_reconnect() -> None:
+        nonlocal reconnects
+        reconnects += 1
+
+    client._force_reconnect = fake_force_reconnect  # type: ignore[assignment]
+
+    markers = ACPClient._RECONNECT_ERRORS + ACPClient._CMD_TOO_LONG_HINTS
+    huge_stdout = "session not found\n" + ("x" * 10000)
+    call_count = 0
+
+    def flaky_cli(acpx: str, prompt: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError(
+                _acp_failure_message(1, huge_stdout, "", preserve_markers=markers)
+            )
+        return "recovered"
+
+    client._send_prompt_cli = flaky_cli  # type: ignore[assignment]
+
+    result = client._send_prompt("short prompt")
+    assert result == "recovered"
+    assert call_count == 2
+    assert reconnects == 1
+
+
 def test_new_param_models_contains_expected_models():
     expected = {"gpt-5", "gpt-5.1", "gpt-5.2", "gpt-5.4", "o3", "o3-mini", "o4-mini"}
     assert expected.issubset(_NEW_PARAM_MODELS)
