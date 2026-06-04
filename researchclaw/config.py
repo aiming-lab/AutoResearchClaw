@@ -188,6 +188,7 @@ class AcpConfig:
     acpx_command: str = ""
     session_name: str = "researchclaw"
     timeout_sec: int = 1800
+    session_init_timeout_sec: int = 120  # cold-start session create/ensure budget
 
 
 @dataclass(frozen=True)
@@ -1159,6 +1160,9 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
             acpx_command=acp_data.get("acpx_command", ""),
             session_name=acp_data.get("session_name", "researchclaw"),
             timeout_sec=int(acp_data.get("timeout_sec", 1800)),
+            session_init_timeout_sec=int(
+                acp_data.get("session_init_timeout_sec", 120)
+            ),
         ),
     )
 

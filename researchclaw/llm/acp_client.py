@@ -42,6 +42,7 @@ class ACPConfig:
     acpx_command: str = ""  # auto-detect if empty
     session_name: str = "researchclaw"
     timeout_sec: int = 1800  # per-prompt timeout
+    session_init_timeout_sec: int = 120  # cold-start session create/ensure budget
 
 
 def _find_acpx() -> str | None:
@@ -131,6 +132,9 @@ class ACPClient:
             acpx_command=getattr(acp, "acpx_command", ""),
             session_name=getattr(acp, "session_name", "researchclaw"),
             timeout_sec=getattr(acp, "timeout_sec", 1800),
+            session_init_timeout_sec=getattr(
+                acp, "session_init_timeout_sec", 120
+            ),
         ))
 
     # ------------------------------------------------------------------
@@ -251,27 +255,34 @@ class ACPClient:
         if not acpx:
             raise RuntimeError("acpx not found")
 
-        # Use 'ensure' which finds existing or creates new
-        result = subprocess.run(
-            [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
-             self.config.agent, "sessions", "ensure",
-             "--name", self.config.session_name],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=30,
-        )
-        if result.returncode != 0:
-            # Fall back to 'new'
-            result = subprocess.run(
-                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
-                 self.config.agent, "sessions", "new",
-                 "--name", self.config.session_name],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=30,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to create ACP session: {result.stderr.strip()}"
+        # 'ensure' finds an existing session or creates one; fall back to
+        # 'new'. Cold agent start-up can exceed a tight budget (claude has
+        # been observed at ~31s), so the create/ensure timeout is configurable
+        # via session_init_timeout_sec (default 120) rather than a hardcoded
+        # 30, and a TimeoutExpired on 'ensure' falls through to 'new' instead
+        # of aborting session init.
+        init_timeout = self.config.session_init_timeout_sec
+        last_error = ""
+        session_ready = False
+        for subcmd in ("ensure", "new"):
+            try:
+                result = subprocess.run(
+                    [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
+                     self.config.agent, "sessions", subcmd,
+                     "--name", self.config.session_name],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=init_timeout,
                 )
+            except subprocess.TimeoutExpired:
+                last_error = f"'sessions {subcmd}' timed out after {init_timeout}s"
+                logger.warning("ACP %s (agent cold-start?)", last_error)
+                continue
+            if result.returncode == 0:
+                session_ready = True
+                break
+            last_error = (result.stderr or "").strip()
+        if not session_ready:
+            raise RuntimeError(f"Failed to create ACP session: {last_error}")
 
         # Warm-up: consume the agent's cold-start greeting and set
         # text-only mode so it does not use tools or pollute responses.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import urllib.error
 import urllib.request
 from http.client import HTTPMessage
@@ -526,6 +527,86 @@ def test_acp_buried_reconnect_marker_still_triggers_reconnect():
     assert result == "recovered"
     assert call_count == 2
     assert reconnects == 1
+
+
+def test_acp_config_session_init_timeout_default():
+    from researchclaw.llm.acp_client import ACPConfig
+
+    assert ACPConfig().session_init_timeout_sec == 120
+
+
+def _make_acp_client(session_init_timeout_sec: int = 120):
+    from researchclaw.llm.acp_client import ACPClient, ACPConfig
+
+    client = ACPClient(
+        ACPConfig(agent="claude", session_init_timeout_sec=session_init_timeout_sec)
+    )
+    client._acpx = "acpx"  # skip binary resolution
+    client._session_ready = False
+    return client
+
+
+def _ok(cmd):
+    return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+
+def test_ensure_session_uses_configured_init_timeout(monkeypatch: pytest.MonkeyPatch):
+    """The session create/ensure subprocess uses session_init_timeout_sec, not a hardcoded 30."""
+    calls: list[dict] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append({"cmd": cmd, "timeout": kwargs.get("timeout")})
+        return _ok(cmd)
+
+    monkeypatch.setattr("researchclaw.llm.acp_client.subprocess.run", fake_run)
+    client = _make_acp_client(session_init_timeout_sec=99)
+    client._ensure_session()
+
+    ensure_calls = [c for c in calls if "ensure" in c["cmd"]]
+    assert ensure_calls, "expected a 'sessions ensure' call"
+    assert ensure_calls[0]["timeout"] == 99
+    assert client._session_ready is True
+
+
+def test_ensure_session_falls_back_to_new_on_ensure_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A TimeoutExpired on 'ensure' must fall through to 'new', not abort init."""
+    seen: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        if "ensure" in cmd:
+            seen.append("ensure")
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        if "new" in cmd:
+            seen.append("new")
+            return _ok(cmd)
+        seen.append("warmup")
+        return _ok(cmd)
+
+    monkeypatch.setattr("researchclaw.llm.acp_client.subprocess.run", fake_run)
+    client = _make_acp_client()
+    client._ensure_session()
+
+    assert "ensure" in seen and "new" in seen
+    assert client._session_ready is True
+
+
+def test_ensure_session_raises_when_both_init_calls_time_out(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """If both 'ensure' and 'new' time out, raise a clear error (not bare TimeoutExpired)."""
+
+    def fake_run(cmd, **kwargs):
+        if "sessions" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return _ok(cmd)
+
+    monkeypatch.setattr("researchclaw.llm.acp_client.subprocess.run", fake_run)
+    client = _make_acp_client(session_init_timeout_sec=5)
+    with pytest.raises(RuntimeError, match="timed out"):
+        client._ensure_session()
+    assert client._session_ready is False
 
 
 def test_new_param_models_contains_expected_models():
