@@ -234,6 +234,78 @@ def test_check_model_chain_no_models() -> None:
     assert "No models configured" in result.detail
 
 
+def test_is_anthropic_url() -> None:
+    assert health._is_anthropic("https://api.anthropic.com")
+    assert health._is_anthropic("https://api.anthropic.com/v1")
+    assert not health._is_anthropic("https://api.openai.com/v1")
+
+
+def test_anthropic_messages_url() -> None:
+    assert (
+        health._anthropic_messages_url("https://api.anthropic.com")
+        == "https://api.anthropic.com/v1/messages"
+    )
+    assert (
+        health._anthropic_messages_url("https://api.anthropic.com/v1")
+        == "https://api.anthropic.com/v1/messages"
+    )
+
+
+def test_check_llm_connectivity_anthropic_pass() -> None:
+    with patch("urllib.request.urlopen", return_value=_DummyHTTPResponse(status=200)):
+        result = health.check_llm_connectivity(
+            "https://api.anthropic.com", "sk-ant-test"
+        )
+    assert result.status == "pass"
+
+
+def test_check_llm_connectivity_anthropic_404_still_pass() -> None:
+    # Anthropic returns 404 with not_found_error for unknown models — still proves reachability.
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.HTTPError(
+            "https://api.anthropic.com/v1/messages", 404, "not found", {}, None
+        ),
+    ):
+        result = health.check_llm_connectivity(
+            "https://api.anthropic.com", "sk-ant-test"
+        )
+    assert result.status == "pass"
+
+
+def test_check_api_key_valid_anthropic_invalid_401() -> None:
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.HTTPError(
+            "https://api.anthropic.com/v1/messages", 401, "unauthorized", {}, None
+        ),
+    ):
+        result = health.check_api_key_valid("https://api.anthropic.com", "bad")
+    assert result.status == "fail"
+    assert "Invalid API key" in result.detail
+
+
+def test_check_model_chain_anthropic_pass() -> None:
+    with patch("urllib.request.urlopen", return_value=_DummyHTTPResponse(status=200)):
+        result = health.check_model_chain(
+            "https://api.anthropic.com", "sk-ant-test", "claude-sonnet-4-6"
+        )
+    assert result.status == "pass"
+
+
+def test_check_model_chain_anthropic_unknown_model() -> None:
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.HTTPError(
+            "https://api.anthropic.com/v1/messages", 404, "not found", {}, None
+        ),
+    ):
+        result = health.check_model_chain(
+            "https://api.anthropic.com", "sk-ant-test", "claude-fake-9"
+        )
+    assert result.status == "fail"
+
+
 def test_check_sandbox_python_exists() -> None:
     with (
         patch.object(Path, "exists", return_value=True),
