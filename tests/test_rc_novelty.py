@@ -306,6 +306,7 @@ class TestCheckNovelty:
             "similar_papers_found",
             "novelty_score",
             "assessment",
+            "top_3_threat_papers",
             "similar_papers",
             "recommendation",
             "similarity_threshold",

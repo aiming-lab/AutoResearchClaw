@@ -229,6 +229,44 @@ def test_from_rc_config_builds_expected_llm_config():
     assert client.config.fallback_models == ["o3-mini", "gpt-4o"]
 
 
+def test_create_llm_client_dispatches_to_claude_cli_provider():
+    from researchclaw.llm import create_llm_client
+    from researchclaw.llm.claude_cli_client import ClaudeCliClient
+
+    rc_config = SimpleNamespace(
+        llm=SimpleNamespace(
+            provider="claude-cli",
+            primary_model="sonnet",
+            acp=SimpleNamespace(cwd=".", timeout_sec=321),
+        )
+    )
+
+    client = create_llm_client(rc_config)
+
+    assert isinstance(client, ClaudeCliClient)
+    assert client.config.model == "sonnet"
+    assert client.config.timeout_sec == 321
+
+
+def test_create_llm_client_dispatches_to_codex_cli_provider():
+    from researchclaw.llm import create_llm_client
+    from researchclaw.llm.codex_cli_client import CodexCliClient
+
+    rc_config = SimpleNamespace(
+        llm=SimpleNamespace(
+            provider="codex-cli",
+            primary_model="gpt-5.2",
+            acp=SimpleNamespace(cwd=".", timeout_sec=432),
+        )
+    )
+
+    client = create_llm_client(rc_config)
+
+    assert isinstance(client, CodexCliClient)
+    assert client.config.model == "gpt-5.2"
+    assert client.config.timeout_sec == 432
+
+
 def test_responses_wire_api_uses_responses_endpoint(monkeypatch: pytest.MonkeyPatch):
     captured: dict[str, object] = {}
 

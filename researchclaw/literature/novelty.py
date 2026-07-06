@@ -326,6 +326,23 @@ def check_novelty(
         "similar_papers_found": len(similar_papers),
         "novelty_score": novelty_score,
         "assessment": assessment,
+        "top_3_threat_papers": [
+            {
+                "title": p.get("title", ""),
+                "year": p.get("year", 0),
+                "venue": p.get("venue", ""),
+                "citation_count": p.get("citation_count", 0),
+                "similarity": p.get("similarity", 0.0),
+                "overlap": (
+                    "Potential contribution overlap detected by lexical/title similarity. "
+                    "Use this paper as a prior-work threat until a human or LLM ledger "
+                    "establishes a concrete differentiating gap."
+                ),
+                "url": p.get("url", ""),
+                "cite_key": p.get("cite_key", ""),
+            }
+            for p in similar_papers[:3]
+        ],
         "similar_papers": similar_papers[:20],  # cap output size
         "recommendation": recommendation,
         "similarity_threshold": similarity_threshold,

@@ -14,6 +14,16 @@ runtime:
   max_parallel_tasks: 3
   approval_timeout_hours: 12
   retry_limit: 2
+  # Optional partial-run controls.
+  # Use these to evaluate writing/review stages against existing evidence
+  # without rerunning expensive experiments.
+  skip_stages: []
+  # Map run-relative artifact paths to inline content or local file paths.
+  inject_artifacts: {}
+  # Example:
+  # inject_artifacts:
+  #   stage-07/synthesis.md: "Related-work synthesis goes here"
+  #   stage-14/analysis.md: "Existing experiment result summary goes here"
 
 notifications:
   channel: "console"
@@ -59,11 +69,30 @@ llm:
   # primary_model: "llama3.2"
   # fallback_models:
   #   - "mistral"
+  # --- Local CLI provider examples ---
+  # provider: "claude-cli"  # invokes `claude -p`
+  # base_url: ""
+  # api_key_env: ""
+  # primary_model: "sonnet"
+  # acp:
+  #   cwd: "."
+  #   timeout_sec: 600
+  # provider: "codex-cli"  # invokes `codex exec` in read-only sandbox mode
+  # base_url: ""
+  # api_key_env: ""
+  # primary_model: "gpt-5.2"
+  # acp:
+  #   cwd: "."
+  #   timeout_sec: 600
 
 security:
   hitl_required_stages: [5, 9, 20]
   allow_publish_without_approval: false
   redact_sensitive_logs: true
+  # When true, Stage 20 q1_spine_gate blocking reasons trigger automatic
+  # rollback to the recommended stage. Default false keeps advisory behavior.
+  q1_spine_hard_gate: false
+  q1_spine_max_rollbacks: 1
 
 experiment:
   # ★ mode 决定实验结果的真实性

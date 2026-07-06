@@ -119,6 +119,14 @@ stages:
 
       Output markdown and for each hypothesis provide rationale, measurable prediction, failure condition.
 
+      Q1 PAPER SPINE REQUIREMENTS:
+      - For each hypothesis, include a contribution claim ID (C1, C2, ...).
+      - Name the nearest prior-work family or likely SOTA baseline it must beat or differentiate from.
+      - State the exact gap: what prior work cannot explain, detect, optimize, or validate.
+      - State the minimum proving experiment needed to support the claim.
+      - State one reviewer attack that could invalidate the claim.
+      - If novelty is weak, mark it as weak instead of overstating it.
+
       Synthesis:
 
       {synthesis}'
@@ -232,6 +240,9 @@ stages:
       - Use formal academic language throughout
       - Include mathematical notation where appropriate (use LaTeX-style $...$ for inline math)
       - Every claim must be supported by either a citation or experimental evidence
+      - Preserve the Narrative Spine exactly: Abstract, Introduction, Discussion, and Conclusion must tell the same threat/gap -> key insight -> main evidence story
+      - Contributions must map back to the Novelty Claim Ledger; do not invent new contributions in the draft
+      - If the Claim-to-Evidence Map or experiment context says a claim is weak, downgrade the language instead of strengthening it
       - Results tables should use markdown table format with proper column headers
       - Provide algorithm pseudocode in the Method section when applicable
 
@@ -250,6 +261,13 @@ stages:
       Create a detailed paper outline in markdown.
 
       Include per-section goals and evidence links.
+
+      Q1 PAPER SPINE REQUIREMENTS:
+      - Begin with a section titled Narrative Spine Candidate.
+      - Include exactly three one-sentence lines: Threat / Gap, Key Insight, Main Evidence.
+      - Every major section must explain how it supports that spine.
+      - Mark any section that risks narrative drift.
+      - Use the Novelty Claim Ledger when present; each contribution in the outline must trace to C1/C2/C3.
 
       {topic_constraint}{feedback}Analysis:
 
@@ -311,6 +329,9 @@ stages:
       - Are baselines properly tuned and competitive?
       - Are ablation studies present and meaningful?
       - Is every claim supported by evidence from the experiments?
+      - Does the draft follow the Narrative Spine, or does it drift between unrelated framings?
+      - Do the stated contributions match the Novelty Claim Ledger?
+      - Does the Claim-to-Evidence Map reveal unsupported claims that should be downgraded or deleted?
       - Does the paper acknowledge its limitations honestly?
       - Would you recommend this paper be presented at NeurIPS/ICML? Why or why not?
       - Score the paper 1-10 following this rubric: 1-3 Reject (fundamental flaws), 4-5 Borderline (significant weaknesses), 6-7 Weak Accept (solid but not exciting), 8-9 Accept (strong contribution), 10 Strong Accept (exceptional).

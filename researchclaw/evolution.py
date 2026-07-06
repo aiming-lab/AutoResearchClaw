@@ -593,3 +593,199 @@ class EvolutionStore:
         except Exception:
             logger.debug("Failed to recall memories for stage %s", stage_name)
         return overlay
+
+
+# ---------------------------------------------------------------------------
+# Refine trajectory tracking
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RefinePoint:
+    """Per-iteration metric record from one REFINE cycle."""
+
+    run_id: str
+    cycle: int
+    iteration: int
+    metric: float | None
+    metric_key: str
+    metric_direction: str
+    timestamp: str
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> RefinePoint:
+        raw_metric = data.get("metric")
+        return cls(
+            run_id=str(data.get("run_id", "")),
+            cycle=int(data.get("cycle", 1)),
+            iteration=int(data.get("iteration", 0)),
+            metric=float(raw_metric) if raw_metric is not None else None,
+            metric_key=str(data.get("metric_key", "primary_metric")),
+            metric_direction=str(data.get("metric_direction", "minimize")),
+            timestamp=str(data.get("timestamp", "")),
+        )
+
+
+class TrajectoryStore:
+    """JSONL-backed store for per-iteration refinement metrics."""
+
+    def __init__(self, store_dir: Path) -> None:
+        self._dir = store_dir
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._path = self._dir / "trajectory.jsonl"
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def append_many(self, points: list[RefinePoint]) -> None:
+        if not points:
+            return
+        with self._path.open("a", encoding="utf-8") as f:
+            for pt in points:
+                f.write(json.dumps(pt.to_dict(), ensure_ascii=False) + "\n")
+        logger.info("Trajectory: appended %d points", len(points))
+
+    def load_for_run(self, run_id: str) -> list[RefinePoint]:
+        if not self._path.exists():
+            return []
+        points: list[RefinePoint] = []
+        for line in self._path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                if data.get("run_id") == run_id:
+                    points.append(RefinePoint.from_dict(data))
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+                continue
+        return points
+
+
+def record_refine_trajectory(
+    store_dir: Path,
+    run_id: str,
+    refinement_log: dict[str, object],
+    cycle: int = 1,
+) -> list[RefinePoint]:
+    """Parse a refinement log and persist trajectory points."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    metric_key = str(refinement_log.get("metric_key", "primary_metric"))
+    metric_direction = str(refinement_log.get("metric_direction", "minimize"))
+    iterations = refinement_log.get("iterations", [])
+    if not isinstance(iterations, list):
+        return []
+
+    points: list[RefinePoint] = []
+    for i, entry in enumerate(iterations):
+        if not isinstance(entry, dict):
+            continue
+        raw = entry.get("metric")
+        try:
+            metric_val: float | None = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            metric_val = None
+        points.append(
+            RefinePoint(
+                run_id=run_id,
+                cycle=cycle,
+                iteration=i,
+                metric=metric_val,
+                metric_key=metric_key,
+                metric_direction=metric_direction,
+                timestamp=now,
+            )
+        )
+
+    TrajectoryStore(store_dir).append_many(points)
+    return points
+
+
+_PLATEAU_THRESHOLD: float = 0.05
+
+
+def get_trajectory_signal(
+    store_dir: Path,
+    run_id: str,
+    current_cycle: int,
+) -> dict[str, object]:
+    """Analyze trajectory data and return an actionable signal."""
+    points = TrajectoryStore(store_dir).load_for_run(run_id)
+    if not points:
+        return {
+            "stagnating": False,
+            "plateau_rounds": 0,
+            "best_gain_pct": None,
+            "recommendation": "proceed",
+            "summary": "",
+        }
+
+    maximize = points[0].metric_direction == "maximize"
+
+    def _cycle_best(pts: list[RefinePoint]) -> float | None:
+        vals = [p.metric for p in pts if p.metric is not None]
+        if not vals:
+            return None
+        return max(vals) if maximize else min(vals)
+
+    cycle_map: dict[int, list[RefinePoint]] = {}
+    for pt in points:
+        cycle_map.setdefault(pt.cycle, []).append(pt)
+
+    cycle_bests: list[tuple[int, float | None]] = sorted(
+        [(cycle, _cycle_best(pts)) for cycle, pts in cycle_map.items()],
+        key=lambda item: item[0],
+    )
+
+    gains: list[float] = []
+    for idx in range(1, len(cycle_bests)):
+        prev = cycle_bests[idx - 1][1]
+        curr = cycle_bests[idx][1]
+        if prev is None or curr is None or prev == 0.0:
+            continue
+        raw = (curr - prev) / abs(prev)
+        gains.append(raw if maximize else -raw)
+
+    plateau_rounds = 0
+    for gain in reversed(gains):
+        if gain < _PLATEAU_THRESHOLD:
+            plateau_rounds += 1
+        else:
+            break
+
+    stagnating = plateau_rounds >= 2
+    best_gain_pct: float | None = max(gains) * 100 if gains else None
+    if stagnating:
+        recommendation = "pivot"
+    elif gains and gains[-1] < _PLATEAU_THRESHOLD:
+        recommendation = "refine"
+    else:
+        recommendation = "proceed"
+
+    metric_key_label = points[0].metric_key
+    lines = [f"Improvement trajectory ({current_cycle} REFINE cycle(s) recorded):"]
+    for cycle_num, best in cycle_bests:
+        lines.append(f"  Cycle {cycle_num}: best_{metric_key_label}={best}")
+    if gains:
+        lines.append(f"  Inter-cycle gains: {[f'{g * 100:.1f}%' for g in gains]}")
+    if stagnating:
+        lines.append(
+            f"  WARNING: {plateau_rounds} consecutive cycles with <5% gain "
+            "-- PIVOT strongly recommended."
+        )
+    elif recommendation == "refine":
+        lines.append("  Last cycle showed marginal gain -- one more REFINE may help.")
+    else:
+        lines.append("  Healthy improvement -- PROCEED recommended.")
+
+    return {
+        "stagnating": stagnating,
+        "plateau_rounds": plateau_rounds,
+        "best_gain_pct": best_gain_pct,
+        "recommendation": recommendation,
+        "summary": "\n".join(lines),
+    }

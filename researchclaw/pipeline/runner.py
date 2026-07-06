@@ -13,8 +13,14 @@ from pathlib import Path
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
-from researchclaw.evolution import EvolutionStore, extract_lessons
+from researchclaw.evolution import (
+    EvolutionStore,
+    extract_lessons,
+    get_trajectory_signal,
+    record_refine_trajectory,
+)
 from researchclaw.knowledge.base import write_stage_to_kb
+from researchclaw.pipeline.contracts import CONTRACTS
 from researchclaw.pipeline.executor import StageResult, execute_stage
 from researchclaw.pipeline.stages import (
     DECISION_ROLLBACK,
@@ -36,6 +42,107 @@ def _should_start(stage: Stage, from_stage: Stage, started: bool) -> bool:
     if started:
         return True
     return stage == from_stage
+
+
+def _artifact_path(run_dir: Path, artifact_key: str) -> Path:
+    normalized = artifact_key.replace("\\", "/").lstrip("/")
+    if not normalized or ".." in normalized.split("/"):
+        raise ValueError(f"Invalid injected artifact path: {artifact_key!r}")
+    return run_dir / normalized
+
+
+def _apply_injected_artifacts(run_dir: Path, config: RCConfig) -> list[str]:
+    """Write configured partial-run artifacts before stage execution."""
+    injected: list[str] = []
+    for rel_path, source in config.runtime.inject_artifacts.items():
+        dest = _artifact_path(run_dir, rel_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        source_is_path = "\n" not in source and "\r" not in source and len(source) < 240
+        if source_is_path:
+            source_path = Path(source).expanduser()
+            try:
+                if source_path.exists() and source_path.is_file():
+                    shutil.copy2(source_path, dest)
+                    injected.append(rel_path.replace("\\", "/"))
+                    continue
+            except OSError:
+                pass
+            if "/" in source or "\\" in source or source_path.suffix:
+                logger.warning(
+                    "Injected artifact source looks like a path but was not readable: %s",
+                    source,
+                )
+        dest.write_text(source, encoding="utf-8")
+        injected.append(rel_path.replace("\\", "/"))
+    if injected:
+        (run_dir / "injected_artifacts.json").write_text(
+            json.dumps(
+                {"artifacts": injected, "generated": _utcnow_iso()},
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    return injected
+
+
+def _write_skipped_stage_outputs(
+    run_dir: Path, stage: Stage, run_id: str
+) -> tuple[str, ...]:
+    """Create minimal contract outputs for a deliberately skipped stage."""
+    stage_dir = run_dir / f"stage-{int(stage):02d}"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    artifacts: list[str] = []
+    contract = CONTRACTS[stage]
+    for output in contract.output_files:
+        target = stage_dir / output.rstrip("/")
+        if output.endswith("/"):
+            target.mkdir(parents=True, exist_ok=True)
+            marker = target / "SKIPPED.md"
+            if not marker.exists():
+                marker.write_text(
+                    f"# Skipped Stage\n\n"
+                    f"Stage {int(stage)} {stage.name} was skipped by "
+                    "runtime.skip_stages.\n",
+                    encoding="utf-8",
+                )
+            artifacts.append(output)
+            continue
+        if target.exists() and target.stat().st_size > 0:
+            artifacts.append(output)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if output.endswith(".json"):
+            target.write_text(
+                json.dumps(
+                    {
+                        "skipped": True,
+                        "stage": int(stage),
+                        "stage_name": stage.name,
+                        "run_id": run_id,
+                        "generated": _utcnow_iso(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        elif output.endswith((".yaml", ".yml")):
+            target.write_text(
+                "skipped: true\n"
+                f"stage: {int(stage)}\n"
+                f"stage_name: {stage.name}\n"
+                f"run_id: {run_id}\n",
+                encoding="utf-8",
+            )
+        else:
+            target.write_text(
+                f"# Skipped Stage\n\n"
+                f"Stage {int(stage)} {stage.name} was skipped by "
+                "runtime.skip_stages.\n",
+                encoding="utf-8",
+            )
+        artifacts.append(output)
+    return tuple(artifacts)
 
 
 def _build_pipeline_summary(
@@ -447,6 +554,12 @@ def execute_pipeline(
     results: list[StageResult] = []
     started = False
     total_stages = len(STAGE_SEQUENCE)
+    skip_stage_nums = frozenset(config.runtime.skip_stages)
+
+    if not (run_dir / "injected_artifacts.json").exists():
+        injected = _apply_injected_artifacts(run_dir, config)
+        if injected:
+            print(f"[{run_id}] Injected artifacts: {', '.join(injected)}")
 
     # Force the domain detector to honor a deployed profile (if any) so
     # every stage picks the same adapter.  Safe no-op when empty.
@@ -493,6 +606,54 @@ def execute_pipeline(
 
         stage_num = int(stage)
         prefix = f"[{run_id}] Stage {stage_num:02d}/{total_stages}"
+
+        if stage_num in skip_stage_nums:
+            if event_log:
+                try:
+                    event_log.append(
+                        create_event(
+                            EventType.STAGE_START,
+                            run_id=run_id,
+                            stage=stage.name,
+                            skipped_by_config=True,
+                        )
+                    )
+                except Exception:
+                    pass
+            artifacts = _write_skipped_stage_outputs(run_dir, stage, run_id)
+            result = StageResult(
+                stage=stage,
+                status=StageStatus.DONE,
+                artifacts=artifacts,
+                decision="skipped",
+                evidence_refs=tuple(f"stage-{stage_num:02d}/{a}" for a in artifacts),
+            )
+            results.append(result)
+            if event_log:
+                try:
+                    event_log.append(
+                        create_event(
+                            EventType.STAGE_END,
+                            run_id=run_id,
+                            stage=stage.name,
+                            status=result.status.value,
+                            elapsed_sec=0.0,
+                            decision=result.decision,
+                            skipped_by_config=True,
+                        )
+                    )
+                except Exception:
+                    pass
+            arts = ", ".join(artifacts) if artifacts else "none"
+            print(f"{prefix} {stage.name} — skipped by config → {arts}")
+            _write_checkpoint(run_dir, stage, run_id, adapters=adapters)
+            _write_heartbeat(run_dir, stage, run_id)
+            if to_stage is not None and stage == to_stage:
+                logger.info("[%s] Reached --to-stage %s, stopping.", run_id, stage.name)
+                print(f"[{run_id}] Reached --to-stage {stage.name}, stopping pipeline.")
+                break
+            continue
+
         print(f"{prefix} {stage.name} — running...")
 
         # ── Event log: stage start ──
@@ -523,6 +684,17 @@ def execute_pipeline(
         # has already been written.
         if stage == Stage.PAPER_OUTLINE:
             _promote_best_stage14(run_dir, config)
+
+        if stage == Stage.RESEARCH_DECISION:
+            try:
+                cycle = _read_pivot_count(run_dir) + 1
+                signal = get_trajectory_signal(run_dir / "evolution", run_id, cycle)
+                (run_dir / "trajectory_signal.json").write_text(
+                    json.dumps(signal, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("Trajectory signal computation failed", exc_info=True)
 
         t0 = _time.monotonic()
 
@@ -621,6 +793,21 @@ def execute_pipeline(
                 ))
             except Exception:
                 logger.debug("Experiment memory recording skipped")
+
+        if stage == Stage.ITERATIVE_REFINE and result.status == StageStatus.DONE:
+            try:
+                log_path = run_dir / "stage-13" / "refinement_log.json"
+                if log_path.exists():
+                    refine_log = json.loads(log_path.read_text(encoding="utf-8"))
+                    if isinstance(refine_log, dict):
+                        record_refine_trajectory(
+                            run_dir / "evolution",
+                            run_id,
+                            refine_log,
+                            cycle=_read_pivot_count(run_dir) + 1,
+                        )
+            except Exception:  # noqa: BLE001
+                logger.warning("Trajectory recording failed", exc_info=True)
 
         if result.status == StageStatus.DONE:
             arts = ", ".join(result.artifacts) if result.artifacts else "none"

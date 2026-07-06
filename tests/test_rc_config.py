@@ -151,6 +151,20 @@ def test_validate_config_accepts_llm_wire_api_responses(tmp_path: Path):
     assert result.ok is True
 
 
+@pytest.mark.parametrize("provider", ["claude-cli", "codex-cli"])
+def test_validate_config_accepts_local_cli_provider_without_url_or_key_env(
+    tmp_path: Path, provider: str
+):
+    data = _valid_config_data()
+    data["llm"]["provider"] = provider
+    data["llm"]["base_url"] = ""
+    data["llm"]["api_key_env"] = ""
+
+    result = validate_config(data, project_root=tmp_path, check_paths=False)
+
+    assert result.ok is True
+
+
 def test_validate_config_rejects_invalid_llm_wire_api(tmp_path: Path):
     data = _valid_config_data()
     data["llm"]["wire_api"] = "responses_only"
@@ -159,6 +173,16 @@ def test_validate_config_rejects_invalid_llm_wire_api(tmp_path: Path):
 
     assert result.ok is False
     assert "Invalid llm.wire_api: responses_only" in result.errors
+
+
+def test_validate_config_rejects_invalid_llm_provider(tmp_path: Path):
+    data = _valid_config_data()
+    data["llm"]["provider"] = "claude-clii"
+
+    result = validate_config(data, project_root=tmp_path, check_paths=False)
+
+    assert result.ok is False
+    assert "Invalid llm.provider: claude-clii" in result.errors
 
 
 @pytest.mark.parametrize("entry", [0, 24, "5", 9.1])
@@ -233,6 +257,23 @@ def test_rcconfig_from_dict_parses_llm_wire_api(tmp_path: Path):
     config = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
 
     assert config.llm.wire_api == "responses"
+
+
+def test_rcconfig_from_dict_parses_partial_run_and_q1_gate_controls(
+    tmp_path: Path,
+):
+    data = _valid_config_data()
+    data["runtime"]["skip_stages"] = [9, 13]
+    data["runtime"]["inject_artifacts"] = {"stage-14/analysis.md": "existing"}
+    data["security"]["q1_spine_hard_gate"] = True
+    data["security"]["q1_spine_max_rollbacks"] = 2
+
+    config = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+
+    assert config.runtime.skip_stages == (9, 13)
+    assert config.runtime.inject_artifacts == {"stage-14/analysis.md": "existing"}
+    assert config.security.q1_spine_hard_gate is True
+    assert config.security.q1_spine_max_rollbacks == 2
 
 
 def test_rcconfig_from_dict_missing_fields_raises_value_error(tmp_path: Path):

@@ -107,6 +107,19 @@ EXPERIMENT_MODES = {
     "stat_agent",      # Statistics: stat_research_agent (sim studies, CI/coverage) via Claude Code
 }
 CLI_AGENT_PROVIDERS = {"llm", "claude_code", "codex"}
+LOCAL_LLM_PROVIDERS = {"acp", "claude-cli", "codex-cli"}
+API_LLM_PROVIDERS = {
+    "openai",
+    "openrouter",
+    "deepseek",
+    "anthropic",
+    "kimi-anthropic",
+    "novita",
+    "minimax",
+    "ollama",
+    "openai-compatible",
+}
+LLM_PROVIDERS = API_LLM_PROVIDERS | LOCAL_LLM_PROVIDERS
 
 
 def _get_by_path(data: dict[str, Any], dotted_key: str) -> Any:
@@ -151,6 +164,8 @@ class RuntimeConfig:
     max_parallel_tasks: int = 1
     approval_timeout_hours: int = 12
     retry_limit: int = 0
+    skip_stages: tuple[int, ...] = ()
+    inject_artifacts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -210,6 +225,8 @@ class SecurityConfig:
     hitl_required_stages: tuple[int, ...] = (5, 9, 20)
     allow_publish_without_approval: bool = False
     redact_sensitive_logs: bool = True
+    q1_spine_hard_gate: bool = False
+    q1_spine_max_rollbacks: int = 1
 
 
 @dataclass(frozen=True)
@@ -926,6 +943,11 @@ class RCConfig:
                 max_parallel_tasks=int(runtime.get("max_parallel_tasks", 1)),
                 approval_timeout_hours=int(runtime.get("approval_timeout_hours", 12)),
                 retry_limit=int(runtime.get("retry_limit", 0)),
+                skip_stages=tuple(int(s) for s in runtime.get("skip_stages", ())),
+                inject_artifacts={
+                    str(k): str(v)
+                    for k, v in (runtime.get("inject_artifacts") or {}).items()
+                },
             ),
             notifications=NotificationsConfig(
                 channel=notifications["channel"],
@@ -956,6 +978,8 @@ class RCConfig:
                     security.get("allow_publish_without_approval", False)
                 ),
                 redact_sensitive_logs=bool(security.get("redact_sensitive_logs", True)),
+                q1_spine_hard_gate=bool(security.get("q1_spine_hard_gate", False)),
+                q1_spine_max_rollbacks=int(security.get("q1_spine_max_rollbacks", 1)),
             ),
             experiment=_parse_experiment_config(experiment),
             export=ExportConfig(
@@ -1068,10 +1092,10 @@ def validate_config(
 
     llm_provider = _get_by_path(data, "llm.provider")
     for key in REQUIRED_FIELDS:
-        # ACP and Ollama don't need api_key_env (local/keyless providers)
-        if llm_provider in ("acp", "ollama") and key == "llm.api_key_env":
+        # Local agent providers and Ollama don't need api_key_env.
+        if llm_provider in (LOCAL_LLM_PROVIDERS | {"ollama"}) and key == "llm.api_key_env":
             continue
-        if llm_provider == "acp" and key == "llm.base_url":
+        if llm_provider in LOCAL_LLM_PROVIDERS and key == "llm.base_url":
             continue
         value = _get_by_path(data, key)
         if _is_blank(value):
@@ -1092,6 +1116,9 @@ def validate_config(
     ):
         errors.append(f"Invalid llm.wire_api: {llm_wire_api}")
 
+    if not _is_blank(llm_provider) and llm_provider not in LLM_PROVIDERS:
+        errors.append(f"Invalid llm.provider: {llm_provider}")
+
     hitl_required_stages = _get_by_path(data, "security.hitl_required_stages")
     if hitl_required_stages is not None:
         if not isinstance(hitl_required_stages, list):
@@ -1102,6 +1129,26 @@ def validate_config(
                     errors.append(
                         f"Invalid security.hitl_required_stages entry: {stage}"
                     )
+
+    skip_stages = _get_by_path(data, "runtime.skip_stages")
+    if skip_stages is not None:
+        if not isinstance(skip_stages, list):
+            errors.append("runtime.skip_stages must be a list")
+        else:
+            for stage in skip_stages:
+                if not isinstance(stage, int) or not 1 <= stage <= 23:
+                    errors.append(f"Invalid runtime.skip_stages entry: {stage}")
+
+    inject_artifacts = _get_by_path(data, "runtime.inject_artifacts")
+    if inject_artifacts is not None and not isinstance(inject_artifacts, dict):
+        errors.append("runtime.inject_artifacts must be a mapping")
+
+    max_q1_rollbacks = _get_by_path(data, "security.q1_spine_max_rollbacks")
+    if max_q1_rollbacks is not None:
+        if not isinstance(max_q1_rollbacks, int) or max_q1_rollbacks < 0:
+            errors.append(
+                "security.q1_spine_max_rollbacks must be a non-negative integer"
+            )
 
     exp_mode = _get_by_path(data, "experiment.mode")
     if not _is_blank(exp_mode) and exp_mode not in EXPERIMENT_MODES:

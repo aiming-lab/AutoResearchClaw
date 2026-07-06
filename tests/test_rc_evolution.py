@@ -13,7 +13,10 @@ from researchclaw.evolution import (
     EvolutionStore,
     LessonCategory,
     LessonEntry,
+    TrajectoryStore,
     extract_lessons,
+    get_trajectory_signal,
+    record_refine_trajectory,
     _classify_error,
     _time_weight,
 )
@@ -292,6 +295,38 @@ class TestEvolutionStore:
         store_dir = tmp_path / "nested" / "evo"
         store = EvolutionStore(store_dir)
         assert store_dir.exists()
+
+
+class TestTrajectoryStore:
+    def test_record_refine_trajectory_and_signal_detects_plateau(
+        self, tmp_path: Path
+    ) -> None:
+        log1 = {
+            "metric_key": "loss",
+            "metric_direction": "minimize",
+            "iterations": [{"metric": 1.0}, {"metric": 0.9}],
+        }
+        log2 = {
+            "metric_key": "loss",
+            "metric_direction": "minimize",
+            "iterations": [{"metric": 0.88}, {"metric": 0.87}],
+        }
+        log3 = {
+            "metric_key": "loss",
+            "metric_direction": "minimize",
+            "iterations": [{"metric": 0.86}, {"metric": 0.855}],
+        }
+
+        points = record_refine_trajectory(tmp_path, "run-a", log1, cycle=1)
+        record_refine_trajectory(tmp_path, "run-a", log2, cycle=2)
+        record_refine_trajectory(tmp_path, "run-a", log3, cycle=3)
+
+        assert len(points) == 2
+        assert TrajectoryStore(tmp_path).path.exists()
+        signal = get_trajectory_signal(tmp_path, "run-a", current_cycle=3)
+        assert signal["stagnating"] is True
+        assert signal["recommendation"] == "pivot"
+        assert "Cycle 3" in str(signal["summary"])
 
 
 # ── PromptManager evolution overlay integration ──

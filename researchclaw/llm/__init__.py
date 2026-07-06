@@ -1,4 +1,4 @@
-"""LLM integration — OpenAI-compatible and ACP agent clients."""
+"""LLM integration — OpenAI-compatible, ACP, and local CLI clients."""
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING, Union
 if TYPE_CHECKING:
     from researchclaw.config import RCConfig
     from researchclaw.llm.acp_client import ACPClient
+    from researchclaw.llm.claude_cli_client import ClaudeCliClient
     from researchclaw.llm.client import LLMClient
+    from researchclaw.llm.codex_cli_client import CodexCliClient
 
 # Provider presets for common LLM services
 PROVIDER_PRESETS = {
@@ -41,10 +43,14 @@ PROVIDER_PRESETS = {
 }
 
 
-def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
+def create_llm_client(
+    config: RCConfig,
+) -> LLMClient | ACPClient | ClaudeCliClient | CodexCliClient:
     """Factory: return the right LLM client based on ``config.llm.provider``.
 
     - ``"acp"`` → :class:`ACPClient` (spawns an ACP-compatible agent)
+    - ``"claude-cli"`` → :class:`ClaudeCliClient` (runs ``claude -p``)
+    - ``"codex-cli"`` → :class:`CodexCliClient` (runs ``codex exec``)
     - ``"anthropic"`` → :class:`LLMClient` with Anthropic Messages API adapter
     - ``"kimi-anthropic"`` → :class:`LLMClient` with Kimi Coding Anthropic adapter
     - ``"openrouter"`` → :class:`LLMClient` with OpenRouter base URL
@@ -60,7 +66,16 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
     """
     if config.llm.provider == "acp":
         from researchclaw.llm.acp_client import ACPClient as _ACP
+
         return _ACP.from_rc_config(config)
+    if config.llm.provider == "claude-cli":
+        from researchclaw.llm.claude_cli_client import ClaudeCliClient as _ClaudeCLI
+
+        return _ClaudeCLI.from_rc_config(config)
+    if config.llm.provider == "codex-cli":
+        from researchclaw.llm.codex_cli_client import CodexCliClient as _CodexCLI
+
+        return _CodexCLI.from_rc_config(config)
 
     from researchclaw.llm.client import LLMClient as _LLM
 

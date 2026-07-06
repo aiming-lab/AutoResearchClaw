@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnusedCallResult=false, reportAttributeAccessIssue=false, reportUnknownLambdaType=false
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -179,6 +180,84 @@ def test_execute_pipeline_stops_on_gate_when_stop_on_gate_enabled(
     assert results[-1].stage == gate_stage
     assert results[-1].status == StageStatus.BLOCKED_APPROVAL
     assert len(results) == int(gate_stage)
+
+
+def test_execute_pipeline_injects_artifacts_and_skips_configured_stages(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    cfg = dataclasses.replace(
+        rc_config,
+        runtime=dataclasses.replace(
+            rc_config.runtime,
+            skip_stages=(9,),
+            inject_artifacts={"stage-07/synthesis.md": "Injected synthesis"},
+        ),
+    )
+    seen: list[Stage] = []
+
+    def mock_execute_stage(stage: Stage, **kwargs: Any) -> StageResult:
+        _ = kwargs
+        seen.append(stage)
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-partial",
+        config=cfg,
+        adapters=adapters,
+        from_stage=Stage.HYPOTHESIS_GEN,
+    )
+
+    assert (
+        run_dir / "stage-07" / "synthesis.md"
+    ).read_text(encoding="utf-8") == "Injected synthesis"
+    assert Stage.EXPERIMENT_DESIGN not in seen
+    skipped = next(r for r in results if r.stage == Stage.EXPERIMENT_DESIGN)
+    assert skipped.decision == "skipped"
+    assert (run_dir / "stage-09" / "exp_plan.yaml").exists()
+
+
+def test_execute_pipeline_records_and_writes_trajectory_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs: Any) -> StageResult:
+        run_path = cast(Path, kwargs["run_dir"])
+        if stage == Stage.ITERATIVE_REFINE:
+            stage_dir = run_path / "stage-13"
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            (stage_dir / "refinement_log.json").write_text(
+                json.dumps(
+                    {
+                        "metric_key": "loss",
+                        "metric_direction": "minimize",
+                        "iterations": [{"metric": 1.0}, {"metric": 0.9}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return _done(stage, ("refinement_log.json",))
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    _ = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-trajectory",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.ITERATIVE_REFINE,
+        to_stage=Stage.RESEARCH_DECISION,
+    )
+
+    assert (run_dir / "evolution" / "trajectory.jsonl").exists()
+    signal = json.loads((run_dir / "trajectory_signal.json").read_text(encoding="utf-8"))
+    assert signal["recommendation"] == "proceed"
 
 
 def test_execute_pipeline_continues_after_gate_when_stop_on_gate_disabled(
