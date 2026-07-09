@@ -1176,16 +1176,20 @@ def is_allowed_claim_evidence_path(rel: str, claim_type: str) -> bool:
     parts = rel.split("/")
     if rel in {"experiment_summary_best.json", "attempts/attempt_log.jsonl"}:
         return True
-    if len(parts) == 2 and parts[0].startswith("stage-14") and parts[1] == "experiment_summary.json":
+    if len(parts) == 2 and _is_stage_dir(parts[0], 14) and parts[1] == "experiment_summary.json":
         return True
-    if len(parts) == 2 and parts[0].startswith("stage-13") and parts[1] == "refinement_log.json":
+    if len(parts) == 2 and _is_stage_dir(parts[0], 13) and parts[1] == "refinement_log.json":
         return True
     return (
         len(parts) == 3
-        and parts[0].startswith("stage-12")
+        and _is_stage_dir(parts[0], 12)
         and parts[1] == "runs"
         and parts[2].endswith(".json")
     )
+
+
+def _is_stage_dir(value: str, stage: int) -> bool:
+    return bool(re.fullmatch(rf"stage-{stage}(?:_v\d+)?", value))
 
 
 def sha256_of_file(path: Path) -> str | None:

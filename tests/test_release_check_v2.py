@@ -416,6 +416,21 @@ def test_evidence_allowlist_does_not_cross_directory_segments(good_run: Path) ->
     assert "claims_disallowed_evidence_path" in _codes(_check(good_run))
 
 
+def test_evidence_allowlist_rejects_stage_prefix_spoofing(good_run: Path) -> None:
+    fake_rel = "stage-14evil/experiment_summary.json"
+    _write(good_run / fake_rel, {"loss": 0.1234})
+    claims_data = json.loads((good_run / "stage-24" / "claims.json").read_text())
+    claims_data["claims"][0]["evidence"] = [
+        {
+            "path": fake_rel,
+            "sha256": ra.sha256_file(good_run / fake_rel),
+            "matched_value": 0.1234,
+        }
+    ]
+    _write(good_run / "stage-24" / "claims.json", claims_data)
+    assert "claims_disallowed_evidence_path" in _codes(_check(good_run))
+
+
 def test_background_without_whitelist_fails(good_run: Path) -> None:
     # Hole 2: role=background must NOT be a blanket escape.
     citations = json.loads((good_run / "stage-24" / "citations.json").read_text())
