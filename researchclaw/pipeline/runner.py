@@ -685,7 +685,11 @@ def execute_pipeline(
     except Exception:
         logger.debug("Experiment memory initialisation skipped")
 
+    cli_agent_provider = (
+        getattr(config.experiment.cli_agent, "provider", "llm") or "llm"
+    )
     cost_budget = getattr(config.experiment.cli_agent, "max_budget_usd", 0.0) or 0.0
+    enforce_cost_budget = cost_budget > 0 and cli_agent_provider != "llm"
 
     for stage in STAGE_SEQUENCE:
         started = _should_start(stage, from_stage, started)
@@ -712,15 +716,30 @@ def execute_pipeline(
                 pass
 
         # ── Cost budget check ──
-        if cost_budget > 0:
-            try:
-                from researchclaw.cost_tracker import get_global_tracker
-                if not get_global_tracker().check_budget(cost_budget):
-                    logger.warning("Cost budget $%.2f exceeded — pausing pipeline", cost_budget)
-                    print(f"{prefix} BUDGET EXCEEDED ($%.2f) — stopping" % cost_budget)
-                    break
-            except Exception:
-                pass
+        if enforce_cost_budget:
+            if importlib.util.find_spec("researchclaw.cost_tracker") is None:
+                error = (
+                    "Cost budget enforcement is configured for CLI agent provider "
+                    f"'{cli_agent_provider}', but researchclaw.cost_tracker is unavailable"
+                )
+                logger.error(error)
+                result = StageResult(
+                    stage=stage,
+                    status=StageStatus.FAILED,
+                    artifacts=(),
+                    error=error,
+                    decision="abort",
+                )
+                print(f"{prefix} {stage.name} -- FAILED (0.0s) -- {error}")
+                results.append(result)
+                break
+
+            from researchclaw.cost_tracker import get_global_tracker
+
+            if not get_global_tracker().check_budget(cost_budget):
+                logger.warning("Cost budget $%.2f exceeded; pausing pipeline", cost_budget)
+                print(f"{prefix} BUDGET EXCEEDED ($%.2f) -- stopping" % cost_budget)
+                break
 
         # BUG-218: Ensure the best stage-14 experiment data is promoted
         # BEFORE paper writing begins.  Without this, the recursive REFINE

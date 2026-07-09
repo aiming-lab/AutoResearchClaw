@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnusedCallResult=false, reportAttributeAccessIssue=false, reportUnknownLambdaType=false
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -562,6 +563,54 @@ def test_result_analysis_non_numeric_metric_contract_fails_stage(
     assert violations_path.exists()
     violations = json.loads(violations_path.read_text(encoding="utf-8"))
     assert "non-numeric result metric: accuracy" in violations
+
+
+def test_cli_cost_budget_without_enforcer_fails_before_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    cli_agent = replace(
+        rc_config.experiment.cli_agent,
+        provider="codex",
+        max_budget_usd=0.01,
+    )
+    config = replace(
+        rc_config,
+        experiment=replace(rc_config.experiment, cli_agent=cli_agent),
+    )
+    seen: list[Stage] = []
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        seen.append(stage)
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-cost-budget",
+        config=config,
+        adapters=adapters,
+        from_stage=Stage.EXPERIMENT_DESIGN,
+        to_stage=Stage.EXPERIMENT_DESIGN,
+    )
+
+    assert seen == []
+    assert results == [
+        StageResult(
+            stage=Stage.EXPERIMENT_DESIGN,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=(
+                "Cost budget enforcement is configured for CLI agent provider "
+                "'codex', but researchclaw.cost_tracker is unavailable"
+            ),
+            decision="abort",
+        )
+    ]
 
 
 @pytest.mark.parametrize(
