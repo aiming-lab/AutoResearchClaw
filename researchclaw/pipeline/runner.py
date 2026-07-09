@@ -568,7 +568,9 @@ def _run_experiment_diagnosis(
         return message
 
 
-def _run_experiment_repair(run_dir: Path, config: RCConfig, run_id: str) -> None:
+def _run_experiment_repair(
+    run_dir: Path, config: RCConfig, run_id: str
+) -> str | None:
     """Execute the experiment repair loop when diagnosis finds quality issues.
 
     Calls the repair loop from ``experiment_repair.py`` which:
@@ -640,17 +642,20 @@ def _run_experiment_repair(run_dir: Path, config: RCConfig, run_id: str) -> None
 
         if repair_result.success:
             # Re-run diagnosis with updated results
-            _run_experiment_diagnosis(run_dir, config, run_id)
+            return _run_experiment_diagnosis(run_dir, config, run_id)
         else:
             logger.info(
                 "[%s] Repair loop completed without reaching full_paper quality "
                 "(best mode: %s, %d cycles)",
                 run_id, repair_result.final_mode.value, repair_result.total_cycles,
             )
+            return None
 
     except Exception as exc:
-        logger.warning("[%s] Experiment repair failed: %s", run_id, exc)
-        print(f"[{run_id}] Experiment repair failed: {exc}")
+        message = f"Experiment repair failed: {exc}"
+        logger.warning("[%s] %s", run_id, message)
+        print(f"[{run_id}] {message}")
+        return message
 
 
 def execute_pipeline(
@@ -888,7 +893,24 @@ def execute_pipeline(
                 try:
                     _diag_data = json.loads(_diag_path.read_text(encoding="utf-8"))
                     if _diag_data.get("repair_needed"):
-                        _run_experiment_repair(run_dir, config, run_id)
+                        _repair_error = _run_experiment_repair(
+                            run_dir, config, run_id
+                        )
+                        if _repair_error:
+                            result = StageResult(
+                                stage=result.stage,
+                                status=StageStatus.FAILED,
+                                artifacts=result.artifacts,
+                                error=_repair_error,
+                                decision="retry",
+                                evidence_refs=result.evidence_refs,
+                            )
+                            results[-1] = result
+                            print(
+                                f"{prefix} {stage.name} -- FAILED ({elapsed:.1f}s) "
+                                f"-- {_repair_error}"
+                            )
+                            break
                 except (json.JSONDecodeError, OSError):
                     pass
 

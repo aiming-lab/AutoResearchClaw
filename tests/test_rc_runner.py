@@ -848,6 +848,50 @@ def test_result_analysis_diagnosis_failure_fails_stage(
     assert results[0].error == "Experiment diagnosis failed: diagnosis boom"
 
 
+def test_result_analysis_repair_failure_fails_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    import researchclaw.pipeline.experiment_repair as repair_module
+
+    def fake_diagnosis(run_dir_arg: Path, config: RCConfig, run_id: str) -> str | None:
+        _ = config, run_id
+        (run_dir_arg / "experiment_diagnosis.json").write_text(
+            json.dumps({"repair_needed": True}),
+            encoding="utf-8",
+        )
+        return None
+
+    def broken_repair_loop(*args: object, **kwargs: object) -> object:
+        _ = args, kwargs
+        raise RuntimeError("repair boom")
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "_run_experiment_diagnosis", fake_diagnosis)
+    monkeypatch.setattr(repair_module, "run_repair_loop", broken_repair_loop)
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-repair-fail",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert len(results) == 1
+    assert results[0].stage == Stage.RESULT_ANALYSIS
+    assert results[0].status == StageStatus.FAILED
+    assert results[0].error == "Experiment repair failed: repair boom"
+
+
 @pytest.mark.parametrize(
     ("stage", "started", "expected"),
     [
