@@ -771,26 +771,6 @@ def execute_pipeline(
         if stage == Stage.RESULT_ANALYSIS and result.status == StageStatus.DONE:
             result = _post_result_analysis_spec_gate(result, run_dir)
 
-        # ── Pitfall detection after code generation / experiment run ──
-        if stage in (Stage.CODE_GENERATION, Stage.EXPERIMENT_RUN) and result.status == StageStatus.DONE:
-            try:
-                from researchclaw.pipeline.pitfall_detector import PitfallDetector
-                detector = PitfallDetector()
-                code_path = run_dir / f"stage-{int(stage):02d}"
-                code_files = list(code_path.rglob("*.py"))
-                code_text = "\n".join(f.read_text(errors="ignore") for f in code_files[:5])
-                pitfalls = detector.detect_all(code=code_text, results={}, experiment_config={})
-                if pitfalls:
-                    critical = [p for p in pitfalls if p.severity == "critical"]
-                    if critical:
-                        logger.warning("CRITICAL pitfalls detected: %s", [p.description for p in critical])
-                    pitfall_report = [{"type": p.type.value, "severity": p.severity, "description": p.description} for p in pitfalls]
-                    (run_dir / f"stage-{int(stage):02d}" / "pitfall_report.json").write_text(
-                        json.dumps(pitfall_report, indent=2), encoding="utf-8"
-                    )
-            except Exception:
-                logger.debug("Pitfall detection skipped")
-
         # ── Experiment memory: record outcome after experiment stages ──
         if stage in (Stage.EXPERIMENT_RUN, Stage.ITERATIVE_REFINE) and result.status == StageStatus.DONE and exp_memory:
             try:
