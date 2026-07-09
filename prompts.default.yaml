@@ -85,7 +85,11 @@ stages:
       \ entry point that runs experiments and prints metrics\n- Additional modules for algorithms, objective functions, utilities\n\
       - Primary metric key: {metric}\n- main.py must print metric lines as `name: value` (one per line)\n- main.py must ALSO\
       \ write a `results.json` file with structured experiment results\n  (e.g. per-algorithm, per-function, per-dimension metrics\
-      \ as nested dicts/lists)\n- Use deterministic seeds (numpy.random.seed or random.seed)\n- No external data files, no\
+      \ as nested dicts/lists)\n- results.json MUST include top-level `dataset_origin` set to one of: `synthetic`, `public`,\
+      \ `local_hardware`\n- Set `dataset_origin` honestly: use `synthetic` if any input data is generated or simulated in\
+      \ code (this is the default for self-contained experiments); use `public` ONLY if you load a real, named public dataset;\
+      \ use `local_hardware` ONLY if you read real measurements from this machine. If unsure, use `synthetic`. Mislabeling\
+      \ synthetic data as `public` or `local_hardware` is fabrication.\n- Use deterministic seeds (numpy.random.seed or random.seed)\n- No external data files, no\
       \ network calls, no GPU required\n- FORBIDDEN: subprocess, os.system, eval, exec, shutil, socket\n- MUST implement convergence\
       \ stopping criteria (e.g. stop when objective change < 1e-8 for\n  N consecutive iterations) — do NOT just run a fixed\
       \ number of iterations\n{pkg_hint}\nANTI-PATTERNS (do NOT do these):\n- Do NOT generate random numbers and pretend they\

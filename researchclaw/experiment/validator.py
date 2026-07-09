@@ -116,53 +116,9 @@ BANNED_MODULES: frozenset[str] = frozenset(
     }
 )
 
-# Packages considered safe / always available in experiment sandbox.
-SAFE_STDLIB: frozenset[str] = frozenset(
-    {
-        "abc",
-        "ast",
-        "bisect",
-        "builtins",
-        "collections",
-        "contextlib",
-        "copy",
-        "csv",
-        "dataclasses",
-        "datetime",
-        "decimal",
-        "enum",
-        "functools",
-        "glob",
-        "gzip",
-        "hashlib",
-        "heapq",
-        "io",
-        "itertools",
-        "json",
-        "logging",
-        "math",
-        "operator",
-        "os",  # os itself is ok, certain calls aren't
-        "pathlib",
-        "pickle",
-        "pprint",
-        "random",
-        "re",
-        "statistics",
-        "string",
-        "struct",
-        "sys",
-        "tempfile",
-        "textwrap",
-        "time",
-        "traceback",
-        "typing",
-        "unittest",
-        "uuid",
-        "warnings",
-        "zipfile",
-    }
-)
+# Packages considered available in the experiment sandbox. This is availability
+# only; the security visitor still blocks dangerous imports/calls separately.
+SAFE_STDLIB: frozenset[str] = frozenset(sys.stdlib_module_names)
 
 COMMON_SCIENCE: frozenset[str] = frozenset(
     {
@@ -349,12 +305,11 @@ def validate_imports(
 ) -> CodeValidation:
     """Check that all imported modules are available.
 
-    *available* defaults to ``SAFE_STDLIB | COMMON_SCIENCE`` plus any
-    modules already in ``sys.modules``.
+    *available* defaults to ``SAFE_STDLIB | COMMON_SCIENCE``.
     """
     result = CodeValidation()
     if available is None:
-        available = set(SAFE_STDLIB) | set(COMMON_SCIENCE) | set(sys.modules.keys())
+        available = set(SAFE_STDLIB) | set(COMMON_SCIENCE)
 
     imports = extract_imports(code)
     for mod in sorted(imports):

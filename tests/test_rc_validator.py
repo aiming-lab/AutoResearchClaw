@@ -128,6 +128,23 @@ def test_validate_imports_recognizes_stdlib_modules_by_default():
     assert result.warnings == []
 
 
+def test_validate_imports_recognizes_drift_prone_stdlib_modules_by_default():
+    code = "\n".join(
+        [
+            "import argparse",
+            "import subprocess",
+            "import types",
+            "import warnings",
+            "from collections.abc import Mapping",
+        ]
+    )
+
+    result = validate_imports(code)
+
+    assert result.ok is True
+    assert result.warnings == []
+
+
 def test_validate_imports_warns_for_unavailable_package():
     result = validate_imports("import totally_missing_pkg")
 
@@ -150,6 +167,17 @@ def test_validate_imports_respects_custom_available_set():
 
     assert [w.message for w in result.warnings] == [
         "Module 'beta' may not be available in sandbox",
+    ]
+
+
+def test_validate_imports_does_not_allow_modules_from_current_process():
+    # pytest is necessarily imported in this process, but generated experiment
+    # code should not become valid merely because the validator imported it.
+    result = validate_imports("import pytest")
+
+    assert result.ok is True
+    assert [w.message for w in result.warnings] == [
+        "Module 'pytest' may not be available in sandbox",
     ]
 
 

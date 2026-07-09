@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,8 @@ from researchclaw.prompts import PromptManager
 
 logger = logging.getLogger(__name__)
 
+_DATASET_ORIGIN_BLOCKER = "Stage 10 smoke results missing explicit dataset_origin"
+
 # Improvement G: Continuous-action environments that are incompatible with DQN
 _CONTINUOUS_ENVS = {
     "pendulum", "halfcheetah", "hopper", "walker2d", "ant", "humanoid",
@@ -52,6 +56,234 @@ def _has_main_guard(code: str) -> bool:
 def _add_stage10_blocker(blockers: list[str], message: str) -> None:
     if message not in blockers:
         blockers.append(message)
+
+
+def _scrub_packaged_experiment_outputs(exp_dir: Path) -> None:
+    """Remove stale runtime outputs before Stage 12 receives the project."""
+    for stale_name in ("results.json", "smoke_results.json"):
+        stale_file = exp_dir / stale_name
+        if stale_file.exists() and stale_file.is_file():
+            stale_file.unlink()
+    stale_runs = exp_dir / "runs"
+    if stale_runs.exists() and stale_runs.is_dir():
+        shutil.rmtree(stale_runs)
+
+
+def _repair_missing_dataset_origin(exp_dir: Path) -> bool:
+    """Patch generated code to write honest synthetic provenance metadata.
+
+    Stage 10 generated experiments are required to be self-contained and cannot
+    load external data or use the network. When a smoke run proves the code is
+    otherwise executable but its results.json omits dataset_origin, adding the
+    default synthetic provenance is metadata repair, not metric repair.
+    """
+    changed = False
+    dump_pattern = re.compile(r"^(\s*)json\.dump\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,")
+    for py_file in sorted(exp_dir.glob("*.py")):
+        text = py_file.read_text(encoding="utf-8")
+        if "dataset_origin" in text:
+            continue
+        lines = text.splitlines()
+        new_lines: list[str] = []
+        file_changed = False
+        for line in lines:
+            match = dump_pattern.match(line)
+            if match and not file_changed:
+                indent, var_name = match.groups()
+                new_lines.append(f"{indent}if isinstance({var_name}, dict):")
+                new_lines.append(
+                    f"{indent}    {var_name}.setdefault('dataset_origin', 'synthetic')"
+                )
+                file_changed = True
+            new_lines.append(line)
+        if file_changed:
+            py_file.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            changed = True
+    return changed
+
+
+def _repair_harness_api_misuse(exp_dir: Path) -> bool:
+    """Repair common generated-code misuse of immutable harness properties."""
+    changed = False
+    for py_file in sorted(exp_dir.glob("*.py")):
+        text = py_file.read_text(encoding="utf-8")
+        if "experiment_harness" not in text and "ExperimentHarness" not in text:
+            continue
+        repaired = re.sub(r"\.elapsed\(\)", ".elapsed", text)
+        repaired = re.sub(r"\.progress\(\)", ".progress", repaired)
+        if repaired != text:
+            py_file.write_text(repaired, encoding="utf-8")
+            changed = True
+    return changed
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if math.isfinite(number):
+            return number
+    return None
+
+
+def _flatten_structured_metrics(doc: object) -> dict[str, float]:
+    if not isinstance(doc, dict):
+        return {}
+    raw_metrics = doc.get("metrics")
+    metrics: dict[str, float] = {}
+    if isinstance(raw_metrics, dict):
+        for key, value in raw_metrics.items():
+            number = _finite_number(value)
+            if number is not None:
+                metrics[str(key)] = number
+    for key, value in doc.items():
+        if key in {"metrics", "dataset_origin", "generator"}:
+            continue
+        number = _finite_number(value)
+        if number is not None:
+            metrics.setdefault(str(key), number)
+    return metrics
+
+
+def _latest_sandbox_results_json(sandbox: object) -> dict[str, Any] | None:
+    workdir = getattr(sandbox, "workdir", None)
+    if not isinstance(workdir, Path):
+        return None
+    candidates = [
+        p / "results.json"
+        for p in workdir.iterdir()
+        if p.is_dir()
+        and (p.name.startswith("_project_") or p.name.startswith("_docker_project_"))
+    ]
+    for result_path in sorted(
+        candidates,
+        key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
+        reverse=True,
+    ):
+        if not result_path.exists():
+            continue
+        try:
+            data = json.loads(result_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _run_stage10_smoke_gate(
+    stage_dir: Path,
+    exp_dir: Path,
+    config: RCConfig,
+) -> tuple[list[str], list[str]]:
+    """Run a quarantined executable smoke check for the generated project."""
+    if config.experiment.mode not in ("sandbox", "docker"):
+        return [], []
+
+    smoke_dir = stage_dir / "smoke"
+    smoke_dir.mkdir(parents=True, exist_ok=True)
+    smoke_report_path = smoke_dir / "smoke_report.json"
+    smoke_results_path = smoke_dir / "smoke_results.json"
+    if smoke_results_path.exists():
+        smoke_results_path.unlink()
+    if smoke_report_path.exists():
+        smoke_report_path.unlink()
+
+    try:
+        from researchclaw.experiment.factory import create_sandbox
+
+        smoke_workdir = stage_dir / ".smoke_sandbox"
+        smoke_workdir.mkdir(parents=True, exist_ok=True)
+        sandbox = create_sandbox(config.experiment, smoke_workdir)
+        smoke_timeout = max(1, min(60, int(config.experiment.time_budget_sec)))
+        result = sandbox.run_project(
+            exp_dir,
+            timeout_sec=smoke_timeout,
+            env_overrides={
+                "PYTHONHASHSEED": "0",
+                "RC_RANDOM_SEED": "0",
+                "RC_STAGE10_SMOKE": "1",
+            },
+        )
+        structured = _latest_sandbox_results_json(sandbox)
+        metrics = {
+            k: float(v)
+            for k, v in (result.metrics or {}).items()
+            if _finite_number(v) is not None
+        }
+        metrics.update(_flatten_structured_metrics(structured))
+        dataset_origin = ""
+        if isinstance(structured, dict):
+            dataset_origin = str(structured.get("dataset_origin") or "").strip()
+        metric_key = str(config.experiment.metric_key)
+        blockers: list[str] = []
+        if result.timed_out:
+            blockers.append(f"Stage 10 smoke timed out after {smoke_timeout}s")
+        if result.returncode != 0:
+            blockers.append(
+                f"Stage 10 smoke failed with returncode={result.returncode}"
+            )
+        metric_value = _finite_number(metrics.get(metric_key))
+        if metric_value is None:
+            blockers.append(
+                f"Stage 10 smoke did not produce finite primary metric '{metric_key}'"
+            )
+        if not dataset_origin or dataset_origin == "unknown":
+            blockers.append(_DATASET_ORIGIN_BLOCKER)
+
+        if blockers:
+            smoke_report_path.write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "blockers": blockers,
+                        "returncode": result.returncode,
+                        "timed_out": result.timed_out,
+                        "elapsed_sec": result.elapsed_sec,
+                        "stderr_tail": (result.stderr or "")[-2000:],
+                        "generated": _utcnow_iso(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            return blockers, ["smoke/smoke_report.json"]
+
+        smoke_results_path.write_text(
+            json.dumps(
+                {
+                    "status": "passed",
+                    "metric_key": metric_key,
+                    "metrics": metrics,
+                    "dataset_origin": dataset_origin,
+                    "elapsed_sec": result.elapsed_sec,
+                    "timeout_sec": smoke_timeout,
+                    "generated": _utcnow_iso(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return [], ["smoke/smoke_results.json"]
+    except Exception as exc:  # noqa: BLE001
+        blockers = [f"Stage 10 smoke gate crashed: {exc}"]
+        smoke_report_path.write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "blockers": blockers,
+                    "generated": _utcnow_iso(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return blockers, ["smoke/smoke_report.json"]
+    finally:
+        smoke_workdir = stage_dir / ".smoke_sandbox"
+        if smoke_workdir.exists():
+            shutil.rmtree(smoke_workdir, ignore_errors=True)
 
 
 def _execute_collider_plan_generation(
@@ -968,7 +1200,7 @@ def _execute_code_generation(
         "numpy", "np", "torch", "torchvision", "gymnasium", "gym",
         "sklearn", "scipy", "pandas", "matplotlib", "PIL", "tqdm",
         "einops", "timm", "transformers", "datasets", "peft",
-        "stable_baselines3",
+        "stable_baselines3", "experiment_harness",
     }
     for fname, code in list(files.items()):
         if not fname.endswith(".py"):
@@ -1570,6 +1802,30 @@ def _execute_code_generation(
             "main.py has no executable `if __name__ == '__main__' entry point",
         )
 
+    smoke_artifacts: list[str] = []
+    if not _stage10_blockers:
+        _scrub_packaged_experiment_outputs(exp_dir)
+        if _repair_harness_api_misuse(exp_dir):
+            logger.info("Stage 10: repaired ExperimentHarness property misuse")
+        smoke_blockers, smoke_artifacts = _run_stage10_smoke_gate(
+            stage_dir,
+            exp_dir,
+            config,
+        )
+        if smoke_blockers == [_DATASET_ORIGIN_BLOCKER]:
+            if _repair_missing_dataset_origin(exp_dir):
+                logger.info(
+                    "Stage 10: added missing dataset_origin metadata; "
+                    "rerunning smoke gate"
+                )
+                smoke_blockers, smoke_artifacts = _run_stage10_smoke_gate(
+                    stage_dir,
+                    exp_dir,
+                    config,
+                )
+        for blocker in smoke_blockers:
+            _add_stage10_blocker(_stage10_blockers, blocker)
+
     # --- Write spec ---
     file_list = ", ".join(f"`{f}`" for f in sorted(files.keys()))
     main_validation = validate_code(files.get("main.py", ""))
@@ -1604,6 +1860,7 @@ Multi-file experiment project with {len(files)} file(s): {file_list}
     (stage_dir / "experiment_spec.md").write_text(spec, encoding="utf-8")
 
     artifacts = ["experiment/", "experiment_spec.md"]
+    artifacts.extend(smoke_artifacts)
     if (stage_dir / "validation_report.md").exists():
         artifacts.append("validation_report.md")
     if _stage10_blockers:

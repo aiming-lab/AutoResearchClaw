@@ -188,3 +188,27 @@ class TestExperimentSandboxEntryPointValidation:
 
         assert result.returncode == 0
         assert result.metrics.get("metric") == 1.0
+
+    def test_run_project_skips_stale_output_artifacts(self, tmp_path: Path) -> None:
+        project = tmp_path / "proj"
+        project.mkdir()
+        (project / "main.py").write_text("print('metric: 1.0')\n", encoding="utf-8")
+        (project / "results.json").write_text(
+            '{"metrics": {"metric": 999.0}}',
+            encoding="utf-8",
+        )
+        stale_runs = project / "runs"
+        stale_runs.mkdir()
+        (stale_runs / "run-1.json").write_text(
+            '{"metrics": {"metric": 999.0}}',
+            encoding="utf-8",
+        )
+
+        sandbox = self._make_sandbox(tmp_path)
+        result = sandbox.run_project(project, timeout_sec=10)
+
+        copied_project = tmp_path / "work" / "_project_1"
+        assert result.returncode == 0
+        assert result.metrics.get("metric") == 1.0
+        assert not (copied_project / "results.json").exists()
+        assert not (copied_project / "runs").exists()

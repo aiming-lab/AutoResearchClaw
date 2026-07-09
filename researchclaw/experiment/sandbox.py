@@ -17,6 +17,11 @@ from researchclaw.hardware import is_metric_name
 
 logger = logging.getLogger(__name__)
 
+STALE_PROJECT_OUTPUT_FILES: frozenset[str] = frozenset(
+    {"results.json", "smoke_results.json"}
+)
+STALE_PROJECT_OUTPUT_DIRS: frozenset[str] = frozenset({"runs"})
+
 
 def validate_entry_point(entry_point: str) -> str | None:
     """Validate *entry_point* syntax (no filesystem access needed).
@@ -402,6 +407,12 @@ class ExperimentSandbox:
 
         # Copy all project files (will NOT overwrite harness — harness name is unique)
         for src_file in project_dir.iterdir():
+            if src_file.name in STALE_PROJECT_OUTPUT_FILES:
+                logger.debug("Skipping stale project output file %s", src_file)
+                continue
+            if src_file.name in STALE_PROJECT_OUTPUT_DIRS:
+                logger.debug("Skipping stale project output directory %s", src_file)
+                continue
             if src_file.is_file():
                 dest = sandbox_project / src_file.name
                 # Do not allow project to overwrite the harness

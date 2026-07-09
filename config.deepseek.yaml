@@ -47,6 +47,7 @@ experiment:
     tree_search_eval_timeout_sec: 180
     long_call_max_tokens: 8192
   opencode:
+    enabled: false
     workspace_cleanup: false
     fallback_to_code_agent: false
   sandbox:

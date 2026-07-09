@@ -26,6 +26,8 @@ from pathlib import Path
 from researchclaw.config import DockerSandboxConfig
 from researchclaw.experiment.sandbox import (
     SandboxResult,
+    STALE_PROJECT_OUTPUT_DIRS,
+    STALE_PROJECT_OUTPUT_FILES,
     parse_metrics,
     validate_entry_point,
     validate_entry_point_resolved,
@@ -162,6 +164,12 @@ class DockerSandbox:
         # Copy project files and subdirectories (skip harness overwrite)
         import shutil as _shutil
         for src_item in project_dir.iterdir():
+            if src_item.name in STALE_PROJECT_OUTPUT_FILES:
+                logger.debug("Skipping stale project output file %s", src_item)
+                continue
+            if src_item.name in STALE_PROJECT_OUTPUT_DIRS:
+                logger.debug("Skipping stale project output directory %s", src_item)
+                continue
             dest = staging / src_item.name
             if src_item.name == "experiment_harness.py":
                 logger.warning(
