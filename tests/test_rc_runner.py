@@ -362,6 +362,208 @@ def test_execute_pipeline_passes_auto_approve_flag_to_execute_stage(
     assert all(received)
 
 
+def test_experiment_design_spec_violations_fail_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "exp_plan.yaml").write_text(
+            "metrics:\n  accuracy:\n    direction: maximize\n",
+            encoding="utf-8",
+        )
+        return _done(stage, artifacts=("exp_plan.yaml",))
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-exp-spec-gate",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.EXPERIMENT_DESIGN,
+        to_stage=Stage.EXPERIMENT_DESIGN,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-09" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "at least one condition is required" in violations
+
+
+def test_result_analysis_missing_metric_contract_fails_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    spec_dir = run_dir / "stage-09"
+    spec_dir.mkdir(parents=True)
+    spec = {
+        "schema_version": "1.0",
+        "experiment_type": "comparison",
+        "domain_id": "ml_vision",
+        "problem_description": "Compare methods",
+        "conditions": [
+            {
+                "name": "baseline",
+                "role": "reference",
+                "description": "",
+                "varies_from": "",
+                "variation": "",
+                "parameters": {},
+            },
+            {
+                "name": "proposed",
+                "role": "proposed",
+                "description": "",
+                "varies_from": "",
+                "variation": "",
+                "parameters": {},
+            },
+        ],
+        "input_type": "generated",
+        "input_description": "",
+        "evaluation": {
+            "primary_metric": {
+                "name": "accuracy",
+                "direction": "maximize",
+                "unit": "",
+                "description": "",
+            },
+            "secondary_metrics": [
+                {
+                    "name": "loss",
+                    "direction": "minimize",
+                    "unit": "",
+                    "description": "",
+                },
+            ],
+            "protocol": "",
+            "statistical_test": "paired_t_test",
+            "num_seeds": 3,
+        },
+        "main_figure_type": "bar_chart",
+        "main_table_type": "comparison_table",
+        "raw_yaml": "",
+        "mode": "falsify",
+        "budget": {"wall_clock_seconds": 3600, "max_cost_usd": None},
+        "seeds": [1],
+        "prediction": {
+            "statement": "Proposed improves accuracy",
+            "metric": "accuracy",
+            "condition": "proposed",
+            "baseline": "baseline",
+            "comparison": "greater_than",
+            "min_effect_size": 0.01,
+        },
+    }
+    (spec_dir / "experiment_spec.yaml").write_text(
+        json.dumps(spec),
+        encoding="utf-8",
+    )
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "results.json").write_text(
+            json.dumps({"accuracy": 0.82}),
+            encoding="utf-8",
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-gate",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-14" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "missing result metric: loss" in violations
+
+
+def test_result_analysis_non_numeric_metric_contract_fails_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    from researchclaw.domains.experiment_schema import (
+        Condition,
+        EvaluationSpec,
+        MetricSpec,
+        PreregisteredPrediction,
+        UniversalExperimentPlan,
+    )
+
+    spec_dir = run_dir / "stage-09"
+    spec_dir.mkdir(parents=True)
+    spec = UniversalExperimentPlan(
+        domain_id="ml_vision",
+        conditions=[
+            Condition(name="baseline", role="reference"),
+            Condition(name="proposed", role="proposed"),
+        ],
+        evaluation=EvaluationSpec(
+            primary_metric=MetricSpec(name="accuracy", direction="maximize"),
+        ),
+        seeds=[1],
+        prediction=PreregisteredPrediction(
+            statement="Proposed improves accuracy",
+            metric="accuracy",
+            condition="proposed",
+            baseline="baseline",
+            comparison="greater_than",
+            min_effect_size=0.01,
+        ),
+    )
+    (spec_dir / "experiment_spec.yaml").write_text(
+        spec.to_yaml_v1(),
+        encoding="utf-8",
+    )
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "results.json").write_text(
+            json.dumps({"accuracy": "0.82"}),
+            encoding="utf-8",
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-nonnumeric-gate",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-14" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "non-numeric result metric: accuracy" in violations
+
+
 @pytest.mark.parametrize(
     ("stage", "started", "expected"),
     [

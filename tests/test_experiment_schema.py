@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
+import researchclaw.domains.experiment_schema as experiment_schema
 from researchclaw.domains.experiment_schema import (
     Condition,
     ConditionRole,
@@ -14,6 +15,69 @@ from researchclaw.domains.experiment_schema import (
     UniversalExperimentPlan,
     from_legacy_exp_plan,
 )
+
+
+def _full_v1_plan() -> UniversalExperimentPlan:
+    return UniversalExperimentPlan(
+        experiment_type=ExperimentType.COMPARISON.value,
+        domain_id="ml_vision",
+        problem_description="Compare classifier variants",
+        conditions=[
+            Condition(
+                name="baseline",
+                role=ConditionRole.REFERENCE.value,
+                description="Reference classifier",
+                parameters={"depth": 18},
+            ),
+            Condition(
+                name="proposed",
+                role=ConditionRole.PROPOSED.value,
+                description="New classifier",
+                parameters={"depth": 34},
+            ),
+            Condition(
+                name="proposed_no_aug",
+                role=ConditionRole.VARIANT.value,
+                description="No augmentation variant",
+                varies_from="proposed",
+                variation="disable augmentation",
+                parameters={"augmentation": False},
+            ),
+        ],
+        input_type="benchmark_dataset",
+        input_description="CIFAR-like benchmark",
+        evaluation=EvaluationSpec(
+            primary_metric=MetricSpec(
+                name="accuracy",
+                direction="maximize",
+                unit="fraction",
+                description="Held-out accuracy",
+            ),
+            secondary_metrics=[
+                MetricSpec(name="latency", direction="minimize", unit="ms"),
+            ],
+            protocol="train on train split, evaluate on holdout",
+            statistical_test="bootstrap_ci",
+            num_seeds=5,
+        ),
+        main_figure_type="line_chart",
+        main_table_type="metric_table",
+        raw_yaml="raw: yaml\n",
+        mode="falsify",
+        budget=experiment_schema.ExperimentBudget(
+            wall_clock_seconds=7200,
+            max_cost_usd=12.5,
+        ),
+        seeds=[1, 2, 3],
+        prediction=experiment_schema.PreregisteredPrediction(
+            statement="The proposed method improves accuracy",
+            metric="accuracy",
+            condition="proposed",
+            baseline="baseline",
+            comparison="greater_than",
+            min_effect_size=0.02,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +114,14 @@ class TestUniversalExperimentPlan:
         plan = UniversalExperimentPlan()
         assert plan.conditions == []
         assert plan.experiment_type == "comparison"
+
+    def test_legacy_positional_constructor_order_is_preserved(self):
+        plan = UniversalExperimentPlan("convergence", "physics_pde", "Track error")
+
+        assert plan.experiment_type == "convergence"
+        assert plan.domain_id == "physics_pde"
+        assert plan.problem_description == "Track error"
+        assert plan.schema_version == experiment_schema.SCHEMA_VERSION
 
     def test_plan_with_conditions(self):
         plan = UniversalExperimentPlan(
@@ -96,6 +168,63 @@ class TestUniversalExperimentPlan:
         assert data["experiment"]["type"] == "convergence"
         assert data["experiment"]["domain"] == "physics_pde"
         assert len(data["experiment"]["conditions"]) == 2
+
+    def test_v1_yaml_file_roundtrip_preserves_every_field(self, tmp_path):
+        plan = _full_v1_plan()
+        path = tmp_path / "experiment_spec.yaml"
+
+        path.write_text(plan.to_yaml_v1(), encoding="utf-8")
+        plan2 = UniversalExperimentPlan.from_yaml_v1(
+            path.read_text(encoding="utf-8")
+        )
+
+        assert plan2 == plan
+        assert plan2.to_dict() == plan.to_dict()
+
+    def test_from_dict_rejects_unknown_top_level_keys(self):
+        data = _full_v1_plan().to_dict()
+        data["silently_lost"] = True
+        error_type = experiment_schema.SpecValidationError
+
+        with pytest.raises(error_type) as excinfo:
+            UniversalExperimentPlan.from_dict(data)
+
+        assert "Unknown top-level key: silently_lost" in excinfo.value.violations
+
+    def test_validate_strict_requires_prediction_seeds_and_schema_version(self):
+        plan = _full_v1_plan()
+        plan.prediction = None
+        plan.seeds = []
+        plan.schema_version = "0.9"
+
+        violations = plan.validate(strict=True)
+
+        assert "prediction is required for strict v1 validation" in violations
+        assert "seeds must be non-empty for strict v1 validation" in violations
+        assert "schema_version must be 1.0" in violations
+
+    def test_validate_structural_checks(self):
+        plan = _full_v1_plan()
+        plan.experiment_type = "unsupported"
+        plan.mode = "explore"
+        plan.budget.wall_clock_seconds = 0
+        plan.conditions[0].role = "control"
+        assert plan.prediction is not None
+        plan.prediction.metric = "missing_metric"
+        plan.prediction.condition = "missing_condition"
+        plan.prediction.baseline = "missing_baseline"
+        plan.prediction.comparison = "equal_to"
+
+        violations = plan.validate(strict=False)
+
+        assert "experiment_type is invalid: unsupported" in violations
+        assert "mode must be 'falsify' or 'optimize'" in violations
+        assert "budget.wall_clock_seconds must be > 0" in violations
+        assert "condition role for baseline is invalid: control" in violations
+        assert "prediction.metric is not defined in evaluation metrics: missing_metric" in violations
+        assert "prediction.condition is not defined in conditions: missing_condition" in violations
+        assert "prediction.baseline is not defined in conditions: missing_baseline" in violations
+        assert "prediction.comparison must be 'greater_than' or 'less_than'" in violations
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +309,19 @@ metrics:
         legacy = {"metrics": ["accuracy", "f1"]}
         plan = from_legacy_exp_plan(legacy)
         assert plan.evaluation.primary_metric.name == "accuracy"
+
+    def test_legacy_converted_plan_passes_structural_not_strict_validation(self):
+        legacy = {
+            "baselines": [{"name": "baseline"}],
+            "proposed_methods": [{"name": "proposed"}],
+            "metrics": {"accuracy": {"direction": "maximize"}},
+        }
+        plan = from_legacy_exp_plan(legacy)
+
+        assert plan.validate(strict=False) == []
+        assert "prediction is required for strict v1 validation" in plan.validate(
+            strict=True
+        )
 
 
 # ---------------------------------------------------------------------------
