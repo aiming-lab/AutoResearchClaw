@@ -679,18 +679,7 @@ def execute_pipeline(
     except Exception:  # noqa: BLE001
         pass
 
-    # ── Integration hooks: EventLog, ExperimentMemory, CostTracker ──
-    event_log = None
-    try:
-        from researchclaw.pipeline.event_log import EventLog, EventType, create_event
-        event_log = EventLog(log_dir=run_dir)
-        event_log.append(create_event(
-            EventType.PIPELINE_START, run_id=run_id,
-            stages=total_stages, from_stage=int(from_stage),
-        ))
-    except Exception:
-        logger.debug("Event log initialisation skipped")
-
+    # ── Integration hooks: ExperimentMemory, CostTracker ──
     exp_memory = None
     try:
         from researchclaw.memory.experiment_memory import ExperimentMemory
@@ -727,15 +716,6 @@ def execute_pipeline(
         stage_num = int(stage)
         prefix = f"[{run_id}] Stage {stage_num:02d}/{total_stages}"
         print(f"{prefix} {stage.name} — running...")
-
-        # ── Event log: stage start ──
-        if event_log:
-            try:
-                event_log.append(create_event(
-                    EventType.STAGE_START, run_id=run_id, stage=stage.name,
-                ))
-            except Exception:
-                pass
 
         # ── Cost budget check ──
         if enforce_cost_budget:
@@ -783,18 +763,6 @@ def execute_pipeline(
             auto_approve_gates=auto_approve_gates,
         )
         elapsed = _time.monotonic() - t0
-
-        # ── Event log: stage end ──
-        if event_log:
-            try:
-                etype = EventType.STAGE_END if result.status == StageStatus.DONE else EventType.STAGE_FAIL
-                event_log.append(create_event(
-                    etype, run_id=run_id, stage=stage.name,
-                    status=result.status.value, elapsed_sec=round(elapsed, 1),
-                    error=result.error,
-                ))
-            except Exception:
-                pass
 
         # ── ExperimentSpec: generate after design, validate after analysis ──
         if stage == Stage.EXPERIMENT_DESIGN and result.status == StageStatus.DONE:
@@ -1086,18 +1054,6 @@ def execute_pipeline(
         degradations=degradations,
     )
     _write_pipeline_summary(run_dir, summary)
-
-    # ── Event log: pipeline end ──
-    if event_log:
-        try:
-            done_count = sum(1 for r in results if r.status == StageStatus.DONE)
-            failed_count = sum(1 for r in results if r.status == StageStatus.FAILED)
-            event_log.append(create_event(
-                EventType.PIPELINE_END, run_id=run_id,
-                stages_done=done_count, stages_failed=failed_count,
-            ))
-        except Exception:
-            pass
 
     # --- Evolution: extract and store lessons ---
     lessons: list[object] = []
