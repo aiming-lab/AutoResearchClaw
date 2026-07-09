@@ -24,6 +24,7 @@ gate to make a particular run pass is a process violation.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import re
@@ -50,6 +51,15 @@ _PLACEHOLDER_PAPER_MARKERS = (
     "No content generated.",
     "# Skipped Stage",
 )
+
+_ALLOWED_CLAIM_EVIDENCE_PATTERNS = (
+    "stage-14*/experiment_summary.json",
+    "experiment_summary_best.json",
+    "stage-13*/refinement_log.json",
+    "stage-12*/runs/*.json",
+    "attempts/attempt_log.jsonl",
+)
+_CITATION_EVIDENCE_PATH = "stage-23/verification_report.json"
 
 
 @dataclass(frozen=True)
@@ -561,6 +571,7 @@ class ReleaseChecker:
             return
         unsupported = 0
         orphans = 0
+        disallowed_evidence = 0
         supported_without_evidence = 0
         numeric_unclosed = 0
         numeric_evidence_value_missing = 0
@@ -596,6 +607,9 @@ class ReleaseChecker:
                 rel = str(ev.get("path", ""))
                 if not rel or rel.startswith(("/", "..")) or ".." in rel.split("/"):
                     orphans += 1
+                    continue
+                if not is_allowed_claim_evidence_path(rel, ctype):
+                    disallowed_evidence += 1
                     continue
                 target = self.run_dir / rel
                 if not target.is_file():
@@ -667,6 +681,16 @@ class ReleaseChecker:
                 "(deterministic extraction). A matched_value asserted only in claims.json is not evidence.",
                 "stage-24/claims.json",
             )
+        if disallowed_evidence:
+            self.error(
+                "claims_disallowed_evidence_path",
+                f"{disallowed_evidence} claim evidence pointer(s) target files that are inside "
+                "the run directory but outside the release evidence allowlist. Evidence must "
+                "come from stage-12 run files, stage-13 refinement logs, stage-14 summaries, "
+                "experiment_summary_best.json, attempts/attempt_log.jsonl, or citation "
+                "verification for citation claims.",
+                "stage-24/claims.json",
+            )
         if numeric_unclosed:
             self.error(
                 "claims_numeric_not_closed",
@@ -694,9 +718,25 @@ class ReleaseChecker:
         if not citations_data:
             return
         instances = citations_data.get("instances")
-        if not isinstance(instances, list) or not instances:
-            # A paper with zero citation instances is suspicious but not a
-            # support violation per se; the v1 citation gates handle it.
+        cited_keys = self.collect_citation_keys()
+        if not isinstance(instances, list):
+            self.error(
+                "citation_support_instances_invalid",
+                "stage-24/citations.json must contain an instances array.",
+                "stage-24/citations.json",
+            )
+            return
+        if not instances:
+            if cited_keys:
+                self.error(
+                    "citation_support_instances_missing",
+                    "The paper contains citation keys, but stage-24/citations.json "
+                    "has no citation instances to bind to supported claims.",
+                    "stage-24/citations.json",
+                )
+                return
+            # A paper with no citation keys and zero citation instances is
+            # suspicious but not a support violation per se.
             self.warning(
                 "citation_instances_empty",
                 "stage-24/citations.json lists no citation instances.",
@@ -1128,6 +1168,23 @@ def normalize_for_substr(text: str) -> str:
     so a support_excerpt can be matched against context/claim text regardless
     of cosmetic differences — but NOT regardless of content."""
     return re.sub(r"\s+", " ", str(text or "")).strip().lower()
+
+
+def is_allowed_claim_evidence_path(rel: str, claim_type: str) -> bool:
+    """Return whether a claim evidence pointer names a release-authorized artifact.
+
+    Existence plus sha256 is not enough: otherwise a forged file under stage-24
+    could become "evidence" merely by matching its own digest.
+    """
+    rel = str(rel or "")
+    if claim_type == "citation":
+        return rel == _CITATION_EVIDENCE_PATH
+    if rel == _CITATION_EVIDENCE_PATH:
+        return False
+    return any(
+        fnmatch.fnmatchcase(rel, pattern)
+        for pattern in _ALLOWED_CLAIM_EVIDENCE_PATTERNS
+    )
 
 
 def sha256_of_file(path: Path) -> str | None:

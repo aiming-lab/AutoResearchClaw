@@ -72,10 +72,10 @@ def run() -> int:
         # --- GOOD: evidence JSON really contains 0.1234 ---
         r2 = root / "good_json"
         (r2 / "stage-14").mkdir(parents=True)
-        ev = r2 / "stage-14" / "m.json"
+        ev = r2 / "stage-14" / "experiment_summary.json"
         ev.write_text(json.dumps({"results": {"loss": 0.1234, "acc": 0.9}}))
         codes = _codes(
-            r2, _claim([{"path": "stage-14/m.json", "sha256": _sha(ev), "matched_value": 0.1234}])
+            r2, _claim([{"path": "stage-14/experiment_summary.json", "sha256": _sha(ev), "matched_value": 0.1234}])
         )
         ok = not codes
         print(f"[good/json-has-value]   expect PASS -> {'OK' if ok else 'REGRESSED'}  {sorted(codes)}")
@@ -83,11 +83,11 @@ def run() -> int:
 
         # --- GOOD: text artifact really contains 0.1234 ---
         r3 = root / "good_text"
-        (r3 / "stage-14").mkdir(parents=True)
-        ev = r3 / "stage-14" / "log.txt"
-        ev.write_text("Epoch 3: validation loss = 0.1234 (best so far)\n")
+        (r3 / "stage-12" / "runs").mkdir(parents=True)
+        ev = r3 / "stage-12" / "runs" / "run_seed1.json"
+        ev.write_text(json.dumps({"stdout": "Epoch 3: validation loss = 0.1234 (best so far)"}))
         codes = _codes(
-            r3, _claim([{"path": "stage-14/log.txt", "sha256": _sha(ev), "matched_value": 0.1234}])
+            r3, _claim([{"path": "stage-12/runs/run_seed1.json", "sha256": _sha(ev), "matched_value": 0.1234}])
         )
         ok = not codes
         print(f"[good/text-has-value]   expect PASS -> {'OK' if ok else 'REGRESSED'}  {sorted(codes)}")
@@ -96,10 +96,10 @@ def run() -> int:
         # --- BAD: correct value in file but WRONG sha256 (tamper) ---
         r4 = root / "bad_sha"
         (r4 / "stage-14").mkdir(parents=True)
-        ev = r4 / "stage-14" / "m.json"
+        ev = r4 / "stage-14" / "experiment_summary.json"
         ev.write_text(json.dumps({"loss": 0.1234}))
         codes = _codes(
-            r4, _claim([{"path": "stage-14/m.json", "sha256": "deadbeef", "matched_value": 0.1234}])
+            r4, _claim([{"path": "stage-14/experiment_summary.json", "sha256": "deadbeef", "matched_value": 0.1234}])
         )
         ok = "claims_orphan_evidence" in codes
         print(f"[bad/wrong-sha]         expect FAIL -> {'OK' if ok else 'REGRESSED'}  {sorted(codes)}")
@@ -111,6 +111,18 @@ def run() -> int:
         codes = _codes(r5, _claim([]))
         ok = "claims_supported_without_evidence" in codes
         print(f"[bad/empty-evidence]    expect FAIL -> {'OK' if ok else 'REGRESSED'}  {sorted(codes)}")
+        failures += 0 if ok else 1
+
+        # --- BAD: in-run file exists and has correct sha, but is not allowed evidence ---
+        r6 = root / "bad_disallowed"
+        (r6 / "stage-24").mkdir(parents=True)
+        ev = r6 / "stage-24" / "fake_evidence.json"
+        ev.write_text(json.dumps({"loss": 0.1234}))
+        codes = _codes(
+            r6, _claim([{"path": "stage-24/fake_evidence.json", "sha256": _sha(ev), "matched_value": 0.1234}])
+        )
+        ok = "claims_disallowed_evidence_path" in codes
+        print(f"[bad/disallowed-path]   expect FAIL -> {'OK' if ok else 'REGRESSED'}  {sorted(codes)}")
         failures += 0 if ok else 1
 
     print()

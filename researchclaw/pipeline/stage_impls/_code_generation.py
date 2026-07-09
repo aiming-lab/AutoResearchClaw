@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -962,12 +963,8 @@ def _execute_code_generation(
     _known_modules = {
         f.replace(".py", "") for f in files if f.endswith(".py")
     }
-    _stdlib_and_common = {
-        "os", "sys", "json", "math", "time", "copy", "re", "random",
-        "pathlib", "argparse", "logging", "collections", "functools",
-        "itertools", "abc", "typing", "dataclasses", "enum", "io",
-        "csv", "pickle", "glob", "shutil", "subprocess", "datetime", "types",
-        "warnings",
+    _stdlib_modules = set(getattr(sys, "stdlib_module_names", ()))
+    _stdlib_and_common = _stdlib_modules | {
         "numpy", "np", "torch", "torchvision", "gymnasium", "gym",
         "sklearn", "scipy", "pandas", "matplotlib", "PIL", "tqdm",
         "einops", "timm", "transformers", "datasets", "peft",

@@ -382,6 +382,23 @@ def test_unpinned_evidence_pointer_fails(good_run: Path) -> None:
     assert "claims_orphan_evidence" in codes or "claims_supported_without_evidence" in codes
 
 
+def test_disallowed_in_run_evidence_path_fails(good_run: Path) -> None:
+    # A forged file inside the run dir is not release evidence merely because
+    # it exists and its sha256 matches. It must be in the evidence allowlist.
+    fake_rel = "stage-24/fake_evidence.json"
+    _write(good_run / fake_rel, {"loss": 0.1234})
+    claims_data = json.loads((good_run / "stage-24" / "claims.json").read_text())
+    claims_data["claims"][0]["evidence"] = [
+        {
+            "path": fake_rel,
+            "sha256": ra.sha256_file(good_run / fake_rel),
+            "matched_value": 0.1234,
+        }
+    ]
+    _write(good_run / "stage-24" / "claims.json", claims_data)
+    assert "claims_disallowed_evidence_path" in _codes(_check(good_run))
+
+
 def test_background_without_whitelist_fails(good_run: Path) -> None:
     # Hole 2: role=background must NOT be a blanket escape.
     citations = json.loads((good_run / "stage-24" / "citations.json").read_text())
@@ -648,6 +665,13 @@ def test_citation_existence_is_not_support(good_run: Path) -> None:
     citations["instances"][0]["role"] = "unmapped"
     _write(good_run / "stage-24" / "citations.json", citations)
     assert "citation_support_unmapped" in _codes(_check(good_run))
+
+
+def test_citation_keys_with_empty_instances_fails(good_run: Path) -> None:
+    citations = json.loads((good_run / "stage-24" / "citations.json").read_text())
+    citations["instances"] = []
+    _write(good_run / "stage-24" / "citations.json", citations)
+    assert "citation_support_instances_missing" in _codes(_check(good_run))
 
 
 def test_claim_support_requires_excerpt(good_run: Path) -> None:
