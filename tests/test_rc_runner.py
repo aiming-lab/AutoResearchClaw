@@ -756,6 +756,56 @@ def test_experiment_memory_recording_failure_is_recorded_once(
     ]
 
 
+def test_kb_export_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "out.md").write_text(f"stage {int(stage)}", encoding="utf-8")
+        return _done(stage)
+
+    def broken_write_stage_to_kb(*args: object, **kwargs: object) -> list[object]:
+        _ = args, kwargs
+        raise RuntimeError("kb offline")
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    monkeypatch.setattr(rc_runner, "write_stage_to_kb", broken_write_stage_to_kb)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        results = rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-kb-fail",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.EXPERIMENT_DESIGN,
+            to_stage=Stage.RESULT_ANALYSIS,
+            kb_root=tmp_path / "kb-fail",
+        )
+
+    assert len(results) == 6
+    assert all(result.status == StageStatus.DONE for result in results)
+    warnings = [
+        record
+        for record in caplog.records
+        if "Knowledge base export failed" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "knowledge_base_export",
+            "message": "Knowledge base export failed: kb offline",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("stage", "started", "expected"),
     [

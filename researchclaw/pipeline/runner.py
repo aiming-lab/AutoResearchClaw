@@ -883,8 +883,12 @@ def execute_pipeline(
                     backend=config.knowledge_base.backend,
                     topic=config.research.topic,
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                message = f"Knowledge base export failed: {exc}"
+                if _record_degradation(
+                    degradations, "knowledge_base_export", message
+                ):
+                    logger.warning(message)
 
         if result.status == StageStatus.DONE:
             _write_checkpoint(run_dir, stage, run_id, adapters=adapters)
