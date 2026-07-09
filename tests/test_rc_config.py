@@ -112,6 +112,24 @@ def test_validate_config_with_valid_data_returns_ok_true(tmp_path: Path):
     assert result.errors == ()
 
 
+def test_code_agent_long_call_max_tokens_is_parsed(tmp_path: Path):
+    data = _valid_config_data()
+    data["experiment"]["code_agent"] = {"long_call_max_tokens": 6144}
+
+    config = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+
+    assert config.experiment.code_agent.long_call_max_tokens == 6144
+
+
+def test_opencode_fallback_to_code_agent_is_parsed(tmp_path: Path):
+    data = _valid_config_data()
+    data["experiment"]["opencode"] = {"fallback_to_code_agent": False}
+
+    config = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+
+    assert config.experiment.opencode.fallback_to_code_agent is False
+
+
 def test_validate_config_missing_required_fields_returns_errors(tmp_path: Path):
     data = _valid_config_data()
     data["research"] = {}

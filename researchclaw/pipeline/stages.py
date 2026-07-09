@@ -1,4 +1,4 @@
-"""23-stage ResearchClaw pipeline state machine.
+"""25-stage ResearchClaw pipeline state machine.
 
 Defines the stage sequence, status transitions, gate logic, and rollback rules.
 Migrated from arc/state_machine.py (19 stages) with the following changes:
@@ -20,7 +20,12 @@ from typing import Iterable
 
 
 class Stage(IntEnum):
-    """23-stage research pipeline."""
+    """25-stage research pipeline.
+
+    v2 adds Phase I (Release Audit): Stage 24 TRUTH_AUDIT freezes the
+    claim ledger and paper hash; Stage 25 DEAI_AUDIT is a recommend-only
+    prose audit that must never precede or mutate the truth audit.
+    """
 
     # Phase A: Research Scoping
     TOPIC_INIT = 1
@@ -60,6 +65,15 @@ class Stage(IntEnum):
     KNOWLEDGE_ARCHIVE = 21
     EXPORT_PUBLISH = 22
     CITATION_VERIFY = 23
+
+    # Phase I: Release Audit (v2)
+    TRUTH_AUDIT = 24    # Freezes claims.json digest + paper hash (fail-closed)
+    DEAI_AUDIT = 25     # Recommend-only prose audit; NEVER before TRUTH_AUDIT
+
+
+#: Terminal stage of a complete run. release_check reads the expected final
+#: stage from run_manifest.json; this constant is the single in-code source.
+FINAL_STAGE: Stage = Stage.DEAI_AUDIT
 
 
 class StageStatus(str, Enum):
@@ -178,6 +192,10 @@ PHASE_MAP: dict[str, tuple[Stage, ...]] = {
         Stage.KNOWLEDGE_ARCHIVE,
         Stage.EXPORT_PUBLISH,
         Stage.CITATION_VERIFY,
+    ),
+    "I: Release Audit": (
+        Stage.TRUTH_AUDIT,
+        Stage.DEAI_AUDIT,
     ),
 }
 

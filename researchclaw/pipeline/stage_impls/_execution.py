@@ -312,7 +312,9 @@ def _execute_experiment_run(
                         pass
             _ensure_sandbox_deps(_all_code, config.experiment.sandbox.python_path)
 
-        sandbox = create_sandbox(config.experiment, runs_dir / "sandbox")
+        sandbox = create_sandbox(
+            config.experiment, runs_dir / "sandbox", metadata_dir=stage_dir
+        )
         # Use run_project for multi-file, run for single-file
         if exp_dir_path and Path(exp_dir_path).is_dir():
             result = sandbox.run_project(
@@ -1254,6 +1256,7 @@ def _execute_iterative_refine(
             sandbox = create_sandbox(
                 config.experiment,
                 stage_dir / f"refine_sandbox_v{iteration}",
+                metadata_dir=stage_dir,
             )
             rerun = sandbox.run_project(
                 version_dir,
@@ -1365,6 +1368,7 @@ def _execute_iterative_refine(
                     sandbox2 = create_sandbox(
                         config.experiment,
                         stage_dir / f"refine_sandbox_v{iteration}_fix",
+                        metadata_dir=stage_dir,
                     )
                     rerun2 = sandbox2.run_project(
                         version_dir,
@@ -1376,9 +1380,24 @@ def _execute_iterative_refine(
                         "metrics": rerun2.metrics,
                         "elapsed_sec": rerun2.elapsed_sec,
                         "timed_out": rerun2.timed_out,
+                        "stderr": rerun2.stderr[:2000] if rerun2.stderr else "",
+                        "stdout": rerun2.stdout[:50000] if rerun2.stdout else "",
                     }
                     iter_record["metric"] = metric_val
                     iter_record["runtime_repaired"] = True
+                    repaired_runtime_issues = _detect_runtime_issues(rerun2)
+                    if rerun2.returncode != 0 or repaired_runtime_issues:
+                        metric_val = None
+                        iter_record["metric"] = None
+                        iter_record["runtime_unresolved"] = True
+                        if repaired_runtime_issues:
+                            iter_record["runtime_issues_after_fix"] = repaired_runtime_issues
+                    else:
+                        iter_record["runtime_unresolved"] = False
+                else:
+                    metric_val = None
+                    iter_record["metric"] = None
+                    iter_record["runtime_unresolved"] = True
 
             if metric_val is not None:
                 consecutive_no_metrics = 0
@@ -1393,7 +1412,7 @@ def _execute_iterative_refine(
                     no_improve_streak += 1
             else:
                 consecutive_no_metrics += 1
-        elif validation.ok and best_version == "experiment/":
+        elif validation.ok and metric_val is not None and best_version == "experiment/":
             best_files = dict(candidate_files)
             best_version = f"experiment_v{iteration}/"
 
@@ -1429,6 +1448,18 @@ def _execute_iterative_refine(
     log["best_metric"] = best_metric
     log["best_version"] = best_version
     log["final_version"] = "experiment_final/"
+    if any(
+        isinstance(iter_rec, dict) and iter_rec.get("improved") is True
+        for iter_rec in log.get("iterations", [])
+    ):
+        log["refinement_outcome"] = "improved"
+    elif any(
+        isinstance(iter_rec, dict) and iter_rec.get("metric") is not None
+        for iter_rec in log.get("iterations", [])
+    ):
+        log["refinement_outcome"] = "no_improvement"
+    else:
+        log["refinement_outcome"] = "all_iterations_failed"
     # BUG-110: Aggregate ablation check results across iterations
     _all_ablation_identical = any(
         iter_rec.get("ablation_identical", False)

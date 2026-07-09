@@ -214,9 +214,26 @@ class LlmConfig:
     api_key: str = ""
     primary_model: str = ""
     fallback_models: tuple[str, ...] = ()
+    # Reviewer isolation (release_check v2): the Socratic critic must run on a
+    # different model than the writer. Empty = no machine critic declared;
+    # release mode then requires an external reviewer artifact instead.
+    critic_model: str = ""
+    # How the critic is provided:
+    #   ""        — auto: "model" when critic_model is set, else none
+    #   "model"   — in-pipeline critic via critic_model (same gateway)
+    #   "external"— an external reviewer (human / separate agent, e.g. Claude
+    #               or Kiro) writes its review artifact into the run dir at
+    #               external_review_path and may extend stage-15/critique.json;
+    #               stages 24-25 are then re-run before release_check.
+    critic_source: str = ""
+    # Run-relative path of the external review artifact (required when
+    # critic_source="external"), e.g. "reviews_external/claude_review.md".
+    external_review_path: str = ""
     s2_api_key: str = ""
     notes: str = ""
     timeout_sec: int = 600
+    max_retries: int = 3
+    retry_base_delay: float = 2.0
     acp: AcpConfig = field(default_factory=AcpConfig)
 
 
@@ -243,6 +260,26 @@ class SandboxConfig:
         "sklearn",
     )
     max_memory_mb: int = 4096
+    # Environment policy for subprocess execution. "allowlist" (default)
+    # passes only env_allowlist variables; "inherit_all" passes the full
+    # host environment and is flagged unsafe by release_check.
+    env_policy: str = "allowlist"
+    env_allowlist: tuple[str, ...] = (
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "TMPDIR",
+        "PYTHONUNBUFFERED",
+        "VIRTUAL_ENV",
+        "CUDA_VISIBLE_DEVICES",
+        "HF_HOME",
+        "TORCH_HOME",
+    )
+    # Docker unavailability handling: failing closed is the default.
+    # Setting this True permits the (unsafe, subprocess) fallback and is
+    # recorded as fallback_used=true, which release_check treats as a blocker.
+    allow_docker_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -453,6 +490,8 @@ class CodeAgentConfig:
     tree_search_eval_timeout_sec: int = 120
     # Phase 5: Multi-agent review dialog
     review_max_rounds: int = 2
+    # Long repair/review LLM calls. Lower values reduce provider chunk-drop risk.
+    long_call_max_tokens: int = 8192
 
 
 @dataclass(frozen=True)
@@ -469,6 +508,7 @@ class OpenCodeConfig:
     timeout_sec: int = 600  # Max seconds for opencode run
     max_retries: int = 1
     workspace_cleanup: bool = True
+    fallback_to_code_agent: bool = True
 
 
 @dataclass(frozen=True)
@@ -1191,9 +1231,14 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
         api_key=data.get("api_key", ""),
         primary_model=data.get("primary_model", ""),
         fallback_models=tuple(data.get("fallback_models") or ()),
+        critic_model=data.get("critic_model", ""),
+        critic_source=data.get("critic_source", ""),
+        external_review_path=data.get("external_review_path", ""),
         s2_api_key=data.get("s2_api_key", ""),
         notes=data.get("notes", ""),
         timeout_sec=_safe_int(data.get("timeout_sec"), 600),
+        max_retries=_safe_int(data.get("max_retries"), 3),
+        retry_base_delay=_safe_float(data.get("retry_base_delay"), 2.0),
         acp=AcpConfig(
             agent=acp_data.get("agent", "claude"),
             cwd=acp_data.get("cwd", "."),
@@ -1300,6 +1345,13 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
                 sandbox_data.get("allowed_imports", SandboxConfig.allowed_imports)
             ),
             max_memory_mb=_safe_int(sandbox_data.get("max_memory_mb"), 4096),
+            env_policy=sandbox_data.get("env_policy", "allowlist"),
+            env_allowlist=tuple(
+                sandbox_data.get("env_allowlist", SandboxConfig.env_allowlist)
+            ),
+            allow_docker_fallback=bool(
+                sandbox_data.get("allow_docker_fallback", False)
+            ),
         ),
         docker=DockerSandboxConfig(
             image=docker_data.get("image", "researchclaw/experiment:latest"),
@@ -1445,6 +1497,7 @@ def _parse_code_agent_config(data: dict[str, Any]) -> CodeAgentConfig:
             data.get("tree_search_eval_timeout_sec"), 120
         ),
         review_max_rounds=_safe_int(data.get("review_max_rounds"), 2),
+        long_call_max_tokens=_safe_int(data.get("long_call_max_tokens"), 8192),
     )
 
 
@@ -1459,6 +1512,7 @@ def _parse_opencode_config(data: dict[str, Any]) -> OpenCodeConfig:
         timeout_sec=_safe_int(data.get("timeout_sec"), 600),
         max_retries=_safe_int(data.get("max_retries"), 1),
         workspace_cleanup=bool(data.get("workspace_cleanup", True)),
+        fallback_to_code_agent=bool(data.get("fallback_to_code_agent", True)),
     )
 
 

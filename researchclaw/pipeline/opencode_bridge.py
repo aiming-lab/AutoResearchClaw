@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -278,6 +279,7 @@ class OpenCodeBridge:
         self._timeout_sec = timeout_sec
         self._max_retries = max_retries
         self._workspace_cleanup = workspace_cleanup
+        self._stage_dir: Path | None = None
 
     # -- availability check ---------------------------------------------------
 
@@ -315,8 +317,25 @@ class OpenCodeBridge:
         extra_guidance: str,
         time_budget_sec: int,
     ) -> Path:
-        """Create a temporary workspace directory with context files."""
-        ws = stage_dir / f"opencode_beast_{int(time.time())}_{time.monotonic_ns() % 100000}"
+        """Create a temporary workspace directory with context files.
+
+        BUG-OB-03: The workspace MUST live outside the run-output tree.
+        Placing it under ``stage_dir`` (i.e. ``runs/.../stage-10/``) nested it
+        inside the main project's git repo, whose ``.gitignore`` excludes
+        ``runs/``.  OpenCode then resolved its *project root* to the OUTER
+        repo and its file-discovery (which honours the outer ``.gitignore``)
+        could not see the workspace's own ``EXPERIMENT_PLAN.yaml`` /
+        ``GUIDANCE.md`` — the model reported "files not found", wrote nothing,
+        and the run failed with exit-0/zero-files.  Non-ASCII characters in
+        the project path (e.g. ``工作区``) compounded the root-detection
+        mismatch.  Creating the workspace in an isolated ASCII temp directory
+        makes OpenCode treat it as a standalone project.  Debug artifacts are
+        mirrored back into ``stage_dir`` by :meth:`_mirror_workspace`.
+        """
+        self._stage_dir = stage_dir
+        ws_name = f"opencode_beast_{int(time.time())}_{time.monotonic_ns() % 100000}"
+        base = Path(tempfile.mkdtemp(prefix="rc_beast_"))
+        ws = base / ws_name
         ws.mkdir(parents=True, exist_ok=True)
 
         # Write experiment plan
@@ -375,6 +394,49 @@ class OpenCodeBridge:
 
         return ws
 
+    def _finalize_workspace(self, workspace: Path, stage_dir: Path) -> None:
+        """Mirror artifacts into ``stage_dir`` (unless cleanup) and remove temp.
+
+        The live workspace lives in an out-of-tree temp directory created by
+        :func:`tempfile.mkdtemp`; that scratch dir is always removed.  When
+        ``workspace_cleanup`` is disabled, a debug copy is left under
+        ``stage_dir`` first.
+        """
+        if not self._workspace_cleanup:
+            self._mirror_workspace(workspace, stage_dir)
+        # Remove the mkdtemp() base (workspace.parent) so no temp dirs leak.
+        temp_base = workspace.parent
+        try:
+            if temp_base.exists() and temp_base.name.startswith("rc_beast_"):
+                shutil.rmtree(temp_base, ignore_errors=True)
+            elif workspace.exists():
+                shutil.rmtree(workspace, ignore_errors=True)
+        except OSError as exc:
+            logger.warning("Beast mode: failed to remove temp workspace: %s", exc)
+
+    @staticmethod
+    def _mirror_workspace(workspace: Path, stage_dir: Path) -> Path | None:
+        """Copy the isolated temp workspace into ``stage_dir`` for debugging.
+
+        Preserves the historical artifact contract
+        (``stage-10/opencode_beast_*/opencode.json`` and generated files) now
+        that the live workspace runs from an out-of-tree temp directory.
+        The ``.git`` scaffold is skipped to keep the mirror small.
+        """
+        try:
+            dest = stage_dir / workspace.name
+            if dest.exists():
+                shutil.rmtree(dest, ignore_errors=True)
+            shutil.copytree(
+                workspace,
+                dest,
+                ignore=shutil.ignore_patterns(".git", "__pycache__"),
+            )
+            return dest
+        except OSError as exc:
+            logger.warning("Beast mode: failed to mirror workspace: %s", exc)
+            return None
+
     def _is_azure(self) -> bool:
         """Detect Azure OpenAI from base URL or provider string."""
         return (
@@ -382,40 +444,79 @@ class OpenCodeBridge:
             or "azure" in (self._llm_provider or "").lower()
         )
 
+    def _uses_builtin_openai_provider(self) -> bool:
+        """Return True for endpoints compatible with OpenCode's built-in OpenAI provider."""
+        base = (self._llm_base_url or "").lower()
+        provider = (self._llm_provider or "").lower()
+        return (
+            self._is_azure()
+            or provider == "openai"
+            or "api.openai.com" in base
+        )
+
+    def _opencode_provider_id(self) -> str:
+        """Provider id used in opencode model strings."""
+        if self._uses_builtin_openai_provider():
+            return "openai"
+        base = (self._llm_base_url or "").lower()
+        if "deepseek" in base or "deepseek" in (self._llm_provider or "").lower():
+            return "deepseek"
+        return "openai_compatible"
+
+    def _opencode_base_url(self) -> str:
+        """Return the base URL shape expected by the selected OpenCode provider."""
+        base = (self._llm_base_url or "").rstrip("/")
+        if not base:
+            return base
+        if self._uses_builtin_openai_provider():
+            return base
+        # @ai-sdk/openai-compatible expects the OpenAI-compatible /v1 base.
+        if not base.endswith("/v1"):
+            return f"{base}/v1"
+        return base
+
     def _build_opencode_config(self) -> dict[str, Any]:
         """Build the opencode.json configuration.
 
-        Always uses the "openai" provider — this works for both standard
-        OpenAI endpoints and Azure OpenAI (which accepts Bearer token auth
-        on the ``/openai/v1`` path and now supports the Responses API).
+        Standard OpenAI/Azure use OpenCode's built-in ``openai`` provider.
+        Generic OpenAI-compatible endpoints use a custom provider backed by
+        ``@ai-sdk/openai-compatible`` so OpenCode calls ``/v1/chat/completions``.
         """
         cfg: dict[str, Any] = {
             "$schema": "https://opencode.ai/config.json",
         }
 
         if self._llm_base_url:
+            provider_id = self._opencode_provider_id()
             if self._model:
                 cfg["model"] = (
                     self._model if "/" in self._model
-                    else f"openai/{self._model}"
+                    else f"{provider_id}/{self._model}"
                 )
-            cfg["provider"] = {
-                "openai": {
-                    "options": {
-                        "baseURL": self._llm_base_url,
-                        "apiKey": f"{{env:{self._api_key_env}}}"
-                        if self._api_key_env
-                        else "",
-                    },
-                    "models": {},
-                }
+            provider_cfg: dict[str, Any] = {
+                "options": {
+                    "baseURL": self._opencode_base_url(),
+                    "apiKey": f"{{env:{self._api_key_env}}}"
+                    if self._api_key_env
+                    else "",
+                },
+                "models": {},
             }
+            if not self._uses_builtin_openai_provider():
+                provider_cfg["npm"] = "@ai-sdk/openai-compatible"
+                provider_cfg["name"] = provider_id.replace("_", " ").title()
+            cfg["provider"] = {provider_id: provider_cfg}
             # Register the model so OpenCode knows it exists
             if self._model:
                 model_name = self._model.split("/")[-1]
-                cfg["provider"]["openai"]["models"] = {
+                cfg["provider"][provider_id]["models"] = {
                     model_name: {
                         "name": model_name,
+                        # Explicitly mark tool-calling support: custom models
+                        # unknown to the models.dev catalog may otherwise be
+                        # treated as text-only, producing sessions that exit 0
+                        # without editing any files.
+                        "tool_call": True,
                         "modalities": {
                             "input": ["text"],
                             "output": ["text"],
@@ -425,7 +526,7 @@ class OpenCodeBridge:
         elif self._model:
             cfg["model"] = (
                 self._model if "/" in self._model
-                else f"openai/{self._model}"
+                else f"{self._opencode_provider_id()}/{self._model}"
             )
 
         return cfg
@@ -437,17 +538,15 @@ class OpenCodeBridge:
 
         Resolution order:
         1. If model already contains "/" (e.g. "anthropic/claude-sonnet-4-6") → use as-is
-        2. Otherwise → "openai/{model}" (works for both Azure and standard OpenAI)
-
-        Note: Azure AI Services now supports the Responses API with Bearer
-        token auth via the OpenAI-compatible endpoint, so we use the "openai"
-        provider universally — no Anthropic fallback needed.
+        2. Otherwise → "{provider}/{model}", where provider is "openai" for
+           OpenAI/Azure and a custom OpenAI-compatible provider for endpoints
+           such as DeepSeek.
         """
         if not self._model:
             return "anthropic/claude-sonnet-4-6"
         if "/" in self._model:
             return self._model
-        return f"openai/{self._model}"
+        return f"{self._opencode_provider_id()}/{self._model}"
 
     # -- invocation ------------------------------------------------------------
 
@@ -458,19 +557,36 @@ class OpenCodeBridge:
     ) -> tuple[bool, str, float]:
         """Run ``opencode run`` in the workspace. Returns (success, log, elapsed)."""
         env = os.environ.copy()
-        # Pass API key via environment if configured
+        # Pass API key via environment if configured.  The configured
+        # api_key_env (e.g. DEEPSEEK_API_KEY) is inherited via os.environ
+        # and resolved by the "{env:...}" reference in opencode.json.
         if self._api_key_env:
             api_key = os.environ.get(self._api_key_env, "")
-            if api_key:
-                # We always use the "openai" provider for OpenCode now,
-                # which reads OPENAI_API_KEY (works for Azure too via
-                # Bearer token auth on the OpenAI-compatible endpoint).
+            if api_key and self._uses_builtin_openai_provider():
+                # Only the built-in "openai" provider (OpenAI/Azure) reads
+                # OPENAI_API_KEY.  Do NOT leak other providers' keys into
+                # OPENAI_API_KEY — it would enable OpenCode's built-in
+                # openai provider with a foreign key.
                 env["OPENAI_API_KEY"] = api_key
 
         # Use -m flag to specify model (more reliable than opencode.json)
         resolved_model = self._resolve_opencode_model()
         opencode_cmd = shutil.which("opencode") or "opencode"
-        cmd = [opencode_cmd, "run", "-m", resolved_model, "--format", "json", prompt]
+        # BUG-OB-04: pin the project directory explicitly with --dir.  Passing
+        # cwd= to subprocess is NOT sufficient — on some platforms OpenCode
+        # resolved its project root to the directory it was *launched from*
+        # (the repo root where ``python -m researchclaw`` runs), not the
+        # workspace.  It then read/wrote files in the repo instead of the
+        # workspace, so no main.py was ever collected (exit-0/zero-files) and
+        # the model even tried to reuse a pre-existing repo experiment.
+        # ``--dir`` forces OpenCode to treat the workspace as the project.
+        cmd = [
+            opencode_cmd, "run",
+            "-m", resolved_model,
+            "--dir", str(workspace),
+            "--format", "json",
+            prompt,
+        ]
 
         t0 = time.monotonic()
         try:
@@ -702,9 +818,21 @@ class OpenCodeBridge:
                         "(files: %s)", list(files.keys()),
                     )
                     last_error = "No main.py in OpenCode output"
-                    # Cleanup failed workspace
-                    if self._workspace_cleanup and workspace.exists():
-                        shutil.rmtree(workspace, ignore_errors=True)
+                    # Persist the transcript — without it, "exit 0 but no
+                    # files" failures are undiagnosable (BUG: this branch
+                    # previously skipped the log write, leaving a stale
+                    # opencode_log.txt from an earlier attempt).
+                    try:
+                        (stage_dir / "opencode_log.txt").write_text(
+                            log or "", encoding="utf-8",
+                        )
+                    except OSError as _wexc:
+                        logger.warning(
+                            "Beast mode: failed to write no-main.py log: %s",
+                            _wexc,
+                        )
+                    # Mirror artifacts for debugging, then drop temp workspace
+                    self._finalize_workspace(workspace, stage_dir)
                     continue
 
                 # BUG-R52-01: Ensure main.py has an entry point
@@ -718,9 +846,8 @@ class OpenCodeBridge:
                 except OSError as _wexc:
                     logger.warning("Beast mode: failed to write log: %s", _wexc)
 
-                # Cleanup workspace if configured
-                if self._workspace_cleanup and workspace.exists():
-                    shutil.rmtree(workspace, ignore_errors=True)
+                # Mirror artifacts for debugging, then drop temp workspace
+                self._finalize_workspace(workspace, stage_dir)
 
                 return OpenCodeResult(
                     success=True,
@@ -730,15 +857,21 @@ class OpenCodeBridge:
                 )
 
             last_error = log
+            try:
+                (stage_dir / "opencode_log.txt").write_text(
+                    log or "", encoding="utf-8",
+                )
+            except OSError as _wexc:
+                logger.warning("Beast mode: failed to write failure log: %s", _wexc)
             logger.warning(
                 "Beast mode: OpenCode attempt %d failed (%.1fs): %s",
                 attempt + 1,
                 elapsed,
                 log[:500],
             )
-            # Cleanup failed workspace
-            if self._workspace_cleanup and workspace and workspace.exists():
-                shutil.rmtree(workspace, ignore_errors=True)
+            # Mirror artifacts for debugging, then drop temp workspace
+            if workspace:
+                self._finalize_workspace(workspace, stage_dir)
 
         # All attempts failed
         return OpenCodeResult(

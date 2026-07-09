@@ -172,12 +172,33 @@ def test_factory_returns_docker_sandbox(mock_avail, mock_image, tmp_path: Path):
 
 
 @patch("researchclaw.experiment.docker_sandbox.DockerSandbox.check_docker_available", return_value=False)
-def test_factory_falls_back_when_docker_unavailable(mock_avail, tmp_path: Path):
+def test_factory_fails_closed_when_docker_unavailable(mock_avail, tmp_path: Path):
+    # v2 (supersedes BUG-002): silent Docker→subprocess downgrade is a
+    # release blocker; the default is now to raise.
     config = ExperimentConfig(mode="docker")
-    sandbox = create_sandbox(config, tmp_path / "work")
-    # BUG-002: Should fall back to subprocess sandbox instead of raising
+    with pytest.raises(RuntimeError, match="allow_docker_fallback"):
+        create_sandbox(config, tmp_path / "work")
+
+
+@patch("researchclaw.experiment.docker_sandbox.DockerSandbox.check_docker_available", return_value=False)
+def test_factory_falls_back_only_when_opted_in(mock_avail, tmp_path: Path):
+    import dataclasses
+    import json as _json
+    from researchclaw.config import SandboxConfig
     from researchclaw.experiment.sandbox import ExperimentSandbox
+
+    config = ExperimentConfig(
+        mode="docker",
+        sandbox=SandboxConfig(allow_docker_fallback=True),
+    )
+    meta_dir = tmp_path / "meta"
+    sandbox = create_sandbox(config, tmp_path / "work", metadata_dir=meta_dir)
     assert isinstance(sandbox, ExperimentSandbox)
+    # The unsafe fallback must be recorded for release_check to block.
+    meta = _json.loads((meta_dir / "sandbox_metadata.json").read_text())
+    assert meta["fallback_used"] is True
+    assert meta["requested_backend"] == "docker"
+    assert meta["actual_backend"] == "subprocess"
 
 
 @patch("researchclaw.experiment.docker_sandbox.DockerSandbox.ensure_image", return_value=False)

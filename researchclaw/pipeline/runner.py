@@ -708,6 +708,50 @@ def execute_pipeline(
         )
         elapsed = _time.monotonic() - t0
 
+        # ── v2: append-only attempt log + per-stage cost entry ──
+        # Failed/degraded attempts are first-class records; never deleted.
+        try:
+            from researchclaw.pipeline import release_artifacts as _ra
+
+            _attempt = _ra.append_attempt(
+                run_dir,
+                run_id=run_id,
+                stage=stage_num,
+                stage_name=stage.name,
+                status=result.status.value,
+                decision=result.decision or "",
+                error=result.error,
+                elapsed_sec=elapsed,
+                artifacts=result.artifacts,
+            )
+            # get_global_tracker().total_cost_usd is CUMULATIVE. Writing that
+            # as each row's cost_usd and later summing rows double-counts.
+            # Write the per-stage DELTA as cost_usd, and record the running
+            # total separately as cumulative_usd.
+            _cumulative = None
+            try:
+                from researchclaw.cost_tracker import get_global_tracker
+
+                _cumulative = float(get_global_tracker().total_cost_usd)
+            except Exception:  # noqa: BLE001
+                pass
+            _delta = None
+            if _cumulative is not None:
+                _prev = _ra.last_cumulative_cost(run_dir)
+                _delta = max(0.0, round(_cumulative - _prev, 6))
+            _ra.append_cost_entry(
+                run_dir,
+                stage=stage_num,
+                stage_name=stage.name,
+                model=config.llm.primary_model or "",
+                attempt_id=_attempt["attempt_id"],
+                cost_usd=_delta,
+                cumulative_usd=_cumulative,
+                elapsed_sec=elapsed,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("Attempt/cost log append failed", exc_info=True)
+
         # ── Event log: stage end ──
         if event_log:
             try:
@@ -918,6 +962,22 @@ def execute_pipeline(
                 _record_decision_history(
                     run_dir, result.decision, rollback_target, pivot_count + 1
                 )
+                # v2: rollbacks are recorded in the attempt log too, so the
+                # full retry topology is auditable from one artifact.
+                try:
+                    from researchclaw.pipeline import release_artifacts as _ra
+
+                    _ra.append_attempt(
+                        run_dir,
+                        run_id=run_id,
+                        stage=int(rollback_target),
+                        stage_name=rollback_target.name,
+                        status="rolled_back_to",
+                        decision=result.decision,
+                        kind="decision_rollback",
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("Rollback attempt-log append skipped")
                 logger.info(
                     "Decision %s: rolling back to %s (attempt %d/%d)",
                     result.decision.upper(),
@@ -1039,6 +1099,47 @@ def execute_pipeline(
         run_dir=run_dir,
     )
     _write_pipeline_summary(run_dir, summary)
+
+    # ── v2: run manifest (reviewer isolation + manifest-driven final stage) ──
+    try:
+        from researchclaw import __version__ as _rc_version
+        from researchclaw.pipeline import release_artifacts as _ra
+        from researchclaw.pipeline.stages import FINAL_STAGE as _FINAL
+
+        _sandbox_meta = (
+            _ra.read_json(run_dir / "stage-12" / "sandbox_metadata.json")
+            or _ra.read_json(run_dir / "sandbox_metadata.json")
+            or {}
+        )
+        _env_meta = (
+            _ra.read_json(run_dir / "stage-12" / "environment_policy.json")
+            or _ra.read_json(run_dir / "environment_policy.json")
+            or {}
+        )
+        _writer_model = config.llm.primary_model or ""
+        _critic_model = getattr(config.llm, "critic_model", "") or ""
+        _ext_path = getattr(config.llm, "external_review_path", "") or ""
+        # Precedence: explicit config > what stage 15 actually recorded > derived.
+        _critic_source = (getattr(config.llm, "critic_source", "") or "").strip()
+        if not _critic_source:
+            _critique = _ra.read_json(run_dir / "stage-15" / "critique.json") or {}
+            _critic_source = str(_critique.get("critic_source", "")) or (
+                "model" if _critic_model and _critic_model != _writer_model else "none"
+            )
+        _ra.write_run_manifest(
+            run_dir,
+            run_id=run_id,
+            pipeline_version=_rc_version,
+            expected_final_stage=int(_FINAL),
+            writer_model=_writer_model,
+            critic_model=_critic_model,
+            critic_source=_critic_source,
+            external_review_path=_ext_path,
+            sandbox=_sandbox_meta,
+            environment_policy=_env_meta,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("run_manifest.json write failed", exc_info=True)
 
     # ── Event log: pipeline end ──
     if event_log:
@@ -1391,12 +1492,51 @@ def _package_deliverables(
         dest.rmdir()
         return None
 
+    # --- Determine release status (never advertise a failed/degraded/
+    #     incomplete run as release-ready) ---
+    not_release_ready = False
+    release_blockers: list[str] = []
+    try:
+        from researchclaw.pipeline.stages import FINAL_STAGE as _FINAL_STG
+
+        if (run_dir / "degradation_signal.json").exists():
+            not_release_ready = True
+            release_blockers.append("degradation_signal_present")
+        _summary_path = run_dir / "pipeline_summary.json"
+        if _summary_path.exists():
+            try:
+                _sm = json.loads(_summary_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                _sm = {}
+            if bool(_sm.get("degraded")):
+                not_release_ready = True
+                release_blockers.append("summary_degraded")
+            if _sm.get("stages_failed") not in (0, None):
+                not_release_ready = True
+                release_blockers.append("stages_failed")
+            if _sm.get("final_stage") != int(_FINAL_STG) or _sm.get("final_status") != "done":
+                not_release_ready = True
+                release_blockers.append("incomplete_run")
+        else:
+            not_release_ready = True
+            release_blockers.append("no_pipeline_summary")
+    except Exception:  # noqa: BLE001
+        not_release_ready = True
+        release_blockers.append("release_status_undetermined")
+
     # --- Write manifest ---
     manifest = {
         "run_id": run_id,
         "target_conference": effective_conf,
         "files": packaged,
         "generated": _utcnow_iso(),
+        # Explicit, machine-readable release status. release_check treats a
+        # missing/false-but-should-be-true marker as a blocker: deliverables
+        # for a non-passing run must NOT look release-ready.
+        "release_ready": not not_release_ready,
+        "not_release_ready": not_release_ready,
+        "release_blockers": release_blockers,
+        "release_authority": "scripts/release_check.py is authoritative; this flag is advisory.",
         "notes": {
             "paper_final.md": "Final paper in Markdown format",
             "paper.tex": f"Conference-ready LaTeX ({effective_conf})",

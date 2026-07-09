@@ -43,6 +43,16 @@ _CONTINUOUS_ENVS = {
 }
 
 
+def _has_main_guard(code: str) -> bool:
+    """Return True if a Python file has an executable `__main__` guard."""
+    return bool(re.search(r"if\s+__name__\s*==\s*['\"]__main__['\"]", code))
+
+
+def _add_stage10_blocker(blockers: list[str], message: str) -> None:
+    if message not in blockers:
+        blockers.append(message)
+
+
 def _execute_collider_plan_generation(
     stage_dir: Path,
     run_dir: Path,
@@ -490,6 +500,7 @@ def _execute_code_generation(
     _code_agent_active = False
     _beast_mode_used = False
     _code_max_tokens = 8192
+    _stage10_blockers: list[str] = []
 
     # ── Beast Mode: OpenCode external agent (optional) ─────────────────
     _oc_cfg = config.experiment.opencode
@@ -601,6 +612,38 @@ def _execute_code_generation(
                         _oc_result.elapsed_sec,
                     )
                 else:
+                    if not getattr(_oc_cfg, "fallback_to_code_agent", True):
+                        logger.warning(
+                            "Beast mode: FAILED (%s) — fallback disabled",
+                            _oc_result.error or "unknown error",
+                        )
+                        _error = (
+                            "OpenCode beast mode failed and fallback_to_code_agent "
+                            f"is disabled: {_oc_result.error or 'unknown error'}"
+                        )
+                        _stage10_blockers.append(_error)
+                        blockers_path = stage_dir / "stage10_blockers.json"
+                        blockers_path.write_text(
+                            json.dumps(
+                                {
+                                    "status": "failed",
+                                    "blockers": _stage10_blockers,
+                                    "generated": _utcnow_iso(),
+                                },
+                                indent=2,
+                            ),
+                            encoding="utf-8",
+                        )
+                        _artifacts = ["beast_mode_log.json", "stage10_blockers.json"]
+                        if (stage_dir / "opencode_log.txt").exists():
+                            _artifacts.append("opencode_log.txt")
+                        return StageResult(
+                            stage=Stage.CODE_GENERATION,
+                            status=StageStatus.FAILED,
+                            artifacts=tuple(_artifacts),
+                            evidence_refs=(),
+                            error=_error,
+                        )
                     logger.warning(
                         "Beast mode: FAILED (%s) — falling back to CodeAgent",
                         _oc_result.error or "unknown error",
@@ -700,11 +743,28 @@ def _execute_code_generation(
                     "best_score": _agent_result.best_score,
                     "tree_nodes_explored": _agent_result.tree_nodes_explored,
                     "review_rounds": _agent_result.review_rounds,
+                    "review_verdict": _agent_result.review_verdict,
+                    "review_score": _agent_result.review_score,
+                    "critical_issues": _agent_result.critical_issues,
+                    "runtime_issues": _agent_result.runtime_issues,
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
+        for issue in _agent_result.runtime_issues:
+            _stage10_blockers.append(f"CodeAgent runtime validation issue: {issue}")
+        if (
+            _agent_result.review_rounds > 0
+            and _agent_result.review_verdict
+            and _agent_result.review_verdict != "APPROVE"
+            and _agent_result.critical_issues
+        ):
+            _stage10_blockers.append(
+                "CodeAgent final review did not approve generated code: "
+                f"verdict={_agent_result.review_verdict}, "
+                f"critical_issues={len(_agent_result.critical_issues)}"
+            )
         if _agent_result.architecture_spec:
             (stage_dir / "architecture_spec.yaml").write_text(
                 _agent_result.architecture_spec, encoding="utf-8",
@@ -906,7 +966,8 @@ def _execute_code_generation(
         "os", "sys", "json", "math", "time", "copy", "re", "random",
         "pathlib", "argparse", "logging", "collections", "functools",
         "itertools", "abc", "typing", "dataclasses", "enum", "io",
-        "csv", "pickle", "glob", "shutil", "subprocess", "datetime",
+        "csv", "pickle", "glob", "shutil", "subprocess", "datetime", "types",
+        "warnings",
         "numpy", "np", "torch", "torchvision", "gymnasium", "gym",
         "sklearn", "scipy", "pandas", "matplotlib", "PIL", "tqdm",
         "einops", "timm", "transformers", "datasets", "peft",
@@ -927,6 +988,18 @@ def _execute_code_generation(
                     "files — experiment may crash on import",
                     fname, _m,
                 )
+                _stage10_blockers.append(
+                    f"{fname} imports missing local module '{_m}'"
+                )
+
+    _main_code = files.get("main.py", "")
+    if not _main_code.strip():
+        _stage10_blockers.append("main.py is missing or empty")
+    elif not _has_main_guard(_main_code):
+        _add_stage10_blocker(
+            _stage10_blockers,
+            "main.py has no executable `if __name__ == '__main__'` entry point"
+        )
 
     # --- Write experiment directory ---
     exp_dir = stage_dir / "experiment"
@@ -1044,6 +1117,13 @@ def _execute_code_generation(
                 max_tokens=_code_max_tokens,
             )
             repaired = _extract_multi_file_blocks(repair_resp.content)
+            if repaired and "main.py" in repaired:
+                if not _has_main_guard(repaired.get("main.py", "")):
+                    logger.warning(
+                        "Stage 10: Deep repair produced non-executable main.py; "
+                        "discarding repair"
+                    )
+                    repaired = {}
             if repaired and "main.py" in repaired:
                 files = repaired
                 for fname, code in files.items():
@@ -1343,6 +1423,13 @@ def _execute_code_generation(
                             _regen_attempt,
                         )
                         continue
+                    if not _has_main_guard(regen_files.get("main.py", "")):
+                        logger.warning(
+                            "Stage 10: Regen attempt %d produced "
+                            "non-executable main.py",
+                            _regen_attempt,
+                        )
+                        continue
                     files = regen_files
                     for fname, code in files.items():
                         (exp_dir / fname).write_text(code, encoding="utf-8")
@@ -1457,6 +1544,13 @@ def _execute_code_generation(
                         abl_repair_resp.content
                     )
                     if repaired_files and "main.py" in repaired_files:
+                        if not _has_main_guard(repaired_files.get("main.py", "")):
+                            logger.warning(
+                                "Stage 10: Ablation repair produced "
+                                "non-executable main.py; discarding repair"
+                            )
+                            repaired_files = {}
+                    if repaired_files and "main.py" in repaired_files:
                         files = repaired_files
                         for fname, code in files.items():
                             (exp_dir / fname).write_text(code, encoding="utf-8")
@@ -1468,6 +1562,16 @@ def _execute_code_generation(
                     logger.debug("Ablation repair failed: %s", exc)
         except Exception as exc:
             logger.debug("Ablation validation skipped: %s", exc)
+
+    # --- Final executable-entry gate after all repair/regeneration passes ---
+    _final_main_code = files.get("main.py", "")
+    if not _final_main_code.strip():
+        _add_stage10_blocker(_stage10_blockers, "main.py is missing or empty")
+    elif not _has_main_guard(_final_main_code):
+        _add_stage10_blocker(
+            _stage10_blockers,
+            "main.py has no executable `if __name__ == '__main__' entry point",
+        )
 
     # --- Write spec ---
     file_list = ", ".join(f"`{f}`" for f in sorted(files.keys()))
@@ -1505,6 +1609,31 @@ Multi-file experiment project with {len(files)} file(s): {file_list}
     artifacts = ["experiment/", "experiment_spec.md"]
     if (stage_dir / "validation_report.md").exists():
         artifacts.append("validation_report.md")
+    if _stage10_blockers:
+        blockers_path = stage_dir / "stage10_blockers.json"
+        blockers_path.write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "blockers": _stage10_blockers,
+                    "generated": _utcnow_iso(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        artifacts.append("stage10_blockers.json")
+        logger.error(
+            "Stage 10: generated experiment failed final readiness checks: %s",
+            "; ".join(_stage10_blockers),
+        )
+        return StageResult(
+            stage=Stage.CODE_GENERATION,
+            status=StageStatus.FAILED,
+            artifacts=tuple(artifacts),
+            evidence_refs=tuple(f"stage-10/{a}" for a in artifacts),
+            error="; ".join(_stage10_blockers),
+        )
 
     # BUG-R6-01: Fail stage if alignment check detected persistent mismatch
     # after all regen attempts, instead of silently proceeding.
@@ -1528,4 +1657,3 @@ Multi-file experiment project with {len(files)} file(s): {file_list}
         artifacts=tuple(artifacts),
         evidence_refs=tuple(f"stage-10/{a}" for a in artifacts),
     )
-

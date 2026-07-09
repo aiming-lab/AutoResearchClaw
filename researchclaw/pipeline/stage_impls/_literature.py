@@ -632,6 +632,78 @@ _MAX_ABSTRACT_LEN = 800  # Truncate long abstracts to reduce token usage
 _MAX_CANDIDATES_CHARS = 30_000  # Cap total candidates text sent to LLM
 
 
+def _candidate_screen_score(row: dict[str, Any], topic_keywords: list[str]) -> float:
+    """Rank candidates before LLM screening so truncation preserves relevance.
+
+    Stage 4 search providers can return globally high-citation but off-topic
+    papers.  Stage 5 still performs the strict semantic decision; this score
+    only determines which filtered candidates fit in the screening prompt.
+    """
+    title = str(row.get("title", "")).lower()
+    abstract = str(row.get("abstract", "")).lower()
+    text_blob = f"{title} {abstract}"
+    tokens = set(re.findall(r"[a-zA-Z][a-zA-Z0-9_-]+", text_blob))
+
+    score = 0.0
+    for kw in topic_keywords:
+        parts = [p for p in re.split(r"[-_]+", kw.lower()) if p]
+        if kw in title:
+            score += 3.0
+        elif kw in abstract:
+            score += 1.5
+        for part in parts:
+            if part in tokens:
+                score += 0.8 if part in title else 0.25
+
+    # If the topic itself is about hardware-security detection, prefer
+    # candidates that connect the attack, measurement, and detection axes.
+    security_terms = (
+        "spectre",
+        "meltdown",
+        "transient execution",
+        "side-channel",
+        "side channel",
+        "flush+reload",
+        "flush reload",
+        "cache attack",
+    )
+    counter_terms = (
+        "hardware performance counter",
+        "performance counter",
+        "hpc",
+        "pmu",
+        "perf_event",
+        "microarchitectural",
+        "microarchitecture",
+    )
+    detection_terms = (
+        "detection",
+        "detect",
+        "anomaly",
+        "change-point",
+        "change point",
+        "cusum",
+        "page-hinkley",
+        "runtime monitor",
+    )
+    if any(term in text_blob for term in security_terms):
+        score += 4.0
+    if any(term in text_blob for term in counter_terms):
+        score += 3.0
+    if any(term in text_blob for term in detection_terms):
+        score += 2.0
+    if any(term in text_blob for term in security_terms) and any(
+        term in text_blob for term in counter_terms
+    ):
+        score += 5.0
+    if any(term in text_blob for term in security_terms) and any(
+        term in text_blob for term in detection_terms
+    ):
+        score += 3.0
+
+    return score
+
+
 def _execute_literature_screen(
     stage_dir: Path,
     run_dir: Path,
@@ -677,6 +749,17 @@ def _execute_literature_screen(
             row["abstract"] = abstract[:_MAX_ABSTRACT_LEN] + "..."
         # Strip authors list — not needed for screening and inflates tokens
         row.pop("authors", None)
+        row["screen_rank_score"] = round(
+            _candidate_screen_score(row, topic_keywords), 3
+        )
+    filtered_rows.sort(
+        key=lambda r: (
+            float(r.get("screen_rank_score", 0.0) or 0.0),
+            int(r.get("keyword_overlap", 0) or 0),
+            int(r.get("citation_count", 0) or 0),
+        ),
+        reverse=True,
+    )
 
     # Rebuild candidates_text from filtered rows
     candidates_text = "\n".join(

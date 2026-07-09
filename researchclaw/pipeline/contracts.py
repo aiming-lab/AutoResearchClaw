@@ -1,4 +1,4 @@
-"""Stage I/O contracts for the 23-stage ResearchClaw pipeline.
+"""Stage I/O contracts for the 25-stage ResearchClaw pipeline.
 
 Each StageContract declares:
   - input_files: artifacts this stage reads (produced by prior stages)
@@ -179,7 +179,9 @@ CONTRACTS: dict[Stage, StageContract] = {
     Stage.QUALITY_GATE: StageContract(
         stage=Stage.QUALITY_GATE,
         input_files=("paper_revised.md",),
-        output_files=("quality_report.json",),
+        # fabrication_flags.json was always produced but never declared —
+        # release_check depends on it, so the contract must require it.
+        output_files=("quality_report.json", "fabrication_flags.json"),
         dod="Quality score meets threshold and approved",
         error_code="E20_GATE_REJECT",
         max_retries=0,
@@ -204,5 +206,31 @@ CONTRACTS: dict[Stage, StageContract] = {
         output_files=("verification_report.json", "references_verified.bib"),
         dod="All citations verified against real APIs; hallucinated refs flagged",
         error_code="E23_VERIFY_FAIL",
+    ),
+    # Phase I: Release Audit (v2)
+    Stage.TRUTH_AUDIT: StageContract(
+        stage=Stage.TRUTH_AUDIT,
+        input_files=("paper_final.md",),
+        output_files=(
+            "claims.json",
+            "citations.json",
+            "critique_resolution.json",
+            "truth_audit.json",
+        ),
+        dod=(
+            "Claim ledger with run-internal provenance pointers; citation "
+            "instances mapped to claims; paper hash and claims digest frozen"
+        ),
+        error_code="E24_TRUTH_AUDIT_FAIL",
+    ),
+    Stage.DEAI_AUDIT: StageContract(
+        stage=Stage.DEAI_AUDIT,
+        input_files=("truth_audit.json",),
+        output_files=("deai_audit.json",),
+        dod=(
+            "Recommend-only prose audit; paper unchanged since truth audit "
+            "(hash invariance verified)"
+        ),
+        error_code="E25_DEAI_AUDIT_FAIL",
     ),
 }

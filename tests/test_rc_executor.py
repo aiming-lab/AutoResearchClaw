@@ -90,9 +90,10 @@ def _write_prior_artifact(
     (stage_dir / filename).write_text(content, encoding="utf-8")
 
 
-def test_executor_map_has_23_entries() -> None:
+def test_executor_map_has_25_entries() -> None:
     executor_map = getattr(rc_executor, "EXECUTOR_MAP", rc_executor._STAGE_EXECUTORS)
-    assert len(executor_map) == 23
+    # v2: 23 pipeline stages + TRUTH_AUDIT (24) + DEAI_AUDIT (25).
+    assert len(executor_map) == 25
 
 
 def test_every_stage_member_has_matching_executor() -> None:
@@ -900,7 +901,7 @@ class TestIterativeRefine:
             check_paths=False,
         )
         llm = FakeLLMClient(
-            "```python\nfor _ in range(3):\n    print('val_loss: 0.5000')\n```"
+            "```python\nprint('val_loss: 0.5000')\n```"
         )
 
         rc_executor._execute_iterative_refine(
@@ -1029,6 +1030,99 @@ class TestIterativeRefine:
         assert any(
             "sandbox" in iteration for iteration in payload.get("iterations", [])
         )
+
+    def test_refine_invalidates_runtime_issue_when_repair_returns_no_code(
+        self,
+        tmp_path: Path,
+        run_dir: Path,
+        adapters: AdapterBundle,
+    ) -> None:
+        import sys
+
+        self._prepare_refine_inputs(run_dir)
+        stage_dir = run_dir / "stage-13"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        data = {
+            "project": {"name": "rc-test", "mode": "docs-first"},
+            "research": {
+                "topic": "test-driven science",
+                "domains": ["ml", "systems"],
+                "daily_paper_count": 2,
+                "quality_threshold": 8.2,
+            },
+            "runtime": {"timezone": "UTC"},
+            "notifications": {
+                "channel": "local",
+                "on_stage_start": True,
+                "on_stage_fail": False,
+                "on_gate_required": True,
+            },
+            "knowledge_base": {"backend": "markdown", "root": str(tmp_path / "kb")},
+            "openclaw_bridge": {"use_memory": True, "use_message": True},
+            "llm": {
+                "provider": "openai-compatible",
+                "base_url": "http://localhost:1234/v1",
+                "api_key_env": "RC_TEST_KEY",
+                "api_key": "inline-test-key",
+                "primary_model": "fake-model",
+                "fallback_models": [],
+            },
+            "security": {"hitl_required_stages": [5, 9, 20]},
+            "experiment": {
+                "mode": "sandbox",
+                "time_budget_sec": 30,
+                "max_iterations": 1,
+                "metric_key": "val_loss",
+                "metric_direction": "minimize",
+                "sandbox": {
+                    "python_path": sys.executable,
+                    "gpu_required": False,
+                    "max_memory_mb": 1024,
+                },
+            },
+        }
+        sandbox_config = RCConfig.from_dict(
+            data,
+            project_root=tmp_path,
+            check_paths=False,
+        )
+
+        class SequentialLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__("")
+                self.responses = [
+                    (
+                        "```python\n"
+                        "import sys\n"
+                        "print('val_loss: 0.1000')\n"
+                        "print('RuntimeWarning: invalid value encountered', file=sys.stderr)\n"
+                        "```"
+                    ),
+                    "No code block available.",
+                ]
+
+            def chat(self, messages: list[dict[str, str]], **kwargs: object):
+                _ = messages, kwargs
+                from researchclaw.llm.client import LLMResponse
+
+                content = self.responses.pop(0) if self.responses else "No code."
+                return LLMResponse(content=content, model="fake-model")
+
+        rc_executor._execute_iterative_refine(
+            stage_dir,
+            run_dir,
+            sandbox_config,
+            adapters,
+            llm=SequentialLLM(),
+        )
+
+        payload = json.loads(
+            (stage_dir / "refinement_log.json").read_text(encoding="utf-8")
+        )
+        first_iter = payload["iterations"][0]
+        assert first_iter["runtime_unresolved"] is True
+        assert first_iter["metric"] is None
+        assert payload["best_version"] == "experiment/"
 
 
 class TestExportPublishCodePackage:
@@ -1170,6 +1264,38 @@ class TestExportPublishCodePackage:
 
         readme = (stage_dir / "code" / "README.md").read_text(encoding="utf-8")
         assert "My Great Paper" in readme
+
+    def test_export_writes_canonical_source_metadata(
+        self,
+        tmp_path: Path,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+    ) -> None:
+        _write_prior_artifact(
+            run_dir,
+            19,
+            "paper_revised.md",
+            "# Canonical Paper\n\nThe measured loss is 0.1234.",
+        )
+        stage_dir = tmp_path / "run" / "stage-22"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        result = rc_executor._execute_export_publish(
+            stage_dir, run_dir, rc_config, adapters, llm=None
+        )
+
+        assert "canonical_source.json" in result.artifacts
+        metadata = json.loads((stage_dir / "canonical_source.json").read_text())
+        assert metadata["source_id"]
+        assert metadata["markdown_source_id"] == metadata["source_id"]
+        assert metadata["latex_source_id"] == metadata["source_id"]
+        assert metadata["markdown_path"] == "stage-22/paper_final.md"
+        assert metadata["latex_path"] == "stage-22/paper.tex"
+        from researchclaw.pipeline import release_artifacts as _ra
+
+        assert metadata["markdown_sha256"] == _ra.sha256_file(stage_dir / "paper_final.md")
+        assert metadata["latex_sha256"] == _ra.sha256_file(stage_dir / "paper.tex")
 
 
 def test_contracts_stage13_includes_experiment_final() -> None:
@@ -1550,6 +1676,195 @@ class TestResultAnalysisDebate:
         assert result.status == StageStatus.DONE
         assert "analysis.md" in result.artifacts
         assert not (stage_dir / "perspectives").exists()
+
+    def test_result_analysis_ignores_rejected_refinement_metrics(
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        stage12_runs = run_dir / "stage-12" / "runs"
+        stage12_runs.mkdir(parents=True)
+        (stage12_runs / "run-1.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "run-1",
+                    "status": "completed",
+                    "metrics": {"detection_f1": 0.5},
+                }
+            ),
+            encoding="utf-8",
+        )
+        refine_dir = run_dir / "stage-13"
+        refine_dir.mkdir(parents=True)
+        (refine_dir / "refinement_log.json").write_text(
+            json.dumps(
+                {
+                    "best_version": "experiment/",
+                    "best_metric": 0.5,
+                    "iterations": [
+                        {
+                            "iteration": 1,
+                            "version_dir": "experiment_v1/",
+                            "metric": None,
+                            "sandbox": {
+                                "returncode": 0,
+                                "metrics": {"detection_f1": 0.99},
+                            },
+                            "sandbox_after_fix": {
+                                "returncode": 1,
+                                "metrics": {},
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-14"
+        stage_dir.mkdir(parents=True)
+
+        result = rc_executor._execute_result_analysis(
+            stage_dir, run_dir, rc_config, adapters, llm=None
+        )
+
+        assert result.status == StageStatus.DONE
+        summary = json.loads((stage_dir / "experiment_summary.json").read_text())
+        assert summary["metrics_summary"]["detection_f1"]["mean"] == 0.5
+        assert summary["best_run"]["run_id"] == "run-1"
+
+    def test_result_analysis_rejects_runtime_issue_without_fix_metrics(
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        stage12_runs = run_dir / "stage-12" / "runs"
+        stage12_runs.mkdir(parents=True)
+        (stage12_runs / "run-1.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "run-1",
+                    "status": "completed",
+                    "metrics": {"detection_f1": 0.5},
+                }
+            ),
+            encoding="utf-8",
+        )
+        refine_dir = run_dir / "stage-13"
+        refine_dir.mkdir(parents=True)
+        (refine_dir / "refinement_log.json").write_text(
+            json.dumps(
+                {
+                    "best_version": "experiment_v1/",
+                    "best_metric": 0.99,
+                    "iterations": [
+                        {
+                            "iteration": 1,
+                            "version_dir": "experiment_v1/",
+                            "metric": 0.99,
+                            "runtime_issues": "DUMMY metric values detected",
+                            "sandbox": {
+                                "returncode": 0,
+                                "metrics": {"detection_f1": 0.99},
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-14"
+        stage_dir.mkdir(parents=True)
+
+        result = rc_executor._execute_result_analysis(
+            stage_dir, run_dir, rc_config, adapters, llm=None
+        )
+
+        assert result.status == StageStatus.DONE
+        summary = json.loads((stage_dir / "experiment_summary.json").read_text())
+        assert summary["metrics_summary"]["detection_f1"]["mean"] == 0.5
+        assert summary["best_run"]["run_id"] == "run-1"
+
+    def test_result_analysis_accepts_successfully_repaired_metrics(
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        stage12_runs = run_dir / "stage-12" / "runs"
+        stage12_runs.mkdir(parents=True)
+        (stage12_runs / "run-1.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "run-1",
+                    "status": "completed",
+                    "metrics": {"detection_f1": 0.5},
+                }
+            ),
+            encoding="utf-8",
+        )
+        refine_dir = run_dir / "stage-13"
+        refine_dir.mkdir(parents=True)
+        (refine_dir / "refinement_log.json").write_text(
+            json.dumps(
+                {
+                    "best_version": "experiment_v1/",
+                    "best_metric": 0.75,
+                    "iterations": [
+                        {
+                            "iteration": 1,
+                            "version_dir": "experiment_v1/",
+                            "metric": 0.75,
+                            "runtime_issues": "DUMMY metric values detected",
+                            "runtime_unresolved": False,
+                            "sandbox": {
+                                "returncode": 0,
+                                "metrics": {"detection_f1": 0.99},
+                            },
+                            "sandbox_after_fix": {
+                                "returncode": 0,
+                                "metrics": {"detection_f1": 0.75},
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-14"
+        stage_dir.mkdir(parents=True)
+
+        result = rc_executor._execute_result_analysis(
+            stage_dir, run_dir, rc_config, adapters, llm=None
+        )
+
+        assert result.status == StageStatus.DONE
+        summary = json.loads((stage_dir / "experiment_summary.json").read_text())
+        assert summary["metrics_summary"]["detection_f1"]["mean"] == 0.75
+        assert summary["best_run"]["run_id"] == "iterative-refine-best"
+
+    def test_truth_audit_fails_closed_when_llm_returns_zero_claims(
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        stage23 = run_dir / "stage-23"
+        stage23.mkdir(parents=True)
+        (stage23 / "paper_final_verified.md").write_text(
+            "# Paper\n\nOur method reaches 0.1234 F1 [smith2024].",
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-24"
+        stage_dir.mkdir(parents=True)
+        llm = FakeLLMClient('{"claims": []}')
+
+        result = rc_executor._execute_truth_audit(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.FAILED
+        assert "no claims" in (result.error or "")
+        truth = json.loads((stage_dir / "truth_audit.json").read_text())
+        assert truth["llm_available"] is True
+        assert truth["counts"]["total"] == 0
 
 
 class TestParseMetricsFromStdout:

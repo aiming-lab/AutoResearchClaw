@@ -594,7 +594,9 @@ class TestStage23Integration:
 
         assert Stage.CITATION_VERIFY in STAGE_SEQUENCE
         assert NEXT_STAGE[Stage.EXPORT_PUBLISH] == Stage.CITATION_VERIFY
-        assert NEXT_STAGE[Stage.CITATION_VERIFY] is None
+        # v2: citation verify feeds the release-audit phase
+        assert NEXT_STAGE[Stage.CITATION_VERIFY] == Stage.TRUTH_AUDIT
+        assert NEXT_STAGE[Stage.DEAI_AUDIT] is None
 
     def test_contract_exists(self) -> None:
         from researchclaw.pipeline.contracts import CONTRACTS
@@ -617,7 +619,7 @@ class TestStage23Integration:
         finalization_stages = PHASE_MAP["H: Finalization"]
         assert Stage.CITATION_VERIFY in finalization_stages
 
-    def test_total_stages_is_23(self) -> None:
+    def test_total_stages_is_25(self) -> None:
         from researchclaw.pipeline.stages import STAGE_SEQUENCE
 
-        assert len(STAGE_SEQUENCE) == 23
+        assert len(STAGE_SEQUENCE) == 25

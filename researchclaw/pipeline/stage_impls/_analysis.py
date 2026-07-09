@@ -61,31 +61,50 @@ def _execute_result_analysis(
             _best_iter = None
             _best_ver = _refine_data.get("best_version", "")
 
-            def _get_best_sandbox(it: dict) -> dict:
-                """BUG-181: Metrics may be in sandbox or sandbox_after_fix."""
-                sbx = it.get("sandbox", {})
-                if sbx.get("metrics"):
-                    return sbx
-                sbx_fix = it.get("sandbox_after_fix", {})
-                if sbx_fix.get("metrics"):
-                    return sbx_fix
-                return sbx
+            def _get_valid_sandbox(it: dict) -> dict:
+                """Return the sandbox metrics only if Stage 13 accepted them.
 
-            for _it in _refine_data.get("iterations", []):
-                _sbx = _get_best_sandbox(_it)
-                _it_metrics = _sbx.get("metrics", {})
-                if _it.get("version_dir", "") == _best_ver and _it_metrics:
-                    _best_iter = _it
-                    break
-            # If no version match, take the first iteration with metrics
-            if _best_iter is None:
+                Stage 13 can log metrics from an initial run and then reject the
+                same candidate after runtime repair fails. Stage 14 must not
+                resurrect those rejected metrics as the canonical summary.
+                """
+                if it.get("metric") is None:
+                    return {}
+                has_runtime_issues = bool(it.get("runtime_issues"))
+                if it.get("runtime_unresolved") is True:
+                    return {}
+                sbx_fix_raw = it.get("sandbox_after_fix")
+                if has_runtime_issues:
+                    if not isinstance(sbx_fix_raw, dict) or sbx_fix_raw.get("returncode") != 0:
+                        return {}
+                    sandbox_keys = ("sandbox_after_fix",)
+                else:
+                    if isinstance(sbx_fix_raw, dict) and sbx_fix_raw.get("returncode") != 0:
+                        return {}
+                    sandbox_keys = ("sandbox_after_fix", "sandbox")
+                for key in sandbox_keys:
+                    sbx = it.get(key, {})
+                    if (
+                        isinstance(sbx, dict)
+                        and sbx.get("returncode") == 0
+                        and isinstance(sbx.get("metrics"), dict)
+                        and sbx.get("metrics")
+                    ):
+                        return sbx
+                return {}
+
+            # If Stage 13 fell back to the baseline experiment/, keep Stage 12
+            # as the canonical source. Only merge a refinement version that was
+            # explicitly selected by Stage 13 and has accepted runtime metrics.
+            if _best_ver and _best_ver != "experiment/":
                 for _it in _refine_data.get("iterations", []):
-                    _sbx = _get_best_sandbox(_it)
-                    if _sbx.get("metrics"):
+                    _sbx = _get_valid_sandbox(_it)
+                    _it_metrics = _sbx.get("metrics", {})
+                    if _it.get("version_dir", "") == _best_ver and _it_metrics:
                         _best_iter = _it
                         break
             if _best_iter is not None:
-                _sbx = _get_best_sandbox(_best_iter)
+                _sbx = _get_valid_sandbox(_best_iter)
                 _refine_metrics = _sbx.get("metrics", {})
                 # BUG-165 fix: Prefer Stage 13 refinement data when it is
                 # actually better.  The old `or True` unconditionally
@@ -1327,10 +1346,152 @@ Generated: {_utcnow_iso()}
     )
     logger.info("Research decision: %s", decision)
 
+    # --- Socratic critic (v2): recommend-only critique before writing ---
+    # Runs on a SEPARATE model (llm.critic_model) with a fresh context —
+    # it never sees the writer's conversation. Findings are resolved and
+    # gated later (stage 24 + release_check); the critic never edits.
+    artifacts: list[str] = ["decision.md", "decision_structured.json"]
+    try:
+        _write_socratic_critique(stage_dir, run_dir, config, llm, analysis)
+        if (stage_dir / "critique.json").exists():
+            artifacts.append("critique.json")
+    except Exception:  # noqa: BLE001
+        logger.warning("Socratic critique generation failed", exc_info=True)
+
     return StageResult(
         stage=Stage.RESEARCH_DECISION,
         status=StageStatus.DONE,
-        artifacts=("decision.md", "decision_structured.json"),
+        artifacts=tuple(artifacts),
         evidence_refs=("stage-15/decision.md",),
         decision=decision,
+    )
+
+
+_SOCRATIC_CRITIC_SYSTEM = """You are an independent Socratic critic for an \
+autonomous research pipeline. You did NOT write this analysis; interrogate it. \
+Output STRICT JSON only: {"findings": [{"id": "sc-01", "severity": "P0|P1|P2", \
+"category": "causal_reasoning|physical_constraint|counterexample|statistics|overclaim", \
+"question": "<the Socratic question exposing the weakness>", \
+"finding": "<what is weak or unjustified>", \
+"falsification_criterion": "<what observation would falsify the claim>"}]}
+Rules:
+- P0: the conclusion could be wrong (confound, broken ablation, fabrication risk).
+- P1: the conclusion is under-supported (missing baseline, single seed, no uncertainty).
+- P2: presentation/scope issues.
+- You are recommend-only. Propose questions and falsification criteria, not rewrites.
+- Maximum 12 findings. Be specific to THIS analysis, not generic."""
+
+
+def _write_socratic_critique(
+    stage_dir: Path,
+    run_dir: Path,
+    config: RCConfig,
+    llm: LLMClient | None,
+    analysis: str,
+) -> None:
+    """Write stage-15/critique.json (recommend-only Socratic critique)."""
+    critic_model = (getattr(config.llm, "critic_model", "") or "").strip()
+    writer_model = (getattr(config.llm, "primary_model", "") or "").strip()
+    configured_source = (getattr(config.llm, "critic_source", "") or "").strip()
+    findings: list[dict[str, Any]] = []
+    critic_source = "none"
+
+    decision_text = ""
+    _dec = stage_dir / "decision.md"
+    if _dec.exists():
+        decision_text = _dec.read_text(encoding="utf-8")
+
+    if configured_source == "external":
+        # External reviewer workflow (e.g. Claude / Kiro as a separate agent):
+        # the pipeline records the declaration; the external reviewer writes
+        # its review artifact at llm.external_review_path, may append findings
+        # to this critique.json, and stages 24-25 are re-run before release.
+        from researchclaw.pipeline import release_artifacts as _ra_ext
+
+        _ra_ext.write_json_atomic(
+            stage_dir / "critique.json",
+            {
+                "schema_version": _ra_ext.SCHEMA_VERSION,
+                "recommend_only": True,
+                "critic_source": "external",
+                "critic_model": "",
+                "writer_model": writer_model,
+                "external_review_path": getattr(
+                    config.llm, "external_review_path", ""
+                )
+                or "",
+                "shared_context": False,
+                "findings": [],
+                "note": (
+                    "External review declared. The reviewer should add findings "
+                    "here (id/severity/question/finding/falsification_criterion), "
+                    "write the review artifact at external_review_path, then "
+                    "re-run stages 24-25. release_check fails if the artifact "
+                    "is missing or empty."
+                ),
+                "generated": _utcnow_iso(),
+            },
+        )
+        return
+
+    if llm is not None and critic_model and critic_model != writer_model:
+        critic_source = "model"
+        try:
+            resp = llm.chat(
+                [
+                    {
+                        "role": "user",
+                        "content": (
+                            "ANALYSIS:\n" + (analysis or "")[:40000]
+                            + "\n\nDECISION:\n" + decision_text[:8000]
+                        ),
+                    }
+                ],
+                system=_SOCRATIC_CRITIC_SYSTEM,
+                json_mode=True,
+                model=critic_model,
+                strip_thinking=True,
+            )
+            raw = _safe_json_loads(resp.content, {})
+            if isinstance(raw, dict) and isinstance(raw.get("findings"), list):
+                for i, f in enumerate(raw["findings"][:12]):
+                    if not isinstance(f, dict):
+                        continue
+                    sev = str(f.get("severity", "P2")).upper()
+                    if sev not in ("P0", "P1", "P2"):
+                        sev = "P1"  # unknown severity → conservative
+                    findings.append(
+                        {
+                            "id": str(f.get("id") or f"sc-{i + 1:02d}"),
+                            "severity": sev,
+                            "category": str(f.get("category", ""))[:80],
+                            "question": str(f.get("question", ""))[:500],
+                            "finding": str(f.get("finding", ""))[:800],
+                            "falsification_criterion": str(
+                                f.get("falsification_criterion", "")
+                            )[:500],
+                        }
+                    )
+        except Exception:  # noqa: BLE001
+            logger.warning("Socratic critic LLM call failed", exc_info=True)
+            critic_source = "none"
+
+    from researchclaw.pipeline import release_artifacts as _ra
+
+    _ra.write_json_atomic(
+        stage_dir / "critique.json",
+        {
+            "schema_version": _ra.SCHEMA_VERSION,
+            "recommend_only": True,
+            "critic_source": critic_source,  # "model" | "none"
+            "critic_model": critic_model if critic_source == "model" else "",
+            "writer_model": writer_model,
+            "shared_context": False,
+            "findings": findings,
+            "note": (
+                "critic_source=none means no isolated critic was available; "
+                "release_check treats this as a reviewer_isolation failure."
+            ),
+            "generated": _utcnow_iso(),
+        },
     )

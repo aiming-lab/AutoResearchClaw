@@ -257,6 +257,91 @@ class TestPhase2ExecFix:
         # Should have exactly 2 sandbox runs (max iterations)
         assert result.total_sandbox_runs == 2
 
+    def test_exec_fix_timeout_records_runtime_issue(
+        self, stage_dir: Path, pm: PromptManager,
+    ) -> None:
+        code = (
+            "```filename:main.py\n"
+            "def run():\n"
+            "    print('metric: 1.0')\n\n"
+            "if __name__ == \"__main__\":\n"
+            "    run()\n"
+            "```"
+        )
+        review = '{"verdict": "APPROVE", "score": 8, "critical_issues": []}'
+        llm = FakeLLM(responses=[code, review])
+        timeout_sandbox = FakeSandbox(results=[
+            FakeSandboxResult(returncode=1, timed_out=True),
+        ])
+
+        agent = CodeAgent(
+            llm=llm,
+            prompts=pm,
+            config=CodeAgentConfig(
+                architecture_planning=False,
+                exec_fix_max_iterations=3,
+                hard_validation=False,
+            ),
+            stage_dir=stage_dir,
+            sandbox_factory=lambda cfg, wd: timeout_sandbox,
+            experiment_config=None,
+        )
+        result = agent.generate(
+            topic="t", exp_plan="p", metric="metric", pkg_hint="",
+        )
+
+        assert result.total_sandbox_runs == 1
+        assert len(result.runtime_issues) == 1
+        assert "timed out" in result.runtime_issues[0]
+
+
+class TestHardValidationRepair:
+    def test_repair_does_not_regress_executable_main(
+        self, stage_dir: Path, pm: PromptManager,
+    ) -> None:
+        executable_main = (
+            "def run():\n"
+            "    print('metric: 1.0')\n\n"
+            "if __name__ == \"__main__\":\n"
+            "    run()\n"
+        )
+        fixed_util = "def helper():\n    return 2\n"
+        bad_main_repair = (
+            "```filename:main.py\n"
+            "class Config:\n"
+            "    pass\n"
+            "```\n"
+            "```filename:utils.py\n"
+            f"{fixed_util}"
+            "```"
+        )
+        llm = FakeLLM(responses=[bad_main_repair])
+        agent = CodeAgent(
+            llm=llm,
+            prompts=pm,
+            config=CodeAgentConfig(architecture_planning=False),
+            stage_dir=stage_dir,
+        )
+
+        repaired = agent._repair_critical_issues(
+            files={
+                "main.py": executable_main,
+                "utils.py": "def helper():\n    return 1\n",
+            },
+            critical_issues=["[utils.py] NameError: missing symbol"],
+            topic="t",
+            exp_plan="p",
+            metric="metric",
+            arch_spec="",
+        )
+
+        assert repaired["main.py"] == executable_main
+        assert repaired["utils.py"].strip() == fixed_util.strip()
+        assert any(
+            "preserving previous main.py" in line
+            for line in agent._log
+        )
+
 
 # ---------------------------------------------------------------------------
 # Phase 3: Solution Tree Search
@@ -365,6 +450,8 @@ class TestPhase4Review:
         )
 
         assert result.review_rounds == 1
+        assert result.review_verdict == "APPROVE"
+        assert result.critical_issues == []
 
     def test_review_triggers_fix_on_critical_issues(
         self, stage_dir: Path, pm: PromptManager,
@@ -394,6 +481,8 @@ class TestPhase4Review:
         )
 
         assert result.review_rounds == 2
+        assert result.review_verdict == "APPROVE"
+        assert result.critical_issues == []
         assert result.total_llm_calls == 4  # codegen + review1 + fix + review2
 
     def test_review_disabled(
@@ -416,6 +505,7 @@ class TestPhase4Review:
         )
 
         assert result.review_rounds == 0
+        assert result.review_verdict == "NOT_RUN"
         assert result.total_llm_calls == 1  # only codegen
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from http.client import HTTPMessage
+from http.client import HTTPMessage, IncompleteRead
 from types import SimpleNamespace
 from typing import Any, Mapping
 
@@ -219,6 +219,9 @@ def test_from_rc_config_builds_expected_llm_config():
             wire_api="responses",
             primary_model="o3",
             fallback_models=("o3-mini", "gpt-4o"),
+            timeout_sec=901,
+            max_retries=4,
+            retry_base_delay=3.5,
         )
     )
     client = LLMClient.from_rc_config(rc_config)
@@ -227,6 +230,9 @@ def test_from_rc_config_builds_expected_llm_config():
     assert client.config.wire_api == "responses"
     assert client.config.primary_model == "o3"
     assert client.config.fallback_models == ["o3-mini", "gpt-4o"]
+    assert client.config.timeout_sec == 901
+    assert client.config.max_retries == 4
+    assert client.config.retry_base_delay == 3.5
 
 
 def test_create_llm_client_dispatches_to_claude_cli_provider():
@@ -563,3 +569,34 @@ def test_chat_uses_fallback_after_first_model_error(monkeypatch: pytest.MonkeyPa
     response = client.chat([{"role": "user", "content": "x"}])
     assert calls == ["gpt-5.2", "gpt-5.1"]
     assert response.model == "gpt-5.1"
+
+
+def test_call_with_retry_retries_incomplete_chunk_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def fake_raw_call(
+        self: LLMClient,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        json_mode: bool,
+    ) -> LLMResponse:
+        nonlocal calls
+        _ = (self, messages, max_tokens, temperature, json_mode)
+        calls += 1
+        if calls == 1:
+            raise IncompleteRead(b"")
+        return LLMResponse(content="ok", model=model)
+
+    monkeypatch.setattr(LLMClient, "_raw_call", fake_raw_call)
+    monkeypatch.setattr("researchclaw.llm.client.time.sleep", lambda _delay: None)
+    client = _make_client(primary_model="deepseek-v4-flash", fallback_models=[])
+    client.config.max_retries = 2
+
+    response = client.chat([{"role": "user", "content": "x"}])
+
+    assert calls == 2
+    assert response.content == "ok"

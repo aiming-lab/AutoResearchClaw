@@ -6,8 +6,8 @@ from researchclaw.pipeline.contracts import CONTRACTS, StageContract
 from researchclaw.pipeline.stages import GATE_STAGES, STAGE_SEQUENCE, Stage
 
 
-def test_contracts_dict_has_exactly_23_entries():
-    assert len(CONTRACTS) == 23
+def test_contracts_dict_has_exactly_25_entries():
+    assert len(CONTRACTS) == 25
 
 
 def test_every_stage_has_matching_contract_entry():

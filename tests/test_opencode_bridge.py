@@ -180,6 +180,51 @@ class TestOpenCodeBridge:
         guidance = (ws / "GUIDANCE.md").read_text()
         assert "Test topic" in guidance
         assert "accuracy" in guidance
+        # BUG-OB-03: workspace must live OUTSIDE the run-output tree so
+        # OpenCode does not resolve its project root to the enclosing repo
+        # (whose .gitignore hides runs/ and thus the workspace's own files).
+        assert tmp_path not in ws.parents
+        assert (ws / ".git").exists()
+        import shutil as _sh
+        _sh.rmtree(ws.parent, ignore_errors=True)
+
+    def test_workspace_isolated_from_gitignored_parent(self, tmp_path):
+        """A stage_dir nested in a repo that gitignores it must not leak in."""
+        # Simulate the real failure topology: outer repo, gitignored runs/.
+        import subprocess
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        (tmp_path / ".gitignore").write_text("runs/\n")
+        stage_dir = tmp_path / "runs" / "r1" / "stage-10"
+        stage_dir.mkdir(parents=True)
+        bridge = OpenCodeBridge(model="deepseek-v4-flash",
+                                llm_base_url="https://api.deepseek.com",
+                                api_key_env="DEEPSEEK_API_KEY")
+        ws = bridge._prepare_workspace(
+            stage_dir=stage_dir, topic="t", exp_plan="p", metric="m",
+            pkg_hint="", extra_guidance="", time_budget_sec=300,
+        )
+        # workspace is its own git toplevel, not the outer repo
+        import subprocess as _sp
+        top = _sp.run(["git", "rev-parse", "--show-toplevel"], cwd=ws,
+                      capture_output=True, text=True).stdout.strip()
+        assert Path(top).resolve() == ws.resolve()
+        import shutil as _sh
+        _sh.rmtree(ws.parent, ignore_errors=True)
+
+    def test_mirror_workspace_copies_artifacts_without_git(self, tmp_path):
+        ws = tmp_path / "src" / "opencode_beast_1_2"
+        ws.mkdir(parents=True)
+        (ws / "opencode.json").write_text("{}")
+        (ws / "main.py").write_text("print('hi')")
+        (ws / ".git").mkdir()
+        (ws / ".git" / "HEAD").write_text("ref: x")
+        stage_dir = tmp_path / "stage-10"
+        stage_dir.mkdir()
+        dest = OpenCodeBridge._mirror_workspace(ws, stage_dir)
+        assert dest == stage_dir / "opencode_beast_1_2"
+        assert (dest / "opencode.json").exists()
+        assert (dest / "main.py").exists()
+        assert not (dest / ".git").exists()
 
     def test_opencode_config_azure_format(self, tmp_path):
         bridge = OpenCodeBridge(
@@ -224,6 +269,34 @@ class TestOpenCodeBridge:
         cfg = json.loads((ws / "opencode.json").read_text())
         assert cfg["model"] == "openai/gpt-4o"
         assert "openai" in cfg["provider"]
+
+    def test_opencode_config_deepseek_uses_openai_compatible_provider(self, tmp_path):
+        bridge = OpenCodeBridge(
+            model="deepseek-v4-flash",
+            llm_base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            llm_provider="openai-compatible",
+        )
+        ws = bridge._prepare_workspace(
+            stage_dir=tmp_path,
+            topic="t",
+            exp_plan="p",
+            metric="m",
+            pkg_hint="",
+            extra_guidance="",
+            time_budget_sec=300,
+        )
+        cfg = json.loads((ws / "opencode.json").read_text())
+        assert cfg["model"] == "deepseek/deepseek-v4-flash"
+        assert "deepseek" in cfg["provider"]
+        provider = cfg["provider"]["deepseek"]
+        assert provider["npm"] == "@ai-sdk/openai-compatible"
+        assert provider["options"]["baseURL"] == "https://api.deepseek.com/v1"
+        assert "{env:DEEPSEEK_API_KEY}" in provider["options"]["apiKey"]
+        assert "deepseek-v4-flash" in provider["models"]
+        # Custom models must declare tool_call, otherwise OpenCode may run
+        # them text-only (session exits 0 with zero file edits).
+        assert provider["models"]["deepseek-v4-flash"]["tool_call"] is True
 
     def test_opencode_config_preserves_prefixed_model(self, tmp_path):
         """Model with '/' prefix (e.g. anthropic/...) should NOT get double-prefixed (BUG-C fix)."""
@@ -364,6 +437,79 @@ class TestOpenCodeBridge:
         assert "main.py" in result.files
         assert result.elapsed_sec == 5.0
 
+    def test_generate_no_main_py_writes_log(self, tmp_path):
+        """Exit 0 + no main.py must still persist opencode_log.txt (observability fix)."""
+        bridge = OpenCodeBridge(max_retries=0, workspace_cleanup=False)
+
+        def fake_invoke(workspace, prompt):
+            # OpenCode exits 0 but generates no files at all
+            return True, "MODEL TRANSCRIPT: replied text-only", 26.0
+
+        with patch.object(OpenCodeBridge, "check_available", return_value=True), \
+             patch.object(bridge, "_invoke_opencode", side_effect=fake_invoke):
+            result = bridge.generate(
+                stage_dir=tmp_path,
+                topic="test",
+                exp_plan="plan",
+                metric="acc",
+            )
+        assert not result.success
+        log_file = tmp_path / "opencode_log.txt"
+        assert log_file.exists()
+        assert "MODEL TRANSCRIPT" in log_file.read_text(encoding="utf-8")
+
+    def test_invoke_opencode_no_openai_key_leak_for_deepseek(self, tmp_path, monkeypatch):
+        """DEEPSEEK_API_KEY must not be copied into OPENAI_API_KEY."""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-secret")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        bridge = OpenCodeBridge(
+            model="deepseek-v4-flash",
+            llm_base_url="https://api.deepseek.com",
+            api_key_env="DEEPSEEK_API_KEY",
+            llm_provider="openai-compatible",
+            timeout_sec=10,
+        )
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "{}"
+        mock_result.stderr = ""
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value="/usr/bin/opencode",
+        ), patch(
+            "researchclaw.pipeline.opencode_bridge.subprocess.run",
+            return_value=mock_result,
+        ) as run_mock:
+            bridge._invoke_opencode(tmp_path, "prompt")
+        env = run_mock.call_args.kwargs["env"]
+        assert "OPENAI_API_KEY" not in env
+        assert env["DEEPSEEK_API_KEY"] == "sk-deepseek-secret"
+
+    def test_invoke_opencode_sets_openai_key_for_builtin_openai(self, tmp_path, monkeypatch):
+        """Azure/OpenAI endpoints still map api_key_env → OPENAI_API_KEY."""
+        monkeypatch.setenv("AZURE_KEY", "sk-azure-secret")
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        bridge = OpenCodeBridge(
+            model="gpt-4o",
+            llm_base_url="https://foo.openai.azure.com/openai/v1",
+            api_key_env="AZURE_KEY",
+            timeout_sec=10,
+        )
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "{}"
+        mock_result.stderr = ""
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value="/usr/bin/opencode",
+        ), patch(
+            "researchclaw.pipeline.opencode_bridge.subprocess.run",
+            return_value=mock_result,
+        ) as run_mock:
+            bridge._invoke_opencode(tmp_path, "prompt")
+        env = run_mock.call_args.kwargs["env"]
+        assert env["OPENAI_API_KEY"] == "sk-azure-secret"
+
     def test_invoke_opencode_uses_resolved_path(self, tmp_path):
         bridge = OpenCodeBridge(model="gpt-5.2", timeout_sec=10)
         mock_result = MagicMock()
@@ -382,6 +528,27 @@ class TestOpenCodeBridge:
 
         assert success is True
         assert run_mock.call_args.args[0][0].endswith("opencode.cmd")
+
+    def test_invoke_opencode_pins_dir_to_workspace(self, tmp_path):
+        """BUG-OB-04: opencode must be pinned to the workspace via --dir."""
+        bridge = OpenCodeBridge(model="deepseek-v4-flash", timeout_sec=10)
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "{}"
+        mock_result.stderr = ""
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value="/usr/bin/opencode",
+        ), patch(
+            "researchclaw.pipeline.opencode_bridge.subprocess.run",
+            return_value=mock_result,
+        ) as run_mock:
+            bridge._invoke_opencode(tmp_path, "test prompt")
+        argv = run_mock.call_args.args[0]
+        assert "--dir" in argv
+        assert argv[argv.index("--dir") + 1] == str(tmp_path)
+        # cwd is still set as belt-and-suspenders
+        assert run_mock.call_args.kwargs["cwd"] == str(tmp_path)
 
 
 # ============================================================

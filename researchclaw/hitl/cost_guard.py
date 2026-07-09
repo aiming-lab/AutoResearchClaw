@@ -120,12 +120,26 @@ class CostGuard:
             cost_log = run_dir / "cost_log.jsonl"
             if cost_log.exists():
                 try:
-                    total = 0.0
+                    delta_sum = 0.0
+                    last_cumulative: float | None = None
+                    saw_cumulative = False
                     for line in cost_log.read_text(encoding="utf-8").strip().split("\n"):
-                        if line.strip():
-                            entry = json.loads(line)
-                            total += entry.get("cost_usd", 0.0)
-                    return total
+                        if not line.strip():
+                            continue
+                        entry = json.loads(line)
+                        cum = entry.get("cumulative_usd")
+                        if isinstance(cum, (int, float)):
+                            saw_cumulative = True
+                            last_cumulative = float(cum)
+                        val = entry.get("cost_usd")
+                        if isinstance(val, (int, float)):
+                            delta_sum += float(val)
+                    # Rows carry a running total: take the last cumulative
+                    # value, never sum cumulative rows. Only when no
+                    # cumulative_usd is present do we sum per-stage deltas.
+                    if saw_cumulative and last_cumulative is not None:
+                        return last_cumulative
+                    return delta_sum
                 except (json.JSONDecodeError, OSError):
                     pass
 

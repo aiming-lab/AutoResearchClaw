@@ -11,6 +11,7 @@ Features:
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -163,6 +164,8 @@ class LLMClient:
             fallback_url=fallback_url,
             fallback_api_key=fallback_api_key,
             timeout_sec=getattr(rc_config.llm, "timeout_sec", 600),
+            max_retries=getattr(rc_config.llm, "max_retries", 3),
+            retry_base_delay=getattr(rc_config.llm, "retry_base_delay", 2.0),
         )
         client = cls(config)
 
@@ -360,7 +363,7 @@ class LLMClient:
                     time.sleep(delay)
                     continue
                 raise
-            except (TimeoutError, OSError) as exc:
+            except (TimeoutError, OSError, http.client.HTTPException) as exc:
                 # Covers TimeoutError, ConnectionResetError, IncompleteRead, etc.
                 if attempt < self.config.max_retries - 1:
                     delay = self.config.retry_base_delay * (2**attempt)

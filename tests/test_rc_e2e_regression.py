@@ -280,7 +280,7 @@ class TestNoncriticalStageSkip:
             )
 
         assert len(results) == len(STAGE_SEQUENCE)
-        assert results[-1].stage is Stage.CITATION_VERIFY
+        assert results[-1].stage is Stage.DEAI_AUDIT
         assert any(
             r.stage is Stage.KNOWLEDGE_ARCHIVE and r.status is StageStatus.FAILED
             for r in results

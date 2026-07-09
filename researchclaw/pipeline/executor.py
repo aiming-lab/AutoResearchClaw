@@ -191,6 +191,14 @@ from researchclaw.pipeline.stage_impls._review_publish import (  # noqa: E402
     _remove_citations_from_text,
 )
 
+# ---------------------------------------------------------------------------
+# Stages 24-25 (release audit, stage_impls/_release_audit.py)
+# ---------------------------------------------------------------------------
+from researchclaw.pipeline.stage_impls._release_audit import (  # noqa: E402
+    _execute_truth_audit,
+    _execute_deai_audit,
+)
+
 
 def _get_hitl_session(adapters: AdapterBundle) -> Any:
     """Retrieve the HITLSession from the adapter bundle (if any)."""
@@ -588,6 +596,8 @@ _STAGE_EXECUTORS: dict[Stage, Callable[..., StageResult]] = {
     Stage.KNOWLEDGE_ARCHIVE: _execute_knowledge_archive,
     Stage.EXPORT_PUBLISH: _execute_export_publish,
     Stage.CITATION_VERIFY: _execute_citation_verify,
+    Stage.TRUTH_AUDIT: _execute_truth_audit,
+    Stage.DEAI_AUDIT: _execute_deai_audit,
 }
 
 

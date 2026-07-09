@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from researchclaw.pipeline.executor import _sanitize_fabricated_data
-from researchclaw.pipeline.stage_impls._code_generation import _check_rl_compatibility
+from researchclaw.pipeline.stage_impls._code_generation import (
+    _check_rl_compatibility,
+    _has_main_guard,
+)
 
 
 @pytest.fixture()
@@ -23,6 +26,16 @@ def _write_experiment_summary(run_dir: Path, data: dict) -> None:
     (stage14 / "experiment_summary.json").write_text(
         json.dumps(data, indent=2), encoding="utf-8"
     )
+
+
+def test_stage10_main_guard_detects_executable_entrypoint() -> None:
+    code = "def run():\n    pass\n\nif __name__ == '__main__':\n    run()\n"
+    assert _has_main_guard(code) is True
+
+
+def test_stage10_main_guard_rejects_config_only_main() -> None:
+    code = "CONFIG = {'num_seeds': 10}\n"
+    assert _has_main_guard(code) is False
 
 
 def test_sanitize_replaces_unverified_numbers(run_dir: Path) -> None:

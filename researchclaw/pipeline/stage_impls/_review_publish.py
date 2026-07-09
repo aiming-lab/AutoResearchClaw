@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import hashlib
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -1485,7 +1486,19 @@ def _execute_export_publish(
     else:
         final_paper = revised
     if not final_paper.strip():
-        final_paper = "# Final Paper\n\nNo content generated."
+        # Fail closed: a placeholder "final paper" must never reach export.
+        # (Previously this wrote "# Final Paper\n\nNo content generated."
+        # which passed the non-empty-artifact check downstream.)
+        return StageResult(
+            stage=Stage.EXPORT_PUBLISH,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=(
+                "Export produced no paper content (paper_revised.md empty and "
+                "LLM returned nothing). Refusing to write a placeholder final paper."
+            ),
+            decision="retry",
+        )
 
     # --- Always-on fabrication sanitization (Phase 1 anti-fabrication) ---
     # Back up pre-sanitized version
@@ -2100,6 +2113,37 @@ def _execute_export_publish(
         )
         (stage_dir / "paper.tex").write_text(tex_content, encoding="utf-8")
         artifacts.append("paper.tex")
+
+        def _write_canonical_source_metadata() -> None:
+            _canonical_md_path = stage_dir / "paper_final.md"
+            _canonical_tex_path = stage_dir / "paper.tex"
+            _canonical_source_bytes = _canonical_md_path.read_bytes()
+            _canonical_tex_bytes = _canonical_tex_path.read_bytes()
+            _canonical_source_id = hashlib.sha256(_canonical_source_bytes).hexdigest()
+            _canonical_tex_id = hashlib.sha256(_canonical_tex_bytes).hexdigest()
+            (stage_dir / "canonical_source.json").write_text(
+                json.dumps(
+                    {
+                        "source_id": _canonical_source_id,
+                        "markdown_source_id": _canonical_source_id,
+                        "latex_source_id": _canonical_source_id,
+                        "markdown_path": "stage-22/paper_final.md",
+                        "latex_path": "stage-22/paper.tex",
+                        "markdown_sha256": _canonical_source_id,
+                        "latex_sha256": _canonical_tex_id,
+                        "generated": _utcnow_iso(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+        try:
+            _write_canonical_source_metadata()
+            if "canonical_source.json" not in artifacts:
+                artifacts.append("canonical_source.json")
+        except OSError as _canon_exc:
+            logger.warning("Stage 22: could not write canonical_source.json: %s", _canon_exc)
         logger.info(
             "Stage 22: Generated paper.tex for %s (%d chars)",
             tpl.display_name,
@@ -2319,6 +2363,42 @@ def _execute_export_publish(
         try:
             from researchclaw.templates.compiler import compile_latex
             _compile_result = compile_latex(stage_dir / "paper.tex", max_attempts=2)
+            # v2: always persist machine-readable compile evidence.
+            # release_check reads compile_status.json; success must never be
+            # inferred from a log line.
+            try:
+                (stage_dir / "compile_status.json").write_text(
+                    json.dumps(
+                        {
+                            "success": bool(_compile_result.success),
+                            "attempts": getattr(_compile_result, "attempts", None),
+                            "errors": list(
+                                getattr(_compile_result, "errors", ()) or ()
+                            )[:5],
+                            "status": (
+                                "success"
+                                if _compile_result.success
+                                else (
+                                    "toolchain_missing"
+                                    if any(
+                                        "pdflatex not installed" in str(_err).lower()
+                                        for _err in (getattr(_compile_result, "errors", ()) or ())
+                                    )
+                                    else "latex_error"
+                                )
+                            ),
+                            "tooling_available": not any(
+                                "pdflatex not installed" in str(_err).lower()
+                                for _err in (getattr(_compile_result, "errors", ()) or ())
+                            ),
+                            "generated": _utcnow_iso(),
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError:
+                logger.warning("Stage 22: could not write compile_status.json")
             if _compile_result.success:
                 logger.info("Stage 22: LaTeX compilation verification PASSED")
                 artifacts.append("paper.pdf")
@@ -2396,6 +2476,28 @@ def _execute_export_publish(
                         _tex_path.write_text(_tex_content, encoding="utf-8")
         except Exception as _compile_exc:  # noqa: BLE001
             logger.debug("Stage 22: Compile verification skipped: %s", _compile_exc)
+            # Fail closed in evidence: a skipped/crashed compile is not a success.
+            try:
+                _cs_path = stage_dir / "compile_status.json"
+                if not _cs_path.exists():
+                    _cs_path.write_text(
+                        json.dumps(
+                            {
+                                "success": False,
+                                "attempts": 0,
+                                "errors": [f"compile verification skipped: {_compile_exc}"],
+                                "status": "toolchain_missing"
+                                if "pdflatex" in str(_compile_exc).lower()
+                                else "latex_error",
+                                "tooling_available": "pdflatex" not in str(_compile_exc).lower(),
+                                "generated": _utcnow_iso(),
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+            except OSError:
+                pass
     except Exception as exc:  # noqa: BLE001
         logger.error("LaTeX generation failed: %s", exc, exc_info=True)
 
@@ -2551,6 +2653,14 @@ def _execute_export_publish(
     except Exception as exc:  # noqa: BLE001
         logger.debug("Stage 22: Framework diagram prompt generation skipped: %s", exc)
 
+    try:
+        if "paper.tex" in artifacts and "paper_final.md" in artifacts:
+            _write_canonical_source_metadata()
+            if "canonical_source.json" not in artifacts:
+                artifacts.append("canonical_source.json")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Stage 22: could not refresh canonical_source.json: %s", exc)
+
     return StageResult(
         stage=Stage.EXPORT_PUBLISH,
         status=StageStatus.DONE,
@@ -2683,6 +2793,19 @@ def _execute_citation_verify(
     paper_text = _read_prior_artifact(run_dir, "paper_final.md") or ""
 
     if not bib_text.strip():
+        # v2 fail-closed: if the paper cites keys but there is no bib,
+        # verification CANNOT succeed. Previously this wrote
+        # integrity_score=1.0 and returned DONE — a fail-open path.
+        _cited_keys_no_bib: set[str] = set()
+        if paper_text.strip():
+            _cited_keys_no_bib.update(
+                re.findall(r"\[([a-zA-Z]+\d{4}[a-zA-Z0-9_-]*)\]", paper_text)
+            )
+            for _cm in re.finditer(r"\\cite[a-zA-Z*]*\{([^}]+)\}", paper_text):
+                _cited_keys_no_bib.update(
+                    k.strip() for k in _cm.group(1).split(",") if k.strip()
+                )
+        has_citations = bool(_cited_keys_no_bib)
         report_data = {
             "summary": {
                 "total": 0,
@@ -2690,10 +2813,18 @@ def _execute_citation_verify(
                 "suspicious": 0,
                 "hallucinated": 0,
                 "skipped": 0,
-                "integrity_score": 1.0,
+                # No bib + citations in paper = zero integrity, not perfect.
+                "integrity_score": 0.0 if has_citations else 1.0,
+                "missing_bib": True,
+                "cited_keys_without_bib": sorted(_cited_keys_no_bib)[:50],
             },
             "results": [],
-            "note": "No references.bib found — nothing to verify.",
+            "note": (
+                "No references.bib found, but the paper cites "
+                f"{len(_cited_keys_no_bib)} key(s) — verification impossible."
+                if has_citations
+                else "No references.bib found and no citations in paper."
+            ),
         }
         (stage_dir / "verification_report.json").write_text(
             json.dumps(report_data, indent=2), encoding="utf-8"
@@ -2706,6 +2837,18 @@ def _execute_citation_verify(
         if paper_text.strip():
             (stage_dir / "paper_final_verified.md").write_text(
                 paper_text, encoding="utf-8"
+            )
+        if has_citations:
+            return StageResult(
+                stage=Stage.CITATION_VERIFY,
+                status=StageStatus.FAILED,
+                artifacts=("verification_report.json", "references_verified.bib"),
+                evidence_refs=("stage-23/verification_report.json",),
+                error=(
+                    f"Paper cites {len(_cited_keys_no_bib)} key(s) but no "
+                    "references.bib exists — citations cannot be verified."
+                ),
+                decision="retry",
             )
         return StageResult(
             stage=Stage.CITATION_VERIFY,
@@ -2795,17 +2938,42 @@ def _execute_citation_verify(
     if low_relevance_keys:
         verified_bib = _remove_bibtex_entries(verified_bib, low_relevance_keys)
 
-    # BUG-26: If verification stripped >50% of entries (e.g. due to rate limiting),
-    # fall back to the original bib to avoid breaking the paper's references
+    # v2 (supersedes BUG-26): NEVER fall back to the unverified original bib.
+    # Restoring bib_text wholesale re-admits every hallucinated/suspicious
+    # entry that verification just removed — the exact fail-open path a
+    # release gate exists to prevent. Heavy stripping (e.g. rate limiting)
+    # is recorded as evidence instead, and the missing-verified-entries gate
+    # in release_check blocks the run.
     original_count = len(re.findall(r"@\w+\{", bib_text))
     verified_count = len(re.findall(r"@\w+\{", verified_bib))
     if original_count > 0 and verified_count < original_count * 0.5:
         logger.warning(
             "Stage 23: Verification stripped %d→%d entries (>50%% loss). "
-            "Keeping original bib to avoid breaking references.",
+            "NOT restoring the unverified original bib; run is not "
+            "release-eligible until verification succeeds.",
             original_count, verified_count,
         )
-        verified_bib = bib_text
+        try:
+            (stage_dir / "bib_strip_warning.json").write_text(
+                json.dumps(
+                    {
+                        "original_entries": original_count,
+                        "verified_entries": verified_count,
+                        "strip_ratio": round(
+                            1 - verified_count / max(original_count, 1), 3
+                        ),
+                        "note": (
+                            "More than 50% of bib entries failed verification "
+                            "or were rate-limited. Original bib was NOT restored."
+                        ),
+                        "generated": _utcnow_iso(),
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     # IMP-1: Also prune uncited entries from verified bib
     # BUG-182: Also scan LaTeX paper.tex (not just Markdown) for \cite{} keys.

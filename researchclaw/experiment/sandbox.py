@@ -311,6 +311,22 @@ class ExperimentSandbox:
         self.workdir.mkdir(parents=True, exist_ok=True)
         self._run_counter: int = 0
 
+    def _build_env(self) -> dict[str, str]:
+        """Build the subprocess environment per the configured policy.
+
+        Default is an allowlist: the sandbox must not inherit API keys,
+        tokens, or arbitrary host state. ``env_policy="inherit_all"`` keeps
+        the legacy behavior but is flagged unsafe by release_check.
+        """
+        policy = getattr(self.config, "env_policy", "allowlist") or "allowlist"
+        if policy == "inherit_all":
+            env = dict(os.environ)
+        else:
+            allow = set(getattr(self.config, "env_allowlist", ()) or ())
+            env = {k: v for k, v in os.environ.items() if k in allow}
+        env["PYTHONUNBUFFERED"] = "1"
+        return env
+
     def run(self, code: str, *, timeout_sec: int = 300) -> SandboxResult:
         script_path = self._next_script_path()
         self._write_script(script_path, code)
@@ -321,7 +337,7 @@ class ExperimentSandbox:
 
         result: SandboxResult
         try:
-            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            env = self._build_env()
             completed = subprocess.run(
                 command,
                 capture_output=True,
@@ -422,7 +438,7 @@ class ExperimentSandbox:
 
         result: SandboxResult
         try:
-            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            env = self._build_env()
             if env_overrides:
                 env.update(env_overrides)
             completed = subprocess.run(

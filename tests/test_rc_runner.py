@@ -94,7 +94,7 @@ def test_execute_pipeline_runs_stages_in_sequence(
         adapters=adapters,
     )
     assert seen == list(STAGE_SEQUENCE)
-    assert len(results) == 23
+    assert len(results) == 25
     assert all(r.status == StageStatus.DONE for r in results)
 
 
@@ -282,7 +282,7 @@ def test_execute_pipeline_continues_after_gate_when_stop_on_gate_disabled(
         adapters=adapters,
         stop_on_gate=False,
     )
-    assert len(results) == 23
+    assert len(results) == 25
     assert any(item.status == StageStatus.BLOCKED_APPROVAL for item in results)
 
 
@@ -412,8 +412,8 @@ def test_execute_pipeline_writes_kb_entries_when_kb_root_provided(
         adapters=adapters,
         kb_root=kb_root,
     )
-    assert len(results) == 23
-    assert len(calls) == 23
+    assert len(results) == 25
+    assert len(calls) == 25
     assert calls[0] == (1, "topic_init", "run-kb")
 
 
@@ -703,8 +703,8 @@ def test_proceed_decision_does_not_trigger_rollback(
         config=rc_config,
         adapters=adapters,
     )
-    # Should be exactly 23 stages, no rollback
-    assert len(seen) == 23
+    # Should be exactly 25 stages, no rollback
+    assert len(seen) == 25
     assert not (run_dir / "decision_history.json").exists()
 
 
@@ -923,8 +923,8 @@ def test_degraded_quality_gate_continues_pipeline(
         config=rc_config,
         adapters=adapters,
     )
-    # All 23 stages should execute (not stopped at quality gate)
-    assert len(results) == 23
+    # All 25 stages should execute (not stopped at quality gate)
+    assert len(results) == 25
     assert seen == list(STAGE_SEQUENCE)
     # Quality gate result should have decision="degraded"
     qg_result = [r for r in results if r.stage == Stage.QUALITY_GATE][0]

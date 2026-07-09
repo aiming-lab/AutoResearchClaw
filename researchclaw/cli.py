@@ -456,7 +456,35 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
     else:
         print(f"\nPipeline complete: {done}/{len(results)} stages done, {failed} failed")
-    return 0 if failed == 0 else 1
+
+    if failed != 0:
+        return 1
+
+    # v2: a degraded run must not exit 0. Degradation was previously visible
+    # only to the external release_check; the CLI itself returned success,
+    # which let callers treat degraded output as clean. Exit 2 mirrors
+    # release_check's EXIT_DEGRADED.
+    degraded = any(getattr(r, "decision", "") == "degraded" for r in results)
+    if not degraded:
+        try:
+            import json as _json
+
+            _summary_path = run_dir / "pipeline_summary.json"
+            if _summary_path.exists():
+                degraded = bool(
+                    _json.loads(_summary_path.read_text(encoding="utf-8")).get(
+                        "degraded"
+                    )
+                )
+        except Exception:  # noqa: BLE001
+            pass
+    if degraded:
+        print(
+            "Pipeline completed DEGRADED — output is not release-eligible "
+            "(exit 2). See degradation_signal.json."
+        )
+        return 2
+    return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:

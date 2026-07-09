@@ -20,8 +20,8 @@ from researchclaw.pipeline.stages import (
 )
 
 
-def test_stage_enum_has_exactly_23_members():
-    assert len(Stage) == 23
+def test_stage_enum_has_exactly_25_members():
+    assert len(Stage) == 25
 
 
 @pytest.mark.parametrize(
@@ -31,10 +31,10 @@ def test_stage_values_follow_sequence_order(index: int, stage: Stage):
     assert int(stage) == index
 
 
-def test_stage_sequence_contains_all_23_stages_in_order():
-    assert len(STAGE_SEQUENCE) == 23
+def test_stage_sequence_contains_all_25_stages_in_order():
+    assert len(STAGE_SEQUENCE) == 25
     assert STAGE_SEQUENCE[0] is Stage.TOPIC_INIT
-    assert STAGE_SEQUENCE[-1] is Stage.CITATION_VERIFY
+    assert STAGE_SEQUENCE[-1] is Stage.DEAI_AUDIT
     assert tuple(Stage) == STAGE_SEQUENCE
 
 
@@ -63,8 +63,8 @@ def test_gate_rollback_map_matches_expected_targets():
     }
 
 
-def test_phase_map_has_8_phases_with_expected_membership():
-    assert len(PHASE_MAP) == 8
+def test_phase_map_has_9_phases_with_expected_membership():
+    assert len(PHASE_MAP) == 9
     assert PHASE_MAP["A: Research Scoping"] == (
         Stage.TOPIC_INIT,
         Stage.PROBLEM_DECOMPOSE,
@@ -104,11 +104,15 @@ def test_phase_map_has_8_phases_with_expected_membership():
         Stage.EXPORT_PUBLISH,
         Stage.CITATION_VERIFY,
     )
+    assert PHASE_MAP["I: Release Audit"] == (
+        Stage.TRUTH_AUDIT,
+        Stage.DEAI_AUDIT,
+    )
 
 
 def test_phase_map_covers_all_stages_exactly_once():
     flattened = tuple(stage for stages in PHASE_MAP.values() for stage in stages)
-    assert len(flattened) == 23
+    assert len(flattened) == 25
     assert set(flattened) == set(Stage)
 
 

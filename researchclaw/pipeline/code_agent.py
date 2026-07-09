@@ -75,6 +75,10 @@ class CodeAgentConfig:
     # Phase 5: Multi-agent review dialog
     review_max_rounds: int = 2
 
+    # Long repair/review calls. Keep bounded for providers that often drop
+    # large chunked responses during code-generation repair loops.
+    long_call_max_tokens: int = 8192
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -112,6 +116,10 @@ class CodeAgentResult:
     best_score: float = 0.0
     tree_nodes_explored: int = 0
     review_rounds: int = 0
+    review_verdict: str = ""
+    review_score: float = 0.0
+    critical_issues: list[str] = field(default_factory=list)
+    runtime_issues: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +194,7 @@ class CodeAgent:
         self._runs = 0
         self._log: list[str] = []
         self._sandbox: _SandboxLike | None = None
+        self._runtime_issues: list[str] = []
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -256,8 +265,17 @@ class CodeAgent:
 
         # Phase 5: Review dialog
         review_rounds = 0
+        review_verdict = "NOT_RUN"
+        review_score = 0.0
+        critical_issues: list[str] = []
         if self._cfg.review_max_rounds > 0:
-            best.files, review_rounds = self._phase4_review(
+            (
+                best.files,
+                review_rounds,
+                review_verdict,
+                review_score,
+                critical_issues,
+            ) = self._phase4_review(
                 best.files, topic, exp_plan, metric,
             )
 
@@ -276,6 +294,10 @@ class CodeAgent:
             best_score=best.score,
             tree_nodes_explored=nodes_explored,
             review_rounds=review_rounds,
+            review_verdict=review_verdict,
+            review_score=review_score,
+            critical_issues=critical_issues,
+            runtime_issues=list(self._runtime_issues),
         )
 
     # ── Phase 1: Blueprint Planning ──────────────────────────────────────
@@ -838,26 +860,7 @@ class CodeAgent:
         if main_code:
             try:
                 main_tree = ast.parse(main_code)
-                has_main_guard = False
-                for node in ast.walk(main_tree):
-                    if isinstance(node, ast.If):
-                        # Check for `if __name__ == "__main__"` pattern
-                        test = node.test
-                        if isinstance(test, ast.Compare):
-                            left = test.left
-                            if (
-                                isinstance(left, ast.Name)
-                                and left.id == "__name__"
-                                and len(test.comparators) == 1
-                            ):
-                                comp = test.comparators[0]
-                                if (
-                                    isinstance(comp, ast.Constant)
-                                    and comp.value == "__main__"
-                                ):
-                                    has_main_guard = True
-                                    break
-                if not has_main_guard:
+                if not self._has_main_guard(main_code):
                     critical.append(
                         "[main.py] Missing `if __name__ == \"__main__\":` block — "
                         "script will define functions/classes but never execute "
@@ -916,16 +919,42 @@ class CodeAgent:
             "3. Never hardcode metric values — compute them from actual data\n"
             "4. nn.Module layers must be created in __init__(), not forward()\n"
             "5. All cross-file imports must reference names that actually exist\n"
-            "6. Output ALL files in ```filename:xxx.py``` format\n"
+            "6. If you output main.py, it must be a complete executable script "
+            "with `if __name__ == \"__main__\":` calling the experiment runner\n"
+            "7. Never replace an executable main.py with config/classes only\n"
+            "8. Output only changed whole files in ```filename:xxx.py``` format\n"
         )
 
         sys_prompt = self._pm.system("code_generation")
-        resp = self._chat(sys_prompt, prompt, max_tokens=16384)
+        resp = self._chat(
+            sys_prompt,
+            prompt,
+            max_tokens=self._cfg.long_call_max_tokens,
+        )
 
         fixed = self._extract_files(resp.content)
         if fixed:
             merged = dict(files)
+
+            if "main.py" in fixed and not self._has_main_guard(fixed["main.py"]):
+                fixed = dict(fixed)
+                fixed.pop("main.py", None)
+                self._log_event(
+                    "  WARNING: Repair attempted to replace main.py with "
+                    "a non-executable file; preserving previous main.py"
+                )
+                if not fixed:
+                    return files
+
             merged.update(fixed)
+            new_critical, _new_warnings = self._hard_validate(merged)
+            if len(new_critical) > len(critical_issues):
+                self._log_event(
+                    "  WARNING: Repair increased critical issues "
+                    f"({len(critical_issues)} -> {len(new_critical)}); "
+                    "discarding repair"
+                )
+                return files
             self._log_event(
                 f"  Repair updated {len(fixed)} file(s): "
                 f"{', '.join(sorted(fixed))}"
@@ -934,6 +963,34 @@ class CodeAgent:
 
         self._log_event("  WARNING: Repair produced no extractable files")
         return files
+
+    @staticmethod
+    def _has_main_guard(code: str) -> bool:
+        """Return True if code has an executable `__main__` guard."""
+        if not code.strip():
+            return False
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            test = node.test
+            if not isinstance(test, ast.Compare):
+                continue
+            if len(test.comparators) != 1:
+                continue
+            left = test.left
+            comp = test.comparators[0]
+            if (
+                isinstance(left, ast.Name)
+                and left.id == "__name__"
+                and isinstance(comp, ast.Constant)
+                and comp.value == "__main__"
+            ):
+                return True
+        return False
 
     # ── Phase 2b: Single-Shot Generate + Exec-Fix (legacy) ───────────────
 
@@ -974,7 +1031,25 @@ class CodeAgent:
                 f"  Exec-fix iter {i}: crashed (rc={result.returncode}), "
                 f"stderr={len(result.stderr or '')} chars"
             )
-            files = self._fix_runtime_error(files, result)
+            if getattr(result, "timed_out", False):
+                issue = (
+                    f"Exec-fix sandbox timed out after "
+                    f"{self._cfg.exec_fix_timeout_sec}s; generated code did "
+                    "not complete during CodeAgent validation"
+                )
+                self._runtime_issues.append(issue)
+                self._log_event(f"  RUNTIME BLOCKER: {issue}")
+                break
+            try:
+                files = self._fix_runtime_error(files, result)
+            except RuntimeError as exc:
+                issue = (
+                    "Exec-fix repair LLM call failed after runtime error: "
+                    f"{exc}"
+                )
+                self._runtime_issues.append(issue)
+                self._log_event(f"  RUNTIME BLOCKER: {issue}")
+                break
 
         return files
 
@@ -1062,7 +1137,11 @@ class CodeAgent:
             returncode=str(result.returncode),
             files_context=files_ctx,
         )
-        resp = self._chat(sp.system, sp.user, max_tokens=16384)
+        resp = self._chat(
+            sp.system,
+            sp.user,
+            max_tokens=self._cfg.long_call_max_tokens,
+        )
 
         fixed = self._extract_files(resp.content)
         if fixed:
@@ -1168,7 +1247,11 @@ class CodeAgent:
             "shown. Preserve experiment design and scientific methodology. "
             "Output the COMPLETE fixed file."
         )
-        resp = self._chat(sys_prompt, prompt, max_tokens=16384)
+        resp = self._chat(
+            sys_prompt,
+            prompt,
+            max_tokens=self._cfg.long_call_max_tokens,
+        )
 
         fixed = self._extract_files(resp.content)
         if not fixed:
@@ -1319,11 +1402,14 @@ class CodeAgent:
         topic: str,
         exp_plan: str,
         metric: str,
-    ) -> tuple[dict[str, str], int]:
+    ) -> tuple[dict[str, str], int, str, float, list[str]]:
         """Reviewer agent examines code; coder fixes critical issues."""
         self._log_event("Phase 4: Review dialog")
 
         rounds = 0
+        final_verdict = "NOT_RUN"
+        final_score = 0.0
+        final_critical: list[str] = []
         for r in range(self._cfg.review_max_rounds):
             rounds += 1
             files_ctx = self._format_files(files)
@@ -1347,6 +1433,12 @@ class CodeAgent:
             verdict = review.get("verdict", "APPROVE")
             score = review.get("score", 10)
             critical = review.get("critical_issues", [])
+            final_verdict = str(verdict).upper()
+            try:
+                final_score = float(score)
+            except (TypeError, ValueError):
+                final_score = 0.0
+            final_critical = [str(issue) for issue in critical if str(issue).strip()]
 
             self._log_event(
                 f"  Review round {r + 1}: verdict={verdict}, score={score}, "
@@ -1367,14 +1459,18 @@ class CodeAgent:
                 "including unchanged files."
             )
             sys_prompt = self._pm.system("code_generation")
-            fix_resp = self._chat(sys_prompt, fix_prompt, max_tokens=16384)
+            fix_resp = self._chat(
+                sys_prompt,
+                fix_prompt,
+                max_tokens=self._cfg.long_call_max_tokens,
+            )
 
             fixed = self._extract_files(fix_resp.content)
             if fixed:
                 files = dict(files)
                 files.update(fixed)
 
-        return files, rounds
+        return files, rounds, final_verdict, final_score, final_critical
 
     # ── Helpers ────────────────────────────────────────────────────────────
 

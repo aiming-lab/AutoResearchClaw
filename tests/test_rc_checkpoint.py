@@ -41,8 +41,12 @@ class TestCheckpoint:
         assert read_checkpoint(tmp_path) is None
 
     def test_read_checkpoint_last_stage(self, tmp_path: Path):
-        _write_checkpoint(tmp_path, Stage.CITATION_VERIFY, "test-run")
+        _write_checkpoint(tmp_path, Stage.DEAI_AUDIT, "test-run")
         assert read_checkpoint(tmp_path) is None
+
+    def test_read_checkpoint_citation_verify_resumes_at_truth_audit(self, tmp_path: Path):
+        _write_checkpoint(tmp_path, Stage.CITATION_VERIFY, "test-run")
+        assert read_checkpoint(tmp_path) is Stage.TRUTH_AUDIT
 
     def test_read_checkpoint_corrupted(self, tmp_path: Path):
         (tmp_path / "checkpoint.json").write_text("not json", encoding="utf-8")
@@ -76,8 +80,10 @@ class TestNoncriticalStages:
     def test_paper_draft_is_critical(self):
         assert Stage.PAPER_DRAFT not in NONCRITICAL_STAGES
 
-    def test_stage_sequence_still_ends_with_citation_verify(self):
-        assert STAGE_SEQUENCE[-1] == Stage.CITATION_VERIFY
+    def test_stage_sequence_ends_with_deai_audit(self):
+        # v2: release audit phase runs after citation verify
+        assert STAGE_SEQUENCE[-1] == Stage.DEAI_AUDIT
+        assert STAGE_SEQUENCE[-2] == Stage.TRUTH_AUDIT
 
 
 class TestContentMetrics:
