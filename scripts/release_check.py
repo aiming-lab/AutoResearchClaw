@@ -24,7 +24,6 @@ gate to make a particular run pass is a process violation.
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import hashlib
 import json
 import re
@@ -52,13 +51,6 @@ _PLACEHOLDER_PAPER_MARKERS = (
     "# Skipped Stage",
 )
 
-_ALLOWED_CLAIM_EVIDENCE_PATTERNS = (
-    "stage-14*/experiment_summary.json",
-    "experiment_summary_best.json",
-    "stage-13*/refinement_log.json",
-    "stage-12*/runs/*.json",
-    "attempts/attempt_log.jsonl",
-)
 _CITATION_EVIDENCE_PATH = "stage-23/verification_report.json"
 
 
@@ -1181,9 +1173,18 @@ def is_allowed_claim_evidence_path(rel: str, claim_type: str) -> bool:
         return rel == _CITATION_EVIDENCE_PATH
     if rel == _CITATION_EVIDENCE_PATH:
         return False
-    return any(
-        fnmatch.fnmatchcase(rel, pattern)
-        for pattern in _ALLOWED_CLAIM_EVIDENCE_PATTERNS
+    parts = rel.split("/")
+    if rel in {"experiment_summary_best.json", "attempts/attempt_log.jsonl"}:
+        return True
+    if len(parts) == 2 and parts[0].startswith("stage-14") and parts[1] == "experiment_summary.json":
+        return True
+    if len(parts) == 2 and parts[0].startswith("stage-13") and parts[1] == "refinement_log.json":
+        return True
+    return (
+        len(parts) == 3
+        and parts[0].startswith("stage-12")
+        and parts[1] == "runs"
+        and parts[2].endswith(".json")
     )
 
 

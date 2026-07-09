@@ -53,7 +53,9 @@ follow stricter rules than ordinary code:
    independent of any particular run.
 3. **No weakening to pass.** If a run fails a gate, fix the run (or file a
    machine-readable waiver where the gate supports one, e.g.
-   `waivers/no_real_data.json`). Do not loosen the gate.
+   `waivers/no_real_data.json`). Waivers are human governance artifacts; do not
+   generate them from pipeline stages, repair scripts, or release helpers. Do
+   not loosen the gate.
 4. **Digest functions stay in sync.** `paper_sha256` / `claims_digest` are
    duplicated in `scripts/release_check.py` for standalone use; change both
    sides in the same (isolated) commit.

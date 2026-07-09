@@ -390,7 +390,9 @@ Behavioral hardening shipped with v2:
 
 - `has_real_data=false` is now a release **error**; a signed
   `waivers/no_real_data.json` (`reason` + `approved_by`) downgrades it to a
-  warning.
+  warning. This waiver is an explicit human governance exception: pipeline
+  stages, repair scripts, release helpers, and generated run artifacts must not
+  auto-create it.
 - CLI exits 2 for degraded runs (previously 0).
 - Docker-unavailable no longer silently falls back to subprocess
   (`experiment.sandbox.allow_docker_fallback`, default false; fallback is
