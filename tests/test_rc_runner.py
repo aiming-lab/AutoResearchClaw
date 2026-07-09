@@ -806,6 +806,48 @@ def test_kb_export_failure_is_recorded_once(
     ]
 
 
+def test_result_analysis_diagnosis_failure_fails_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    import researchclaw.pipeline.experiment_diagnosis as diagnosis_module
+
+    def broken_diagnose_experiment(*args: object, **kwargs: object) -> object:
+        _ = args, kwargs
+        raise RuntimeError("diagnosis boom")
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        if stage == Stage.RESULT_ANALYSIS:
+            (stage_dir / "experiment_summary.json").write_text(
+                json.dumps({"metrics": {"primary_metric": 0.42}}),
+                encoding="utf-8",
+            )
+        return _done(stage)
+
+    monkeypatch.setattr(
+        diagnosis_module, "diagnose_experiment", broken_diagnose_experiment
+    )
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-diagnosis-fail",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert len(results) == 1
+    assert results[0].stage == Stage.RESULT_ANALYSIS
+    assert results[0].status == StageStatus.FAILED
+    assert results[0].error == "Experiment diagnosis failed: diagnosis boom"
+
+
 @pytest.mark.parametrize(
     ("stage", "started", "expected"),
     [

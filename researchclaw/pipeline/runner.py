@@ -427,7 +427,9 @@ def _collect_content_metrics(run_dir: Path | None) -> dict[str, object]:
 logger = logging.getLogger(__name__)
 
 
-def _run_experiment_diagnosis(run_dir: Path, config: RCConfig, run_id: str) -> None:
+def _run_experiment_diagnosis(
+    run_dir: Path, config: RCConfig, run_id: str
+) -> str | None:
     """Run experiment diagnosis after Stage 14 and save reports.
 
     Produces:
@@ -445,7 +447,7 @@ def _run_experiment_diagnosis(run_dir: Path, config: RCConfig, run_id: str) -> N
         for candidate in sorted(run_dir.glob("stage-14*/experiment_summary.json")):
             summary_path = candidate
         if not summary_path or not summary_path.exists():
-            return
+            return None
 
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
 
@@ -561,7 +563,9 @@ def _run_experiment_diagnosis(run_dir: Path, config: RCConfig, run_id: str) -> N
             print(f"[{run_id}] Experiment diagnosis: {qa.mode.value} — quality OK")
 
     except Exception as exc:
-        logger.warning("Experiment diagnosis failed: %s", exc)
+        message = f"Experiment diagnosis failed: {exc}"
+        logger.warning(message)
+        return message
 
 
 def _run_experiment_repair(run_dir: Path, config: RCConfig, run_id: str) -> None:
@@ -861,7 +865,22 @@ def execute_pipeline(
             # belongs in stage 15 RESEARCH_DECISION.
             and config.experiment.mode not in ("collider_agent", "biology_agent", "stat_agent")
         ):
-            _run_experiment_diagnosis(run_dir, config, run_id)
+            _diagnosis_error = _run_experiment_diagnosis(run_dir, config, run_id)
+            if _diagnosis_error:
+                result = StageResult(
+                    stage=result.stage,
+                    status=StageStatus.FAILED,
+                    artifacts=result.artifacts,
+                    error=_diagnosis_error,
+                    decision="retry",
+                    evidence_refs=result.evidence_refs,
+                )
+                results[-1] = result
+                print(
+                    f"{prefix} {stage.name} -- FAILED ({elapsed:.1f}s) -- "
+                    f"{_diagnosis_error}"
+                )
+                break
 
             # Check if repair loop should run
             _diag_path = run_dir / "experiment_diagnosis.json"
