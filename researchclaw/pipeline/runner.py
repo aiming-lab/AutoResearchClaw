@@ -45,6 +45,7 @@ def _build_pipeline_summary(
     results: list[StageResult],
     from_stage: Stage,
     run_dir: Path | None = None,
+    degradations: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
     summary: dict[str, object] = {
         "run_id": run_id,
@@ -66,6 +67,8 @@ def _build_pipeline_summary(
         "generated": _utcnow_iso(),
         "content_metrics": _collect_content_metrics(run_dir),
     }
+    if degradations:
+        summary["degradations"] = list(degradations)
     return summary
 
 
@@ -74,6 +77,17 @@ def _write_pipeline_summary(run_dir: Path, summary: dict[str, object]) -> None:
         json.dumps(summary, indent=2),
         encoding="utf-8",
     )
+
+
+def _record_degradation(
+    degradations: list[dict[str, str]],
+    key: str,
+    message: str,
+) -> bool:
+    if any(item.get("key") == key for item in degradations):
+        return False
+    degradations.append({"key": key, "message": message})
+    return True
 
 
 def _write_checkpoint(
@@ -652,6 +666,7 @@ def execute_pipeline(
     """Execute pipeline stages sequentially from *from_stage* to *to_stage* (inclusive)."""
 
     results: list[StageResult] = []
+    degradations: list[dict[str, str]] = []
     started = False
     total_stages = len(STAGE_SEQUENCE)
 
@@ -679,11 +694,18 @@ def execute_pipeline(
     exp_memory = None
     try:
         from researchclaw.memory.experiment_memory import ExperimentMemory
+        from researchclaw.memory.retriever import MemoryRetriever
+        from researchclaw.memory.store import MemoryStore
+
         _mem_dir = run_dir / "experiment_memory"
         _mem_dir.mkdir(parents=True, exist_ok=True)
-        exp_memory = ExperimentMemory(store_dir=str(_mem_dir))
-    except Exception:
-        logger.debug("Experiment memory initialisation skipped")
+        _mem_store = MemoryStore(_mem_dir)
+        _mem_store.load()
+        exp_memory = ExperimentMemory(_mem_store, MemoryRetriever(_mem_store))
+    except Exception as exc:
+        message = f"Experiment memory initialization failed: {exc}"
+        if _record_degradation(degradations, "experiment_memory_init", message):
+            logger.warning(message)
 
     cli_agent_provider = (
         getattr(config.experiment.cli_agent, "provider", "llm") or "llm"
@@ -1053,6 +1075,7 @@ def execute_pipeline(
         results=results,
         from_stage=from_stage,
         run_dir=run_dir,
+        degradations=degradations,
     )
     _write_pipeline_summary(run_dir, summary)
 

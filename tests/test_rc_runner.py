@@ -613,6 +613,52 @@ def test_cli_cost_budget_without_enforcer_fails_before_stage(
     ]
 
 
+def test_experiment_memory_initialization_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import researchclaw.memory.experiment_memory as memory_module
+
+    class BrokenExperimentMemory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args, kwargs
+            raise RuntimeError("memory offline")
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        return _done(stage)
+
+    monkeypatch.setattr(memory_module, "ExperimentMemory", BrokenExperimentMemory)
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-memory-init",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.EXPERIMENT_RUN,
+            to_stage=Stage.ITERATIVE_REFINE,
+        )
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Experiment memory initialization failed" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "experiment_memory_init",
+            "message": "Experiment memory initialization failed: memory offline",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("stage", "started", "expected"),
     [
