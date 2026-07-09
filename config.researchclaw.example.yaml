@@ -54,6 +54,19 @@ llm:
   fallback_models:
     - "gpt-4.1"
     - "gpt-4o-mini"
+  # --- Reviewer isolation (release_check v2) ---
+  # Route A (recommended for unattended runs): a second model on the same
+  # gateway. MUST differ from primary_model; the critic runs with a fresh
+  # context and never sees the writer's conversation. Cross-vendor pairs
+  # (e.g. GPT writer + Claude critic) give the strongest isolation.
+  critic_model: ""
+  # Route B: external reviewer (human, or a separate agent such as Claude
+  # or Kiro). Set critic_source to "external" and point external_review_path
+  # at the review artifact the reviewer will write inside the run directory;
+  # the reviewer may also append findings to stage-15/critique.json, then
+  # stages 24-25 are re-run before release_check.
+  critic_source: ""            # "" (auto) | "model" | "external"
+  external_review_path: ""     # e.g. "reviews_external/claude_review.md"
   # --- MiniMax provider example ---
   # provider: "minimax"
   # api_key_env: "MINIMAX_API_KEY"

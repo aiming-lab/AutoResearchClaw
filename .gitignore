@@ -146,3 +146,14 @@ experiments/arc_bench/batch_logs/
 # README is tracked; any local checkout placed here stays local.
 external/agents/ColliderAgent/*
 !external/agents/ColliderAgent/README.md
+
+# ── v2 release-audit demo / run scratch (local-only) ────────────────────────
+# Run outputs and knowledge-base scratch — never commit generated runs.
+runs/
+kb-hwsec-demo/
+kb-hwsec-inject/
+kb-hwsec/
+# Injection fixtures + demo configs used to exercise the pipeline offline.
+demo_inputs/
+config.hwsec-demo.yaml
+config.hwsec-inject.yaml
