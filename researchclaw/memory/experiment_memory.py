@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from researchclaw.memory.retriever import MemoryRetriever
@@ -12,6 +13,24 @@ from researchclaw.memory.store import MemoryStore
 logger = logging.getLogger(__name__)
 
 CATEGORY = "experiment"
+
+
+@dataclass(frozen=True)
+class ExperimentOutcome:
+    run_id: str
+    stage: str
+    hypothesis: str
+    config: dict[str, Any]
+    metric_name: str
+    metric_value: float
+    baseline_value: float
+    improvement: float
+    success: bool
+    failure_mode: str | None
+    packages_used: list[str]
+    hyperparameters: dict[str, Any]
+    timestamp: float
+    duration_sec: float
 
 
 class ExperimentMemory:
@@ -146,6 +165,37 @@ class ExperimentMemory:
         return self._store.add(
             CATEGORY, content, metadata, embedding, confidence
         )
+
+    def record_outcome(self, outcome: ExperimentOutcome) -> str:
+        """Record a pipeline experiment outcome and persist it immediately."""
+        content = (
+            f"Run: {outcome.run_id}\n"
+            f"Stage: {outcome.stage}\n"
+            f"Hypothesis: {outcome.hypothesis}\n"
+            f"Metric: {outcome.metric_name}={outcome.metric_value:.6g}\n"
+            f"Success: {outcome.success}"
+        )
+        metadata = {
+            "type": "outcome",
+            "run_id": outcome.run_id,
+            "stage": outcome.stage,
+            "hypothesis": outcome.hypothesis,
+            "config": outcome.config,
+            "metric_name": outcome.metric_name,
+            "metric_value": outcome.metric_value,
+            "baseline_value": outcome.baseline_value,
+            "improvement": outcome.improvement,
+            "success": outcome.success,
+            "failure_mode": outcome.failure_mode,
+            "packages_used": outcome.packages_used,
+            "hyperparameters": outcome.hyperparameters,
+            "timestamp": outcome.timestamp,
+            "duration_sec": outcome.duration_sec,
+        }
+        confidence = 0.7 if outcome.success else 0.4
+        entry_id = self._store.add(CATEGORY, content, metadata, [], confidence)
+        self._store.save()
+        return entry_id
 
     def recall_best_configs(
         self,

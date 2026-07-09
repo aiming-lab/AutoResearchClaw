@@ -844,8 +844,12 @@ def execute_pipeline(
                     packages_used=[], hyperparameters={},
                     timestamp=_time_mod.time(), duration_sec=elapsed,
                 ))
-            except Exception:
-                logger.debug("Experiment memory recording skipped")
+            except Exception as exc:
+                message = f"Experiment memory recording failed: {exc}"
+                if _record_degradation(
+                    degradations, "experiment_memory_record", message
+                ):
+                    logger.warning(message)
 
         if result.status == StageStatus.DONE:
             arts = ", ".join(result.artifacts) if result.artifacts else "none"

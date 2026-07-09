@@ -659,6 +659,103 @@ def test_experiment_memory_initialization_failure_is_recorded_once(
     ]
 
 
+def test_experiment_memory_records_outcome_after_experiment_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        (run_dir / "results.json").write_text(
+            json.dumps({"primary_metric": 0.42}),
+            encoding="utf-8",
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-memory-record",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.EXPERIMENT_RUN,
+        to_stage=Stage.EXPERIMENT_RUN,
+    )
+
+    memory_path = run_dir / "experiment_memory" / "experiment.jsonl"
+    assert memory_path.exists()
+    entries = [
+        json.loads(line)
+        for line in memory_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(entries) == 1
+    metadata = entries[0]["metadata"]
+    assert metadata["run_id"] == "run-memory-record"
+    assert metadata["stage"] == "EXPERIMENT_RUN"
+    assert metadata["metric_name"] == "primary_metric"
+    assert metadata["metric_value"] == 0.42
+
+
+def test_experiment_memory_recording_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import researchclaw.memory.experiment_memory as memory_module
+
+    class DummyOutcome:
+        def __init__(self, **kwargs: object) -> None:
+            self.__dict__.update(kwargs)
+
+    class BrokenExperimentMemory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args, kwargs
+
+        def record_outcome(self, outcome: object) -> str:
+            _ = outcome
+            raise RuntimeError("memory write failed")
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = stage, kwargs
+        (run_dir / "results.json").write_text(
+            json.dumps({"primary_metric": 0.42}),
+            encoding="utf-8",
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(memory_module, "ExperimentMemory", BrokenExperimentMemory)
+    monkeypatch.setattr(memory_module, "ExperimentOutcome", DummyOutcome, raising=False)
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-memory-record-fail",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.EXPERIMENT_RUN,
+            to_stage=Stage.ITERATIVE_REFINE,
+        )
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Experiment memory recording failed" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "experiment_memory_record",
+            "message": "Experiment memory recording failed: memory write failed",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("stage", "started", "expected"),
     [
