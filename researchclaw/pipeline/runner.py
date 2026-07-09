@@ -685,8 +685,26 @@ def execute_pipeline(
         from researchclaw.domains.detector import set_forced_profile
         forced = getattr(config.project, "profile", "") or ""
         set_forced_profile(forced)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        error = f"Domain profile setup failed: {exc}"
+        logger.error(error)
+        result = StageResult(
+            stage=from_stage,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=error,
+            decision="abort",
+        )
+        _write_pipeline_summary(
+            run_dir,
+            _build_pipeline_summary(
+                run_id=run_id,
+                results=[result],
+                from_stage=from_stage,
+                run_dir=run_dir,
+            ),
+        )
+        return [result]
 
     # ── Integration hooks: ExperimentMemory, CostTracker ──
     exp_memory = None

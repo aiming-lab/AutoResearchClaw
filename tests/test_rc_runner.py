@@ -613,6 +613,53 @@ def test_cli_cost_budget_without_enforcer_fails_before_stage(
     ]
 
 
+def test_domain_profile_setup_failure_fails_before_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    import researchclaw.domains.detector as detector_module
+
+    seen: list[Stage] = []
+
+    def broken_set_forced_profile(profile: str) -> None:
+        _ = profile
+        raise RuntimeError("profile registry locked")
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        seen.append(stage)
+        return _done(stage)
+
+    monkeypatch.setattr(
+        detector_module, "set_forced_profile", broken_set_forced_profile
+    )
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-domain-profile",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.EXPERIMENT_DESIGN,
+        to_stage=Stage.EXPERIMENT_DESIGN,
+    )
+
+    assert seen == []
+    assert results == [
+        StageResult(
+            stage=Stage.EXPERIMENT_DESIGN,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error="Domain profile setup failed: profile registry locked",
+            decision="abort",
+        )
+    ]
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["final_status"] == "failed"
+
+
 def test_experiment_memory_initialization_failure_is_recorded_once(
     monkeypatch: pytest.MonkeyPatch,
     run_dir: Path,
