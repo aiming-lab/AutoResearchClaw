@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,9 +15,11 @@ from researchclaw.experiment_runtime.contract import (
 )
 from researchclaw.pipeline.stage_impls._execution import (
     _execute_experiment_run,
+    _latest_sandbox_project_results,
     _load_sealed_candidate,
     _scaffold_sha256,
 )
+from researchclaw.pipeline.stage_impls._code_generation import _execute_code_generation
 from researchclaw.pipeline.stages import StageStatus
 
 
@@ -41,7 +44,7 @@ def _cfg(tmp_path: Path) -> RCConfig:
                 "time_budget_sec": 30,
                 "metric_key": "detection_f1",
                 "metric_direction": "maximize",
-                "sandbox": {"python_path": "python"},
+                "sandbox": {"python_path": sys.executable},
             },
         },
         project_root=tmp_path,
@@ -172,3 +175,98 @@ def test_stage12_rejects_directories(tmp_path: Path, name: str) -> None:
 
     with pytest.raises(RuntimeError, match="directories in selected_candidate"):
         _load_sealed_candidate(run)
+
+
+def test_stage12_rejects_owner_sets_that_do_not_match_files(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    cfg = _cfg(tmp_path)
+    _write_selected_candidate(run, cfg)
+    manifest_path = run / "stage-10" / "selected_candidate_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["scaffold_files"] = {}
+    manifest["plugin_files"] = {
+        "detector_plugin.py": {"sha256": "0" * 64, "owner": "model"}
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="owner file sets"):
+        _load_sealed_candidate(run)
+
+
+def test_stage12_rejects_invalid_scaffold_owner(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    cfg = _cfg(tmp_path)
+    selected = _write_selected_candidate(run, cfg)
+    plugin = selected / "detector_plugin.py"
+    plugin.write_text(
+        "class DetectorPlugin:\n"
+        "    def fit(self, X_train, y_train): return self\n"
+        "    def predict(self, X_test): return [0] * len(X_test)\n"
+        "    def describe(self): return {}\n",
+        encoding="utf-8",
+    )
+    manifest_path = run / "stage-10" / "selected_candidate_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"]["detector_plugin.py"] = {"sha256": sha256_file(plugin)}
+    manifest["scaffold_files"] = {
+        "main.py": {"sha256": manifest["files"]["main.py"]["sha256"], "owner": "model"}
+    }
+    manifest["plugin_files"] = {
+        "detector_plugin.py": {"sha256": sha256_file(plugin), "owner": "model"}
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="scaffold owner invalid"):
+        _load_sealed_candidate(run)
+
+
+def test_stage10_scaffold_candidate_runs_in_stage12(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    cfg = _cfg(tmp_path)
+    _write_contract(run, cfg)
+    (run / "stage-09" / "exp_plan.yaml").write_text(
+        "objectives: []\n", encoding="utf-8"
+    )
+
+    stage10 = _execute_code_generation(
+        run / "stage-10",
+        run,
+        cfg,
+        AdapterBundle(),
+        llm=None,
+    )
+    assert stage10.status == StageStatus.DONE
+
+    stage12 = _execute_experiment_run(
+        run / "stage-12",
+        run,
+        cfg,
+        AdapterBundle(),
+    )
+
+    assert stage12.status == StageStatus.DONE
+    results = json.loads(
+        (run / "stage-12" / "runs" / "results.json").read_text(encoding="utf-8")
+    )
+    assert results["evaluator_owner"] == "scaffold"
+    assert results["dataset_origin"] == "synthetic"
+    assert "detection_f1" in results["metrics"]
+
+
+def test_latest_sandbox_project_results_accepts_legacy_project_dir(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    legacy = runs / "sandbox" / "_project"
+    legacy.mkdir(parents=True)
+    expected = legacy / "results.json"
+    expected.write_text("{}", encoding="utf-8")
+
+    assert _latest_sandbox_project_results(runs) == expected
+
+
+def test_latest_sandbox_project_results_returns_missing_sentinel(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    (runs / "sandbox").mkdir(parents=True)
+    result = _latest_sandbox_project_results(runs)
+
+    assert not result.exists()
+    assert "__no_sandbox_results__" in result.as_posix()

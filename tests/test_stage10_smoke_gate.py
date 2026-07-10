@@ -12,13 +12,22 @@ from researchclaw.llm.client import LLMResponse
 from researchclaw.pipeline._helpers import _collect_experiment_results
 from researchclaw.pipeline.stage_impls import _code_generation as codegen
 from researchclaw.pipeline.stage_impls._code_generation import (
+    _execute_code_generation,
     _repair_harness_api_misuse,
     _repair_missing_dataset_origin,
     _run_stage10_smoke_gate,
     _seal_selected_candidate,
     _scrub_packaged_experiment_outputs,
 )
-from researchclaw.experiment_runtime.contract import derive_contract, dump_contract
+from researchclaw.experiment_runtime.contract import (
+    derive_contract,
+    dump_contract,
+    validate_contract_dict,
+)
+from researchclaw.experiment_runtime.scaffold import (
+    PluginValidationError,
+    validate_detector_plugin,
+)
 from researchclaw.pipeline.stages import StageStatus
 
 
@@ -91,13 +100,21 @@ def _write_main(exp_dir: Path, *, include_dataset_origin: bool = True) -> None:
     )
 
 
-def _write_stage9_contract(run_dir: Path, cfg: RCConfig) -> None:
+def _write_stage9_contract(
+    run_dir: Path,
+    cfg: RCConfig,
+    *,
+    claim_scope: str | None = None,
+    dataset_origin: str | None = None,
+) -> None:
     stage9 = run_dir / "stage-09"
     stage9.mkdir(parents=True, exist_ok=True)
-    dump_contract(
-        derive_contract(cfg, {"datasets": ["synthetic traces"]}),
-        stage9 / "experiment_contract.yaml",
-    )
+    contract_data = derive_contract(cfg, {"datasets": ["synthetic traces"]}).to_dict()
+    if claim_scope is not None:
+        contract_data["claim_scope"] = claim_scope
+    if dataset_origin is not None:
+        contract_data["dataset_origin"] = dataset_origin
+    dump_contract(validate_contract_dict(contract_data), stage9 / "experiment_contract.yaml")
 
 
 def test_stage10_smoke_gate_writes_quarantined_results(tmp_path: Path) -> None:
@@ -168,6 +185,89 @@ def test_stage10_selected_candidate_is_python_only(tmp_path: Path) -> None:
         (stage10 / "selected_candidate_manifest.json").read_text(encoding="utf-8")
     )
     assert sorted(manifest["files"]) == ["main.py"]
+
+
+def test_stage10_pipeline_validation_uses_scaffold_owned_main(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    stage9 = run_dir / "stage-09"
+    stage10 = run_dir / "stage-10"
+    cfg = _cfg(tmp_path)
+    stage9.mkdir(parents=True)
+    dump_contract(derive_contract(cfg, {"datasets": ["synthetic"]}), stage9 / "experiment_contract.yaml")
+    (stage9 / "exp_plan.yaml").write_text("objectives: []\n", encoding="utf-8")
+
+    result = _execute_code_generation(
+        stage10,
+        run_dir,
+        cfg,
+        AdapterBundle(),
+        llm=None,
+    )
+
+    assert result.status == StageStatus.DONE
+    selected = stage10 / "selected_candidate"
+    assert sorted(p.name for p in selected.iterdir()) == [
+        "detector_plugin.py",
+        "main.py",
+    ]
+    main_text = (selected / "main.py").read_text(encoding="utf-8")
+    assert "from detector_plugin import DetectorPlugin" in main_text
+    assert "if __name__ == \"__main__\"" in main_text
+    manifest = json.loads(
+        (stage10 / "selected_candidate_manifest.json").read_text(encoding="utf-8")
+    )
+    assert sorted(manifest["scaffold_files"]) == ["main.py"]
+    assert sorted(manifest["plugin_files"]) == ["detector_plugin.py"]
+    assert manifest["scaffold_files"]["main.py"]["owner"] == "scaffold"
+    assert manifest["plugin_files"]["detector_plugin.py"]["owner"] == "model"
+
+
+def test_detector_plugin_validation_rejects_banned_imports() -> None:
+    with pytest.raises(PluginValidationError, match="banned import"):
+        validate_detector_plugin(
+            "\n".join(
+                [
+                    "import subprocess",
+                    "class DetectorPlugin:",
+                    "    def fit(self, X_train, y_train): return self",
+                    "    def predict(self, X_test): return [0] * len(X_test)",
+                    "    def describe(self): return {}",
+                ]
+            )
+        )
+
+
+def test_detector_plugin_validation_rejects_file_writes() -> None:
+    with pytest.raises(PluginValidationError, match="write files"):
+        validate_detector_plugin(
+            "\n".join(
+                [
+                    "class DetectorPlugin:",
+                    "    def fit(self, X_train, y_train): return self",
+                    "    def predict(self, X_test):",
+                    "        open('results.json', 'w').write('bad')",
+                    "        return [0] * len(X_test)",
+                    "    def describe(self): return {}",
+                ]
+            )
+        )
+
+
+def test_detector_plugin_validation_rejects_io_open_write() -> None:
+    with pytest.raises(PluginValidationError, match="banned call"):
+        validate_detector_plugin(
+            "\n".join(
+                [
+                    "import io",
+                    "class DetectorPlugin:",
+                    "    def fit(self, X_train, y_train): return self",
+                    "    def predict(self, X_test):",
+                    "        io.open('results.json', 'w').write('bad')",
+                    "        return [0] * len(X_test)",
+                    "    def describe(self): return {}",
+                ]
+            )
+        )
 
 
 def test_stage10_smoke_gate_fails_without_dataset_origin(tmp_path: Path) -> None:
@@ -333,7 +433,9 @@ def test_smoke_blocker_propagates_to_stage_failed(
     stage_dir = run_dir / "stage-10"
     stage_dir.mkdir(parents=True)
     cfg = _cfg(tmp_path)
-    _write_stage9_contract(run_dir, cfg)
+    _write_stage9_contract(
+        run_dir, cfg, claim_scope="research_release", dataset_origin="public"
+    )
     llm = _FakeLLM(
         "\n".join(
             [
@@ -376,7 +478,9 @@ def test_stage10_repairs_missing_dataset_origin_and_reruns_smoke(
     stage_dir = run_dir / "stage-10"
     stage_dir.mkdir(parents=True)
     cfg = _cfg(tmp_path)
-    _write_stage9_contract(run_dir, cfg)
+    _write_stage9_contract(
+        run_dir, cfg, claim_scope="research_release", dataset_origin="public"
+    )
     llm = _FakeLLM(
         "\n".join(
             [
@@ -419,7 +523,9 @@ def test_stage10_repairs_harness_elapsed_before_smoke(tmp_path: Path) -> None:
     stage_dir = run_dir / "stage-10"
     stage_dir.mkdir(parents=True)
     cfg = _cfg(tmp_path)
-    _write_stage9_contract(run_dir, cfg)
+    _write_stage9_contract(
+        run_dir, cfg, claim_scope="research_release", dataset_origin="public"
+    )
     llm = _FakeLLM(
         "\n".join(
             [

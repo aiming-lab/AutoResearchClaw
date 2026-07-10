@@ -18,6 +18,9 @@ from researchclaw.experiment_runtime.contract import (
     load_contract,
     sha256_file,
 )
+from researchclaw.experiment_runtime.scaffold import (
+    scaffold_sha256 as runtime_scaffold_sha256,
+)
 from researchclaw.experiment.validator import (
     CodeValidation,
     format_issues_for_llm,
@@ -46,7 +49,6 @@ from researchclaw.prompts import PromptManager
 
 logger = logging.getLogger(__name__)
 
-_HARNESS_TEMPLATE = Path(__file__).resolve().parents[2] / "experiment" / "harness_template.py"
 _BANNED_SELECTED_FILES = frozenset(
     {"results.json", "smoke_results.json", "attempt.json", "experiment_summary.json", "metrics.json"}
 )
@@ -142,7 +144,7 @@ def _estimate_stage12_footprint_bytes(run_dir: Path) -> int:
 
 
 def _scaffold_sha256() -> str:
-    return sha256_file(_HARNESS_TEMPLATE)
+    return runtime_scaffold_sha256()
 
 
 def _load_sealed_candidate(run_dir: Path) -> Path:
@@ -166,6 +168,25 @@ def _load_sealed_candidate(run_dir: Path) -> Path:
     files_meta = manifest.get("files")
     if not isinstance(files_meta, dict) or not files_meta:
         raise RuntimeError("sealed candidate manifest files must be a non-empty object")
+
+    scaffold_files_meta = manifest.get("scaffold_files") or {}
+    plugin_files_meta = manifest.get("plugin_files") or {}
+    if scaffold_files_meta and not isinstance(scaffold_files_meta, dict):
+        raise RuntimeError("sealed candidate manifest scaffold_files must be an object")
+    if plugin_files_meta and not isinstance(plugin_files_meta, dict):
+        raise RuntimeError("sealed candidate manifest plugin_files must be an object")
+    if scaffold_files_meta or plugin_files_meta:
+        owned_files = set(scaffold_files_meta) | set(plugin_files_meta)
+        if owned_files != set(files_meta):
+            raise RuntimeError(
+                "sealed candidate owner file sets must exactly match files"
+            )
+        for name, meta in scaffold_files_meta.items():
+            if not isinstance(meta, dict) or meta.get("owner") != "scaffold":
+                raise RuntimeError(f"sealed candidate scaffold owner invalid for {name}")
+        for name, meta in plugin_files_meta.items():
+            if not isinstance(meta, dict) or meta.get("owner") != "model":
+                raise RuntimeError(f"sealed candidate plugin owner invalid for {name}")
 
     manifest_files = {str(name) for name in files_meta.keys()}
     if any("/" in name or "\\" in name or name in {"", ".", ".."} for name in manifest_files):
@@ -231,6 +252,24 @@ def _load_sealed_candidate(run_dir: Path) -> Path:
             raise RuntimeError(f"sha256 mismatch for selected_candidate/{name}")
 
     return selected_dir
+
+
+def _latest_sandbox_project_results(runs_dir: Path) -> Path:
+    sandbox_dir = runs_dir / "sandbox"
+    candidates = [
+        p / "results.json"
+        for p in sandbox_dir.iterdir()
+        if p.is_dir()
+        and (
+            p.name == "_project"
+            or p.name.startswith("_project_")
+            or p.name.startswith("_docker_project_")
+        )
+    ] if sandbox_dir.is_dir() else []
+    existing = [p for p in candidates if p.is_file()]
+    if not existing:
+        return runs_dir / "sandbox" / "__no_sandbox_results__" / "results.json"
+    return sorted(existing, key=lambda p: p.stat().st_mtime, reverse=True)[0]
 
 
 def _execute_experiment_run(
@@ -457,8 +496,7 @@ def _execute_experiment_run(
             )
         # Try to read structured results.json from sandbox working dir
         structured_results: dict[str, Any] | None = None
-        sandbox_project = runs_dir / "sandbox" / "_project"
-        results_json_path = sandbox_project / "results.json"
+        results_json_path = _latest_sandbox_project_results(runs_dir)
         if results_json_path.exists():
             try:
                 if results_json_path.stat().st_mtime <= sandbox_start_time:

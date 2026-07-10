@@ -15,9 +15,16 @@ from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.experiment_runtime.contract import (
     ContractValidationError,
+    ExperimentContract,
     find_stage09_contract,
     load_contract,
     sha256_file,
+)
+from researchclaw.experiment_runtime.scaffold import (
+    PluginValidationError,
+    render_main_py,
+    scaffold_sha256 as runtime_scaffold_sha256,
+    validate_detector_plugin,
 )
 from researchclaw.experiment.validator import (
     CodeValidation,
@@ -45,8 +52,6 @@ from researchclaw.prompts import PromptManager
 logger = logging.getLogger(__name__)
 
 _DATASET_ORIGIN_BLOCKER = "Stage 10 smoke results missing explicit dataset_origin"
-_HARNESS_TEMPLATE = Path(__file__).resolve().parents[2] / "experiment" / "harness_template.py"
-
 # Improvement G: Continuous-action environments that are incompatible with DQN
 _CONTINUOUS_ENVS = {
     "pendulum", "halfcheetah", "hopper", "walker2d", "ant", "humanoid",
@@ -180,13 +185,16 @@ def _latest_sandbox_results_json(sandbox: object) -> dict[str, Any] | None:
 
 
 def _scaffold_sha256() -> str:
-    return sha256_file(_HARNESS_TEMPLATE)
+    return runtime_scaffold_sha256()
 
 
 def _seal_selected_candidate(
     stage_dir: Path,
     exp_dir: Path,
     contract_path: Path,
+    *,
+    scaffold_owned_files: set[str] | None = None,
+    plugin_owned_files: set[str] | None = None,
 ) -> tuple[str, str]:
     """Copy code-only selected candidate files and write the sealing manifest."""
     selected_dir = stage_dir / "selected_candidate"
@@ -195,12 +203,21 @@ def _seal_selected_candidate(
     selected_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_files: dict[str, dict[str, str]] = {}
+    scaffold_files: dict[str, dict[str, str]] = {}
+    plugin_files: dict[str, dict[str, str]] = {}
+    scaffold_owned_files = scaffold_owned_files or set()
+    plugin_owned_files = plugin_owned_files or set()
     for src in sorted(exp_dir.glob("*.py")):
         if not src.is_file():
             continue
         dst = selected_dir / src.name
         shutil.copy2(src, dst)
-        manifest_files[src.name] = {"sha256": sha256_file(dst)}
+        sha = sha256_file(dst)
+        manifest_files[src.name] = {"sha256": sha}
+        if src.name in scaffold_owned_files:
+            scaffold_files[src.name] = {"sha256": sha, "owner": "scaffold"}
+        elif src.name in plugin_owned_files:
+            plugin_files[src.name] = {"sha256": sha, "owner": "model"}
 
     if not manifest_files:
         raise RuntimeError("selected_candidate contains no Python files")
@@ -216,6 +233,9 @@ def _seal_selected_candidate(
         "entry_point": "main.py",
         "files": manifest_files,
     }
+    if scaffold_files or plugin_files:
+        manifest["scaffold_files"] = scaffold_files
+        manifest["plugin_files"] = plugin_files
     manifest_path = stage_dir / "selected_candidate_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return "selected_candidate/", "selected_candidate_manifest.json"
@@ -333,6 +353,275 @@ def _run_stage10_smoke_gate(
         smoke_workdir = stage_dir / ".smoke_sandbox"
         if smoke_workdir.exists():
             shutil.rmtree(smoke_workdir, ignore_errors=True)
+
+
+def _baseline_detector_plugin() -> str:
+    """Deterministic fallback used only when tests call Stage 10 without an LLM."""
+    return '''"""Baseline detector plugin for pipeline validation."""
+
+from __future__ import annotations
+
+import numpy as np
+
+
+class DetectorPlugin:
+    name = "memory_branch_threshold"
+
+    def fit(self, X_train, y_train):
+        X_train = np.asarray(X_train, dtype=float)
+        y_train = np.asarray(y_train, dtype=int)
+        scores = X_train[:, 2:5].mean(axis=1) + 0.5 * X_train[:, 6]
+        benign = scores[y_train == 0]
+        attack = scores[y_train == 1]
+        if len(benign) and len(attack):
+            self.threshold = float((benign.mean() + attack.mean()) / 2.0)
+        else:
+            self.threshold = float(np.median(scores))
+        return self
+
+    def predict(self, X_test):
+        X_test = np.asarray(X_test, dtype=float)
+        scores = X_test[:, 2:5].mean(axis=1) + 0.5 * X_test[:, 6]
+        return (scores >= self.threshold).astype(int)
+
+    def describe(self):
+        return {
+            "method": "threshold on synthetic HPC memory and branch counters",
+            "assumptions": ["pipeline-validation synthetic traces only"],
+        }
+'''
+
+
+def _extract_detector_plugin(content: str) -> str:
+    files = _extract_multi_file_blocks(content)
+    if "detector_plugin.py" in files:
+        return files["detector_plugin.py"].strip()
+    if len(files) == 1:
+        return next(iter(files.values())).strip()
+    return _extract_code_block(content).strip()
+
+
+def _generate_detector_plugin(
+    llm: LLMClient | None,
+    prompts: PromptManager,
+    *,
+    topic: str,
+    exp_plan: str,
+    metric: str,
+    contract: ExperimentContract,
+) -> tuple[str, dict[str, Any]]:
+    if llm is None:
+        code = _baseline_detector_plugin()
+        validate_detector_plugin(code)
+        return code, {
+            "source": "deterministic_baseline",
+            "model": None,
+            "validation": "ok",
+        }
+
+    system = prompts.system("code_generation")
+    user = (
+        "Generate exactly one Python file named detector_plugin.py for a "
+        "scaffold-owned experiment runtime.\n\n"
+        "The scaffold owns main.py, data generation, train/test split, y_test, "
+        "metric computation, results.json, artifact paths, and timeouts. "
+        "Do NOT write or describe main.py. Do NOT write results.json. Do NOT "
+        "compute detection_f1 or other final metrics.\n\n"
+        "Your only task is to implement this API:\n"
+        "class DetectorPlugin:\n"
+        "    name = 'short_name'\n"
+        "    def fit(self, X_train, y_train): ...; return self\n"
+        "    def predict(self, X_test): ...; return binary labels or scores\n"
+        "    def describe(self): return {'method': str, 'assumptions': list}\n\n"
+        "Constraints:\n"
+        "- Use only Python stdlib and numpy.\n"
+        "- No network, subprocess, threading, multiprocessing, importlib, FFI, "
+        "file writes, or dynamic imports.\n"
+        "- The plugin never receives y_test and must not grade itself.\n"
+        "- Keep runtime lightweight and deterministic.\n"
+        "- Return only ```filename:detector_plugin.py fenced code.\n\n"
+        f"Research topic: {topic}\n"
+        f"Primary metric computed by scaffold: {metric}\n"
+        f"Claim scope: {contract.claim_scope}\n"
+        f"Dataset origin: {contract.dataset_origin}\n\n"
+        "Compute Budget:\n"
+        f"- Stage 10 smoke budget: {contract.smoke_budget_sec} seconds\n"
+        f"- Stage 12 run budget: {contract.run_budget_sec} seconds\n"
+        "- Keep plugin fit/predict comfortably within these limits.\n\n"
+        f"Experiment plan excerpt:\n{exp_plan[:4000]}\n"
+    )
+    resp = _chat_with_prompt(llm, system, user, max_tokens=4096)
+    code = _extract_detector_plugin(resp.content)
+    try:
+        validate_detector_plugin(code)
+    except PluginValidationError as first_exc:
+        repair_user = (
+            "The detector_plugin.py you generated failed static validation:\n"
+            f"{first_exc}\n\n"
+            "Return a corrected detector_plugin.py only. Preserve the bounded "
+            "DetectorPlugin API. Do not write main.py or results.json.\n\n"
+            f"Previous code:\n```filename:detector_plugin.py\n{code}\n```\n"
+        )
+        repair = _chat_with_prompt(llm, system, repair_user, max_tokens=4096)
+        code = _extract_detector_plugin(repair.content)
+        try:
+            validate_detector_plugin(code)
+        except PluginValidationError as second_exc:
+            raise PluginValidationError(
+                "detector_plugin.py failed validation twice; "
+                f"initial_error={first_exc}; repair_error={second_exc}"
+            ) from second_exc
+        return code, {
+            "source": "llm_repaired",
+            "validation": "ok",
+            "initial_error": str(first_exc),
+        }
+    return code, {"source": "llm", "validation": "ok"}
+
+
+def _execute_pipeline_validation_plugin_generation(
+    stage_dir: Path,
+    run_dir: Path,
+    config: RCConfig,
+    *,
+    contract: ExperimentContract,
+    contract_path: Path,
+    exp_plan: str,
+    metric: str,
+    llm: LLMClient | None,
+    prompts: PromptManager,
+) -> StageResult:
+    """Generate a bounded detector plugin and seal it with scaffold main.py."""
+    _ = run_dir
+    exp_dir = stage_dir / "experiment"
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    artifacts: list[str] = ["experiment/"]
+    blockers: list[str] = []
+
+    try:
+        plugin_code, plugin_meta = _generate_detector_plugin(
+            llm,
+            prompts,
+            topic=config.research.topic,
+            exp_plan=exp_plan,
+            metric=metric,
+            contract=contract,
+        )
+    except Exception as exc:  # noqa: BLE001
+        error = f"Stage 10 scaffold plugin generation failed: {exc}"
+        blockers.append(error)
+        (stage_dir / "stage10_blockers.json").write_text(
+            json.dumps(
+                {"status": "failed", "blockers": blockers, "generated": _utcnow_iso()},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return StageResult(
+            stage=Stage.CODE_GENERATION,
+            status=StageStatus.FAILED,
+            artifacts=("stage10_blockers.json",),
+            evidence_refs=("stage-10/stage10_blockers.json",),
+            error=error,
+        )
+
+    (exp_dir / "main.py").write_text(render_main_py(contract), encoding="utf-8")
+    (exp_dir / "detector_plugin.py").write_text(plugin_code, encoding="utf-8")
+    (stage_dir / "scaffold_plugin.json").write_text(
+        json.dumps(
+            {
+                "mode": "scaffold_plugin_v1",
+                "claim_scope": contract.claim_scope,
+                "plugin": plugin_meta,
+                "scaffold_sha256": _scaffold_sha256(),
+                "generated": _utcnow_iso(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    artifacts.append("scaffold_plugin.json")
+
+    smoke_blockers, smoke_artifacts = _run_stage10_smoke_gate(stage_dir, exp_dir, config)
+    artifacts.extend(smoke_artifacts)
+    for blocker in smoke_blockers:
+        _add_stage10_blocker(blockers, blocker)
+
+    spec = f"""# Experiment Specification
+
+## Topic
+{config.research.topic}
+
+## Runtime Mode
+`scaffold_plugin_v1` — AutoResearchClaw owns `main.py`; the model owns only
+`detector_plugin.py`.
+
+## Entry Point
+`main.py` — scaffold-owned evaluator
+
+## Plugin
+`detector_plugin.py` — bounded DetectorPlugin API
+
+## Outputs
+- `results.json` is written by scaffold-owned `main.py`
+- Primary metric key: `{metric}`
+
+## Generated
+{_utcnow_iso()}
+"""
+    (stage_dir / "experiment_spec.md").write_text(spec, encoding="utf-8")
+    artifacts.append("experiment_spec.md")
+
+    if blockers:
+        (stage_dir / "stage10_blockers.json").write_text(
+            json.dumps(
+                {"status": "failed", "blockers": blockers, "generated": _utcnow_iso()},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        artifacts.append("stage10_blockers.json")
+        return StageResult(
+            stage=Stage.CODE_GENERATION,
+            status=StageStatus.FAILED,
+            artifacts=tuple(artifacts),
+            evidence_refs=tuple(f"stage-10/{a}" for a in artifacts),
+            error="; ".join(blockers),
+        )
+
+    try:
+        selected_artifact, manifest_artifact = _seal_selected_candidate(
+            stage_dir,
+            exp_dir,
+            contract_path,
+            scaffold_owned_files={"main.py"},
+            plugin_owned_files={"detector_plugin.py"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        error = f"Stage 10 sealing failed: {exc}"
+        (stage_dir / "stage10_blockers.json").write_text(
+            json.dumps(
+                {"status": "failed", "blockers": [error], "generated": _utcnow_iso()},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        artifacts.append("stage10_blockers.json")
+        return StageResult(
+            stage=Stage.CODE_GENERATION,
+            status=StageStatus.FAILED,
+            artifacts=tuple(artifacts),
+            evidence_refs=tuple(f"stage-10/{a}" for a in artifacts),
+            error=error,
+        )
+
+    artifacts.extend([selected_artifact, manifest_artifact])
+    return StageResult(
+        stage=Stage.CODE_GENERATION,
+        status=StageStatus.DONE,
+        artifacts=tuple(artifacts),
+        evidence_refs=tuple(f"stage-10/{a}" for a in artifacts),
+    )
 
 
 def _execute_collider_plan_generation(
@@ -561,6 +850,19 @@ def _execute_code_generation(
 
     # --- Detect available packages for sandbox ---
     _pm = prompts or PromptManager()
+
+    if contract.claim_scope == "pipeline_validation":
+        return _execute_pipeline_validation_plugin_generation(
+            stage_dir,
+            run_dir,
+            config,
+            contract=contract,
+            contract_path=contract_path,
+            exp_plan=exp_plan,
+            metric=metric,
+            llm=llm,
+            prompts=_pm,
+        )
 
     # --- Hardware-aware package hint ---
     hw_profile = _load_hardware_profile(run_dir)
