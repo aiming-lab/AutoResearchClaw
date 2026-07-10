@@ -18,6 +18,7 @@ from researchclaw.experiment_runtime.contract import (
     sha256_file,
 )
 from researchclaw.pipeline import executor as rc_executor
+from researchclaw.pipeline.stage_impls import _release_audit as release_audit
 from researchclaw.pipeline.stages import Stage, StageStatus
 
 
@@ -1875,7 +1876,35 @@ class TestResultAnalysisDebate:
         assert summary["metrics_summary"]["detection_f1"]["mean"] == 0.75
         assert summary["best_run"]["run_id"] == "iterative-refine-best"
 
-    def test_truth_audit_fails_closed_when_llm_returns_zero_claims(
+    def test_release_audit_json_repair_handles_markdown_fence(self) -> None:
+        data = release_audit._loads_json_repaired(
+            '```json\n{"claims": [{"text": "x", "type": "result"}]}\n```',
+            {},
+        )
+        assert data["claims"][0]["text"] == "x"
+
+    def test_release_audit_json_repair_handles_comments_and_trailing_commas(self) -> None:
+        data = release_audit._loads_json_repaired(
+            '{\n  // model note\n  "claims": [{"text": "x", "type": "result",}],\n}',
+            {},
+        )
+        assert data["claims"][0]["type"] == "result"
+
+    def test_release_audit_json_repair_extracts_embedded_json(self) -> None:
+        data = release_audit._loads_json_repaired(
+            'Here is the audit:\n{"claims": [{"text": "x", "type": "result"}]}\nThanks.',
+            {},
+        )
+        assert data["claims"][0]["text"] == "x"
+
+    def test_release_audit_json_repair_preserves_valid_string_content(self) -> None:
+        data = release_audit._loads_json_repaired(
+            '{"claims": [{"text": "literal ,} in a string", "type": "result"}]}',
+            {},
+        )
+        assert data["claims"][0]["text"] == "literal ,} in a string"
+
+    def test_truth_audit_falls_back_when_llm_returns_zero_claims(
         self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
     ) -> None:
         run_dir = tmp_path / "run"
@@ -1883,7 +1912,7 @@ class TestResultAnalysisDebate:
         stage23 = run_dir / "stage-23"
         stage23.mkdir(parents=True)
         (stage23 / "paper_final_verified.md").write_text(
-            "# Paper\n\nOur method reaches 0.1234 F1 [smith2024].",
+            "# Paper\n\n## Results\n\nOur method reaches 0.1234 F1 on the synthetic benchmark.",
             encoding="utf-8",
         )
         stage_dir = run_dir / "stage-24"
@@ -1894,8 +1923,44 @@ class TestResultAnalysisDebate:
             stage_dir, run_dir, rc_config, adapters, llm=llm
         )
 
+        assert result.status == StageStatus.DONE
+        claims_payload = json.loads((stage_dir / "claims.json").read_text())
+        assert claims_payload["extraction_method"] == "deterministic_fallback"
+        assert claims_payload["counts"]["total"] == 1
+        claim = claims_payload["claims"][0]
+        assert claim["type"] == "quantitative"
+        assert claim["values"] == [0.1234]
+        assert claim["status"] == "unsupported"
+        assert claim["evidence"] == []
+        truth = json.loads((stage_dir / "truth_audit.json").read_text())
+        assert truth["llm_available"] is True
+        assert truth["counts"]["total"] == 1
+
+    def test_truth_audit_fails_closed_when_llm_and_fallback_find_no_claims(
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        stage23 = run_dir / "stage-23"
+        stage23.mkdir(parents=True)
+        (stage23 / "paper_final_verified.md").write_text(
+            "# Paper\n\n## Introduction\n\nThis document contains only generic background prose.",
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-24"
+        stage_dir.mkdir(parents=True)
+        llm = FakeLLMClient("not json")
+
+        result = rc_executor._execute_truth_audit(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
         assert result.status == StageStatus.FAILED
         assert "no claims" in (result.error or "")
+        assert (stage_dir / "claims.json").is_file()
+        assert (stage_dir / "citations.json").is_file()
+        assert (stage_dir / "critique_resolution.json").is_file()
+        assert (stage_dir / "truth_audit.json").is_file()
         truth = json.loads((stage_dir / "truth_audit.json").read_text())
         assert truth["llm_available"] is True
         assert truth["counts"]["total"] == 0

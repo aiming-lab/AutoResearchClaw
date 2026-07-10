@@ -145,6 +145,16 @@ def _execute_truth_audit(
                 break
 
     if llm is not None and not claims:
+        claims = _fallback_extract_claims(paper_text)
+        if claims:
+            extraction_method = "deterministic_fallback"
+
+    if llm is not None and not claims:
+        instances = ra.extract_citation_instances(paper_text)
+        for inst in instances:
+            inst["role"] = "unmapped"
+            inst["supported_claim_id"] = None
+            inst["support_excerpt"] = ""
         ra.write_json_atomic(
             stage_dir / "claims.json",
             {
@@ -157,6 +167,43 @@ def _execute_truth_audit(
                     "unsupported": 0,
                     "by_type": {t: 0 for t in ra.CLAIM_TYPES},
                 },
+                "generated": _utcnow_iso(),
+            },
+        )
+        ra.write_json_atomic(
+            stage_dir / "citations.json",
+            {
+                "schema_version": ra.SCHEMA_VERSION,
+                "paper_path": str(paper_path.relative_to(run_dir)),
+                "existence_report": "stage-23/verification_report.json"
+                if (run_dir / "stage-23" / "verification_report.json").is_file()
+                else None,
+                "instances": [
+                    {
+                        "instance_id": i["instance_id"],
+                        "cite_key": i["cite_key"],
+                        "role": i["role"],
+                        "supported_claim_id": i["supported_claim_id"],
+                        "support_excerpt": i["support_excerpt"],
+                        "context": i["context"][:400],
+                    }
+                    for i in instances
+                ],
+                "counts": {
+                    "total": len(instances),
+                    "claim_support": 0,
+                    "background": 0,
+                    "unmapped": len(instances),
+                },
+                "generated": _utcnow_iso(),
+            },
+        )
+        ra.write_json_atomic(
+            stage_dir / "critique_resolution.json",
+            {
+                "schema_version": ra.SCHEMA_VERSION,
+                "critique_path": None,
+                "resolutions": [],
                 "generated": _utcnow_iso(),
             },
         )
@@ -181,8 +228,18 @@ def _execute_truth_audit(
         return StageResult(
             stage=Stage.TRUTH_AUDIT,
             status=StageStatus.FAILED,
-            artifacts=("claims.json", "truth_audit.json"),
-            evidence_refs=("stage-24/claims.json", "stage-24/truth_audit.json"),
+            artifacts=(
+                "claims.json",
+                "citations.json",
+                "critique_resolution.json",
+                "truth_audit.json",
+            ),
+            evidence_refs=(
+                "stage-24/claims.json",
+                "stage-24/citations.json",
+                "stage-24/critique_resolution.json",
+                "stage-24/truth_audit.json",
+            ),
             error="Truth audit: claim extraction returned no claims while LLM was available.",
             decision="retry",
         )
@@ -606,7 +663,228 @@ def _chat_json(
             model=model,
             strip_thinking=True,
         )
-        return _safe_json_loads(resp.content, {})
+        return _loads_json_repaired(resp.content, {})
     except Exception as exc:  # noqa: BLE001
         logger.warning("Release audit LLM call failed: %s", exc)
         return {}
+
+
+def _loads_json_repaired(text: str, default: Any) -> Any:
+    """Parse JSON from LLM output with bounded, deterministic repair.
+
+    This is intentionally conservative: it only removes common transport/
+    formatting noise (markdown fences, line comments, trailing commas, prose
+    around a single JSON object/array). It never fabricates missing fields.
+    """
+    for candidate in _json_candidates(text):
+        stripped = _strip_markdown_fence(candidate.strip())
+        try:
+            return json.loads(stripped)
+        except (TypeError, json.JSONDecodeError):
+            pass
+        repaired = _strip_json_comments(stripped)
+        repaired = _strip_trailing_commas(repaired)
+        try:
+            return json.loads(repaired)
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return _safe_json_loads(text, default)
+
+
+def _json_candidates(text: str) -> list[str]:
+    raw = text or ""
+    candidates = [raw]
+    fenced = _strip_markdown_fence(raw.strip())
+    if fenced != raw:
+        candidates.append(fenced)
+    embedded = _extract_first_json_value(raw)
+    if embedded:
+        candidates.append(embedded)
+    if embedded:
+        unfenced = _strip_markdown_fence(embedded.strip())
+        if unfenced != embedded:
+            candidates.append(unfenced)
+    # Preserve order while dropping exact duplicates.
+    out: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            out.append(candidate)
+    return out
+
+
+def _strip_markdown_fence(text: str) -> str:
+    m = re.fullmatch(r"\s*```[A-Za-z0-9_-]*\s*\n(.*?)\n?\s*```\s*", text, re.DOTALL)
+    return m.group(1).strip() if m else text
+
+
+def _strip_json_comments(text: str) -> str:
+    out: list[str] = []
+    in_string = False
+    escape = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            i += 2
+            while i < len(text) and text[i] not in "\r\n":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    return re.sub(r",\s*([}\]])", r"\1", text)
+
+
+def _extract_first_json_value(text: str) -> str | None:
+    starts = [i for i, ch in enumerate(text) if ch in "{["]
+    for start in starts:
+        opener = text[start]
+        closer = "}" if opener == "{" else "]"
+        stack = [closer]
+        in_string = False
+        escape = False
+        for idx in range(start + 1, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch in "{[":
+                stack.append("}" if ch == "{" else "]")
+            elif ch in "}]":
+                if not stack or ch != stack[-1]:
+                    break
+                stack.pop()
+                if not stack:
+                    return text[start : idx + 1]
+        # Try the next possible opening brace/bracket.
+    return None
+
+
+_RESULT_KEYWORDS = re.compile(
+    r"\b("
+    r"achiev(?:e|ed|es)|accuracy|auc|detect(?:ion|ed|s)?|f1|false positive|"
+    r"fpr|improv(?:e|ed|es|ement)|latency|outperform(?:s|ed)?|precision|"
+    r"recall|reduc(?:e|ed|es|tion)|result(?:s)?|throughput|tpr"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_COMPARISON_KEYWORDS = re.compile(
+    r"\b(outperform(?:s|ed)?|underperform(?:s|ed)?|better|worse|higher|lower|"
+    r"improv(?:e|ed|es)|reduc(?:e|ed|es))\b",
+    re.IGNORECASE,
+)
+
+
+def _fallback_extract_claims(paper_text: str, *, limit: int = 60) -> list[dict[str, Any]]:
+    """Deterministically extract checkable claims from paper prose.
+
+    The fallback exists only to recover from malformed LLM JSON. It copies
+    verbatim paper sentences and leaves evidence empty; normal provenance
+    closure below decides whether each claim can be supported.
+    """
+    claims: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for sentence in _candidate_claim_sentences(paper_text):
+        normalized = ra.normalize_paper_text(sentence)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        values = ra.extract_numbers(normalized)
+        if values:
+            ctype = "comparative" if _COMPARISON_KEYWORDS.search(normalized) else "quantitative"
+        elif _RESULT_KEYWORDS.search(normalized):
+            ctype = "result"
+        else:
+            continue
+        claims.append(
+            {
+                "id": f"clm-{len(claims):04d}",
+                "text": normalized,
+                "type": ctype,
+                "values": values,
+                "cited_keys": _claim_cited_keys(normalized),
+                "evidence": [],
+                "status": "pending",
+            }
+        )
+        if len(claims) >= limit:
+            break
+    return claims
+
+
+def _candidate_claim_sentences(paper_text: str) -> list[str]:
+    text = re.sub(r"```.*?```", " ", paper_text or "", flags=re.DOTALL)
+    sections = _preferred_sections(text)
+    search_text = "\n".join(sections) if sections else text
+    sentences: list[str] = []
+    for para in re.split(r"\n\s*\n", search_text):
+        para = para.strip()
+        if not para or para.startswith("|"):
+            continue
+        para = re.sub(r"^#{1,6}\s+", "", para)
+        for part in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9(])", para):
+            cleaned = ra.normalize_paper_text(part)
+            if 20 <= len(cleaned) <= 700:
+                sentences.append(cleaned)
+    return sentences
+
+
+def _preferred_sections(text: str) -> list[str]:
+    current_name = ""
+    current_lines: list[str] = []
+    sections: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*#{1,6}\s+(.+?)\s*$", line)
+        if m:
+            if current_lines:
+                sections.append((current_name, "\n".join(current_lines)))
+            current_name = m.group(1).strip().lower()
+            current_lines = []
+        else:
+            current_lines.append(line)
+    if current_lines:
+        sections.append((current_name, "\n".join(current_lines)))
+    wanted = ("abstract", "result", "discussion", "conclusion")
+    selected = [body for name, body in sections if any(w in name for w in wanted)]
+    return selected
+
+
+def _claim_cited_keys(text: str) -> list[str]:
+    keys: list[str] = []
+    for m in re.finditer(r"\\cite[a-zA-Z*]*(?:\[[^\]]*\])*\{([^}]+)\}", text):
+        keys.extend(k.strip() for k in m.group(1).split(",") if k.strip())
+    for m in re.finditer(r"\[([^\[\]]{4,300})\]", text):
+        parts = [p.strip() for p in re.split(r"[,;]", m.group(1))]
+        if parts and all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*\d{4}[A-Za-z0-9_-]*", p) for p in parts if p):
+            keys.extend(p for p in parts if p)
+    return keys
