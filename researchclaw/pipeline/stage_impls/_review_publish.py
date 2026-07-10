@@ -15,6 +15,11 @@ import yaml  # noqa: F401 — available for downstream use
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.experiment_runtime.contract import (
+    ContractValidationError,
+    find_stage09_contract,
+    load_contract,
+)
 from researchclaw.llm.client import LLMClient
 from researchclaw.pipeline._domain import _detect_domain  # noqa: F401
 from researchclaw.pipeline._helpers import (
@@ -56,6 +61,20 @@ def _get_collect_raw_experiment_metrics():
 def _get_review_compiled_pdf():
     from researchclaw.pipeline.stage_impls._paper_writing import _review_compiled_pdf
     return _review_compiled_pdf
+
+
+def _paper_revision_claim_scope(run_dir: Path, config: RCConfig) -> str:
+    contract_path = find_stage09_contract(run_dir)
+    if contract_path is None:
+        return str(config.experiment.claim_scope or "pipeline_validation")
+    try:
+        return load_contract(contract_path).claim_scope
+    except ContractValidationError as exc:
+        logger.warning(
+            "Stage 19: experiment contract is invalid; disabling revision fallback: %s",
+            exc,
+        )
+        return "research_release"
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +242,31 @@ def _execute_paper_revision(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
+    # A resumed run may reuse the same stage directory. Remove outputs owned by
+    # this stage before any LLM call so a failed retry cannot expose artifacts
+    # from an earlier attempt as current output.
+    for artifact_name in (
+        "paper_revised.md",
+        "revision_notes_internal.md",
+        "revision_retry_failure.json",
+    ):
+        (stage_dir / artifact_name).unlink(missing_ok=True)
+
     draft = _read_prior_artifact(run_dir, "paper_draft.md") or ""
     reviews = _read_prior_artifact(run_dir, "reviews.md") or ""
     draft_word_count = len(draft.split())
+
+    def _save_revision_notes(text: str) -> None:
+        revision_words = text.split()
+        revision_summary = (
+            " ".join(revision_words[:500]) + "\n\n*(Revision summary truncated)*"
+            if len(revision_words) > 500
+            else text
+        )
+        if revision_summary.strip():
+            (stage_dir / "revision_notes_internal.md").write_text(
+                revision_summary, encoding="utf-8"
+            )
 
     # R4-2: Collect real metrics for anti-fabrication guard in revision
     # BUG-47: _collect_raw_experiment_metrics returns tuple[str, bool], must unpack
@@ -326,50 +367,77 @@ def _execute_paper_revision(
                 f"If a section has no reviewer comments, include it UNCHANGED.\n\n"
                 + _revision_user
             )
-            resp2 = _chat_with_prompt(
-                llm, _revision_system, retry_user,
-                json_mode=sp.json_mode, max_tokens=revision_max_tokens,
-            )
-            revised2 = resp2.content
-            revised2_word_count = len(revised2.split())
-            if revised2_word_count >= int(draft_word_count * 0.8):
-                revised = revised2
-            elif revised2_word_count > revised_word_count:
-                # Retry improved but still not enough — use the longer version
-                revised = revised2
+            try:
+                resp2 = _chat_with_prompt(
+                    llm, _revision_system, retry_user,
+                    json_mode=sp.json_mode, max_tokens=revision_max_tokens,
+                    retries=2,
+                )
+            except RuntimeError as exc:
+                if _paper_revision_claim_scope(run_dir, config) != "pipeline_validation":
+                    raise
+                cause = exc.__cause__
                 logger.warning(
-                    "Retry improved (%d → %d words) but still shorter than draft (%d).",
+                    "Length-enforcement retry failed after a usable but short "
+                    "revision (%d/%d words): %s. Falling back to the full "
+                    "original draft for Stage 20 quality review.",
                     revised_word_count,
-                    revised2_word_count,
                     draft_word_count,
+                    exc,
                 )
-            else:
-                # Both attempts produced short output — preserve full original draft
-                logger.warning(
-                    "Retry also produced short output (%d words). "
-                    "Falling back to FULL ORIGINAL DRAFT to prevent content loss.",
-                    revised2_word_count,
+                _save_revision_notes(revised)
+                (stage_dir / "revision_retry_failure.json").write_text(
+                    json.dumps(
+                        {
+                            "fallback": "full_original_draft",
+                            "draft_word_count": draft_word_count,
+                            "first_revision_word_count": revised_word_count,
+                            "error_type": type(exc).__name__,
+                            "cause_type": type(cause).__name__ if cause else None,
+                            "error": str(exc),
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
                 )
-                # Extract useful revision points as appendix
-                revision_words = revised.split()
-                revision_summary = (
-                    " ".join(revision_words[:500]) + "\n\n*(Revision summary truncated)*"
-                    if len(revision_words) > 500
-                    else revised
-                )
-                if revision_summary.strip():
-                    # Save revision notes to internal file, not paper body
-                    (stage_dir / "revision_notes_internal.md").write_text(
-                        revision_summary, encoding="utf-8"
-                    )
                 revised = draft
+            else:
+                revised2 = resp2.content
+                revised2_word_count = len(revised2.split())
+                if revised2_word_count >= int(draft_word_count * 0.8):
+                    revised = revised2
+                elif revised2_word_count > revised_word_count:
+                    # Retry improved but still not enough — use the longer version
+                    revised = revised2
+                    logger.warning(
+                        "Retry improved (%d → %d words) but still shorter than draft (%d).",
+                        revised_word_count,
+                        revised2_word_count,
+                        draft_word_count,
+                    )
+                else:
+                    # Both attempts produced short output — preserve full original draft
+                    logger.warning(
+                        "Retry also produced short output (%d words). "
+                        "Falling back to FULL ORIGINAL DRAFT to prevent content loss.",
+                        revised2_word_count,
+                    )
+                    _save_revision_notes(revised)
+                    revised = draft
     else:
         revised = draft
     (stage_dir / "paper_revised.md").write_text(revised, encoding="utf-8")
+    artifacts = ["paper_revised.md"]
+    for diagnostic_name in (
+        "revision_notes_internal.md",
+        "revision_retry_failure.json",
+    ):
+        if (stage_dir / diagnostic_name).is_file():
+            artifacts.append(diagnostic_name)
     return StageResult(
         stage=Stage.PAPER_REVISION,
         status=StageStatus.DONE,
-        artifacts=("paper_revised.md",),
+        artifacts=tuple(artifacts),
         evidence_refs=("stage-19/paper_revised.md",),
     )
 

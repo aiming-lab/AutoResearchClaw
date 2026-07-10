@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+from dataclasses import replace
+from http.client import IncompleteRead
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -41,6 +43,187 @@ class FakeLLMClientWithConfig(FakeLLMClient):
         self.config: SimpleNamespace = SimpleNamespace(
             base_url="http://fake", api_key="fake-key"
         )
+
+
+class TestPaperRevisionRecovery:
+    @staticmethod
+    def _prompt_manager() -> object:
+        class PromptManagerStub:
+            def block(self, _name: str, **_kwargs: object) -> str:
+                return ""
+
+            def for_stage(self, _name: str, **_kwargs: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    system="revision system",
+                    user="revision user",
+                    json_mode=False,
+                    max_tokens=12000,
+                )
+
+        return PromptManagerStub()
+
+    def test_retry_transport_failure_preserves_full_draft(
+        self,
+        tmp_path: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run_dir = tmp_path / "run"
+        stage_dir = run_dir / "stage-19"
+        stage_dir.mkdir(parents=True)
+        draft = " ".join(f"draft-{idx}" for idx in range(600))
+        short_revision = " ".join(f"revision-{idx}" for idx in range(200))
+        _write_prior_artifact(run_dir, 17, "paper_draft.md", draft)
+        _write_prior_artifact(run_dir, 18, "reviews.md", "Fix the limitations.")
+        calls = 0
+        retry_values: list[object] = []
+
+        def fake_chat(*_args: object, **kwargs: object) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            retry_values.append(kwargs.get("retries"))
+            if calls == 1:
+                return SimpleNamespace(content=short_revision)
+            try:
+                raise IncompleteRead(b"")
+            except IncompleteRead as cause:
+                raise RuntimeError("IncompleteRead(0 bytes read)") from cause
+
+        monkeypatch.setattr(
+            "researchclaw.pipeline.stage_impls._review_publish._chat_with_prompt",
+            fake_chat,
+        )
+
+        result = rc_executor._execute_paper_revision(
+            stage_dir,
+            run_dir,
+            rc_config,
+            adapters,
+            llm=cast(Any, FakeLLMClient()),
+            prompts=cast(Any, self._prompt_manager()),
+        )
+
+        assert result.status == StageStatus.DONE
+        assert calls == 2
+        assert retry_values == [2, 2]
+        assert result.artifacts == (
+            "paper_revised.md",
+            "revision_notes_internal.md",
+            "revision_retry_failure.json",
+        )
+        assert (stage_dir / "paper_revised.md").read_text(encoding="utf-8") == draft
+        notes = (stage_dir / "revision_notes_internal.md").read_text(encoding="utf-8")
+        assert notes.startswith("revision-0 revision-1")
+        diagnostic = json.loads(
+            (stage_dir / "revision_retry_failure.json").read_text(encoding="utf-8")
+        )
+        assert diagnostic["fallback"] == "full_original_draft"
+        assert diagnostic["error_type"] == "RuntimeError"
+        assert diagnostic["cause_type"] == "IncompleteRead"
+        assert diagnostic["first_revision_word_count"] == 200
+
+    def test_initial_transport_failure_removes_stale_revision(
+        self,
+        tmp_path: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run_dir = tmp_path / "run"
+        stage_dir = run_dir / "stage-19"
+        stage_dir.mkdir(parents=True)
+        _write_prior_artifact(run_dir, 17, "paper_draft.md", "draft content")
+        _write_prior_artifact(run_dir, 18, "reviews.md", "review content")
+        stale_revision = stage_dir / "paper_revised.md"
+        stale_revision.write_text("stale prior revision", encoding="utf-8")
+
+        def fail_chat(*_args: object, **_kwargs: object) -> SimpleNamespace:
+            raise RuntimeError("IncompleteRead(0 bytes read)")
+
+        monkeypatch.setattr(
+            "researchclaw.pipeline.stage_impls._review_publish._chat_with_prompt",
+            fail_chat,
+        )
+
+        with pytest.raises(RuntimeError, match="IncompleteRead"):
+            rc_executor._execute_paper_revision(
+                stage_dir,
+                run_dir,
+                rc_config,
+                adapters,
+                llm=cast(Any, FakeLLMClient()),
+                prompts=cast(Any, self._prompt_manager()),
+            )
+
+        assert not stale_revision.exists()
+
+    @pytest.mark.parametrize(
+        ("claim_scope", "invalid_contract"),
+        (
+            ("research_release", False),
+            ("exploratory", False),
+            ("pipeline_validation", True),
+        ),
+    )
+    def test_non_validation_or_invalid_contract_does_not_hide_retry_failure(
+        self,
+        tmp_path: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+        claim_scope: str,
+        invalid_contract: bool,
+    ) -> None:
+        strict_config = replace(
+            rc_config,
+            experiment=replace(
+                rc_config.experiment,
+                claim_scope=claim_scope,
+                dataset_origin="public",
+            ),
+        )
+        run_dir = tmp_path / "run"
+        stage_dir = run_dir / "stage-19"
+        stage_dir.mkdir(parents=True)
+        draft = " ".join(f"draft-{idx}" for idx in range(600))
+        short_revision = " ".join(f"revision-{idx}" for idx in range(200))
+        _write_prior_artifact(run_dir, 17, "paper_draft.md", draft)
+        _write_prior_artifact(run_dir, 18, "reviews.md", "Fix the limitations.")
+        if invalid_contract:
+            _write_prior_artifact(
+                run_dir,
+                9,
+                "experiment_contract.yaml",
+                "claim_scope: [unterminated",
+            )
+        calls = 0
+
+        def fake_chat(*_args: object, **_kwargs: object) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return SimpleNamespace(content=short_revision)
+            raise RuntimeError("IncompleteRead(0 bytes read)")
+
+        monkeypatch.setattr(
+            "researchclaw.pipeline.stage_impls._review_publish._chat_with_prompt",
+            fake_chat,
+        )
+
+        with pytest.raises(RuntimeError, match="IncompleteRead"):
+            rc_executor._execute_paper_revision(
+                stage_dir,
+                run_dir,
+                strict_config,
+                adapters,
+                llm=cast(Any, FakeLLMClient()),
+                prompts=cast(Any, self._prompt_manager()),
+            )
+
+        assert calls == 2
+        assert not (stage_dir / "paper_revised.md").exists()
+        assert not (stage_dir / "revision_retry_failure.json").exists()
 
 
 @pytest.fixture()
