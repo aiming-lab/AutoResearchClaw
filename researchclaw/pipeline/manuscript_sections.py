@@ -98,7 +98,7 @@ def parse_manuscript(
     if not isinstance(source, str):
         raise TypeError("source must be a string")
 
-    lines = _split_commonmark_lines_keepends(source)
+    lines = split_commonmark_lines_keepends(source)
     front_matter_lines = _front_matter_line_count(lines)
     markdown_source = "".join(lines[front_matter_lines:])
     headings = _extract_headings(markdown_source, line_offset=front_matter_lines)
@@ -294,8 +294,8 @@ def _front_matter_line_count(lines: list[str]) -> int:
     return 0
 
 
-def _split_commonmark_lines_keepends(source: str) -> list[str]:
-    """Split only on the CR/LF sequences normalized by markdown-it."""
+def split_commonmark_lines_keepends(source: str) -> list[str]:
+    """Split only on CommonMark CR/LF sequences and preserve terminators."""
 
     lines: list[str] = []
     start = 0
