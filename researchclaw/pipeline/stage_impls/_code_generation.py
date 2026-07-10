@@ -544,7 +544,7 @@ def _execute_code_generation(
             error=error,
         )
     try:
-        load_contract(contract_path)
+        contract = load_contract(contract_path)
     except ContractValidationError as exc:
         error = f"Experiment contract invalid: {exc}"
         return StageResult(
@@ -1063,11 +1063,38 @@ def _execute_code_generation(
             and _agent_result.review_verdict != "APPROVE"
             and _agent_result.critical_issues
         ):
-            _stage10_blockers.append(
-                "CodeAgent final review did not approve generated code: "
-                f"verdict={_agent_result.review_verdict}, "
-                f"critical_issues={len(_agent_result.critical_issues)}"
-            )
+            # Route B: pipeline_validation passthrough — reviewer critique is
+            # recorded as metadata but does not block Stage 10→12.  Under
+            # research_release the reviewer remains a hard gate.
+            if contract.claim_scope == "pipeline_validation":
+                _critique_payload = {
+                    "claim_scope": contract.claim_scope,
+                    "verdict": _agent_result.review_verdict,
+                    "passthrough": True,
+                    "passthrough_reason": (
+                        "pipeline_validation validates engineering flow only; "
+                        "not release-grade"
+                    ),
+                    "critical_issues": _agent_result.critical_issues,
+                    "review_score": _agent_result.review_score,
+                    "review_rounds": _agent_result.review_rounds,
+                    "generated": _utcnow_iso(),
+                }
+                (stage_dir / "reviewer_critique.json").write_text(
+                    json.dumps(_critique_payload, indent=2), encoding="utf-8",
+                )
+                logger.warning(
+                    "Stage 10: reviewer verdict=%s with %d critical issues "
+                    "— passthrough under pipeline_validation (not release-grade)",
+                    _agent_result.review_verdict,
+                    len(_agent_result.critical_issues),
+                )
+            else:
+                _stage10_blockers.append(
+                    "CodeAgent final review did not approve generated code: "
+                    f"verdict={_agent_result.review_verdict}, "
+                    f"critical_issues={len(_agent_result.critical_issues)}"
+                )
         if _agent_result.architecture_spec:
             (stage_dir / "architecture_spec.yaml").write_text(
                 _agent_result.architecture_spec, encoding="utf-8",
@@ -1933,6 +1960,8 @@ Multi-file experiment project with {len(files)} file(s): {file_list}
     artifacts.extend(smoke_artifacts)
     if (stage_dir / "validation_report.md").exists():
         artifacts.append("validation_report.md")
+    if (stage_dir / "reviewer_critique.json").exists():
+        artifacts.append("reviewer_critique.json")
     if _stage10_blockers:
         blockers_path = stage_dir / "stage10_blockers.json"
         blockers_path.write_text(

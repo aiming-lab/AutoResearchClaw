@@ -225,6 +225,14 @@ class ReleaseChecker:
             return
         claim_scope = str(payload.get("claim_scope") or "").strip()
         dataset_origin = str(payload.get("dataset_origin") or "").strip()
+        if claim_scope != "research_release":
+            self.error(
+                "non_release_claim_scope",
+                f"experiment_contract.yaml declares claim_scope={claim_scope!r}. "
+                "Only claim_scope=research_release is eligible for release. "
+                "pipeline_validation and exploratory runs cannot be release-ready.",
+                relpath(contract_path, self.run_dir),
+            )
         if claim_scope == "research_release" and dataset_origin == "synthetic":
             waiver = self.read_json(
                 "waivers/synthetic_research_release.json", required=False

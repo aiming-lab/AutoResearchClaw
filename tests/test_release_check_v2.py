@@ -53,8 +53,8 @@ def good_run(tmp_path: Path) -> Path:
             [
                 "schema_version: 1",
                 "topic: release check fixture",
-                "claim_scope: pipeline_validation",
-                "dataset_origin: synthetic",
+                "claim_scope: research_release",
+                "dataset_origin: public",
                 "primary_metric:",
                 "  key: loss",
                 "  direction: minimize",
@@ -784,7 +784,7 @@ def test_release_check_blocks_synthetic_research_release(good_run: Path) -> None
         encoding="utf-8"
     )
     contract = contract.replace(
-        "claim_scope: pipeline_validation", "claim_scope: research_release"
+        "dataset_origin: public", "dataset_origin: synthetic"
     )
     _write(good_run / "stage-09" / "experiment_contract.yaml", contract)
     assert "synthetic_research_release_blocked" in _codes(_check(good_run))
@@ -795,7 +795,7 @@ def test_release_check_warns_for_synthetic_research_release_waiver(good_run: Pat
         encoding="utf-8"
     )
     contract = contract.replace(
-        "claim_scope: pipeline_validation", "claim_scope: research_release"
+        "dataset_origin: public", "dataset_origin: synthetic"
     )
     _write(good_run / "stage-09" / "experiment_contract.yaml", contract)
     _write(
@@ -812,6 +812,34 @@ def test_release_check_warns_for_synthetic_research_release_waiver(good_run: Pat
 def test_release_check_requires_experiment_contract(good_run: Path) -> None:
     (good_run / "stage-09" / "experiment_contract.yaml").unlink()
     assert "experiment_contract_missing" in _codes(_check(good_run))
+
+
+def test_release_check_blocks_pipeline_validation_claim_scope(good_run: Path) -> None:
+    contract = (good_run / "stage-09" / "experiment_contract.yaml").read_text(
+        encoding="utf-8"
+    )
+    contract = contract.replace(
+        "claim_scope: research_release", "claim_scope: pipeline_validation"
+    )
+    _write(good_run / "stage-09" / "experiment_contract.yaml", contract)
+    assert "non_release_claim_scope" in _codes(_check(good_run))
+
+
+def test_release_check_blocks_exploratory_claim_scope(good_run: Path) -> None:
+    contract = (good_run / "stage-09" / "experiment_contract.yaml").read_text(
+        encoding="utf-8"
+    )
+    contract = contract.replace(
+        "claim_scope: research_release", "claim_scope: exploratory"
+    )
+    _write(good_run / "stage-09" / "experiment_contract.yaml", contract)
+    assert "non_release_claim_scope" in _codes(_check(good_run))
+
+
+def test_release_check_passes_research_release_claim_scope(good_run: Path) -> None:
+    # good_run fixture already has claim_scope: research_release
+    checker = _check(good_run)
+    assert "non_release_claim_scope" not in _codes(checker)
 
 
 def test_evidence_path_rejects_stage10_smoke() -> None:
