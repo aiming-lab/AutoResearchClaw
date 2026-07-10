@@ -138,7 +138,40 @@ def test_derive_contract_splits_smoke_and_run_budgets(tmp_path: Path) -> None:
         project_root=tmp_path,
         check_paths=False,
     )
-    contract = derive_contract(cfg, {"datasets": ["synthetic traces"]})
+    contract = derive_contract(cfg, {"datasets": ["UCI Adult"]})
     assert contract.smoke_budget_sec == 60
     assert contract.run_budget_sec == 300
     assert contract.dataset_origin == "synthetic"
+    assert contract.dataset_name == "synthetic_pipeline_validation_v1"
+
+
+def test_derive_contract_keeps_named_public_dataset(tmp_path: Path) -> None:
+    cfg = RCConfig.from_dict(
+        {
+            "project": {"name": "rc-test", "mode": "docs-first"},
+            "research": {"topic": "topic", "domains": ["security"]},
+            "runtime": {"timezone": "UTC"},
+            "notifications": {"channel": "none"},
+            "knowledge_base": {"backend": "markdown", "root": str(tmp_path / "kb")},
+            "llm": {
+                "provider": "openai-compatible",
+                "base_url": "http://localhost:1234/v1",
+                "api_key_env": "RC_TEST_KEY",
+                "api_key": "inline-test-key",
+                "primary_model": "fake-model",
+                "fallback_models": [],
+            },
+            "experiment": {
+                "mode": "sandbox",
+                "time_budget_sec": 300,
+                "metric_key": "detection_f1",
+                "metric_direction": "maximize",
+                "dataset_origin": "public",
+            },
+        },
+        project_root=tmp_path,
+        check_paths=False,
+    )
+    contract = derive_contract(cfg, {"datasets": ["UCI Adult"]})
+    assert contract.dataset_origin == "public"
+    assert contract.dataset_name == "UCI Adult"

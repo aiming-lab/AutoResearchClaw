@@ -192,7 +192,11 @@ def derive_contract(config: Any, plan: dict[str, Any] | None) -> ExperimentContr
     smoke_budget_sec = max(1, min(60, time_budget_sec))
     metric_key = str(getattr(experiment, "metric_key", "primary_metric") or "primary_metric")
     metric_direction = str(getattr(experiment, "metric_direction", "minimize") or "minimize")
-    dataset_name = _first_dataset_name(plan)
+    dataset_name = (
+        "synthetic_pipeline_validation_v1"
+        if dataset_origin == "synthetic"
+        else _first_dataset_name(plan)
+    )
     contract = ExperimentContract(
         schema_version=1,
         topic=str(getattr(getattr(config, "research", None), "topic", "") or ""),
