@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",
     "rich>=13.0",
+    "markdown-it-py>=3.0",
     "arxiv>=2.1",
     "numpy>=1.24",
 ]
