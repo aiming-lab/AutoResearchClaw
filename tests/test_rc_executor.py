@@ -2321,6 +2321,35 @@ class TestWritePaperSections:
         assert "## Results" in draft
         assert "## Conclusion" in draft
 
+    def test_metric_instruction_reaches_all_three_writing_calls(self) -> None:
+        class TrackingLLM:
+            def __init__(self):
+                self.user_prompts: list[str] = []
+
+            def chat(self, messages, **kwargs):
+                for m in messages:
+                    if m.get("role") == "user":
+                        self.user_prompts.append(m["content"])
+                from researchclaw.llm.client import LLMResponse
+                return LLMResponse(content="## Section\nContent here.", model="fake")
+
+        llm = TrackingLLM()
+        from researchclaw.prompts import PromptManager
+        pm = PromptManager()
+
+        rc_executor._write_paper_sections(
+            llm=llm,
+            pm=pm,
+            preamble="Preamble",
+            topic_constraint="",
+            exp_metrics_instruction="GROUNDED METRIC VALUE WHITELIST: detection_f1 = 0.4753",
+            citation_instruction="",
+            outline="Outline",
+        )
+
+        assert len(llm.user_prompts) == 3
+        assert all("detection_f1 = 0.4753" in p for p in llm.user_prompts)
+
     def test_each_call_receives_prior_context(self) -> None:
         class ContextTrackingLLM:
             def __init__(self):
@@ -2777,6 +2806,70 @@ class TestDataIntegrityBlock:
             msg["content"] for call in llm.calls for msg in call
         )
         assert "Data Integrity" in all_prompts or "ONLY report numbers" in all_prompts
+
+    def test_grounded_metric_whitelist_reads_scaffold_results_json(
+        self, run_dir: Path
+    ) -> None:
+        from researchclaw.pipeline.stage_impls import _paper_writing
+
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "claim_scope": "pipeline_validation",
+                    "dataset_origin": "synthetic",
+                    "evaluator_owner": "scaffold",
+                    "metrics": {
+                        "detection_f1": 0.4753327669,
+                        "fpr": 0.0291666667,
+                    },
+                    "per_seed": [
+                        {"seed": 42, "metrics": {"detection_f1": 0.486}},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        block = _paper_writing._collect_grounded_metric_whitelist(run_dir)
+
+        assert "GROUNDED METRIC VALUE WHITELIST" in block
+        assert "stage-12/runs/results.json :: metrics.detection_f1 = 0.4753" in block
+        assert "stage-12/runs/results.json :: metrics.fpr = 0.0292" in block
+        assert "Do NOT introduce any other decimal metric values" in block
+
+    def test_paper_draft_injects_scaffold_results_into_first_prompt(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "claim_scope": "pipeline_validation",
+                    "dataset_origin": "synthetic",
+                    "evaluator_owner": "scaffold",
+                    "metrics": {"detection_f1": 0.4753327669},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        stage_dir = run_dir / "stage-17"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        llm = FakeLLMClient("# Paper Title\n\n## Abstract\nSome abstract text.")
+        result = rc_executor._execute_paper_draft(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.DONE
+        assert len(llm.calls) >= 1
+        first_prompt = " ".join(m["content"] for m in llm.calls[0])
+        assert "GROUNDED METRIC VALUE WHITELIST" in first_prompt
+        assert "detection_f1 = 0.4753" in first_prompt
 
 
 # ── R4-3: Conference-Grade Title Guidelines Tests ────────────────────

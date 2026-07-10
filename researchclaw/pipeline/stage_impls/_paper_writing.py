@@ -330,6 +330,80 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
     ), has_parsed_metrics
 
 
+def _collect_grounded_metric_whitelist(run_dir: Path) -> str:
+    """Build a compact allowlist of metric numbers the paper may report.
+
+    Stage 12's scaffold-owned evaluator writes the authoritative result to
+    ``stage-12/runs/results.json``. Older raw-log collection skipped files
+    named ``results.json``, which meant the writer could miss the only
+    grounded metric source and invent headline numbers. This block gives the
+    LLM a source-specific allowlist rather than another vague warning.
+    """
+    entries: list[tuple[str, str, float]] = []
+    seen: set[tuple[str, str, float]] = set()
+
+    def _add(source: str, key: str, value: Any) -> None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return
+        fval = float(value)
+        item = (source, key, round(fval, 8))
+        if item in seen:
+            return
+        seen.add(item)
+        entries.append((source, key, fval))
+
+    def _walk_metrics(source: str, prefix: str, obj: Any) -> None:
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                next_prefix = f"{prefix}.{key}" if prefix else str(key)
+                _walk_metrics(source, next_prefix, value)
+        elif isinstance(obj, list):
+            for idx, value in enumerate(obj[:20]):
+                _walk_metrics(source, f"{prefix}[{idx}]", value)
+        else:
+            _add(source, prefix, obj)
+
+    candidates: list[Path] = []
+    candidates.extend(sorted((run_dir / "stage-12" / "runs").glob("*.json")))
+    candidates.extend(sorted(run_dir.glob("stage-12*/runs/*.json")))
+    candidates.append(run_dir / "experiment_summary_best.json")
+    candidates.extend(sorted(run_dir.glob("stage-14*/experiment_summary.json")))
+
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        rel = path.relative_to(run_dir).as_posix()
+        for key in ("primary_metric", "metrics", "key_metrics", "metrics_summary"):
+            if key in data:
+                _walk_metrics(rel, key, data[key])
+        per_seed = data.get("per_seed")
+        if isinstance(per_seed, list):
+            for idx, row in enumerate(per_seed[:20]):
+                if isinstance(row, dict) and isinstance(row.get("metrics"), dict):
+                    seed = row.get("seed", idx)
+                    _walk_metrics(rel, f"per_seed[{seed}].metrics", row["metrics"])
+
+    if not entries:
+        return ""
+
+    lines = [
+        "\n\n## GROUNDED METRIC VALUE WHITELIST (MANDATORY)",
+        "The paper may report ONLY the numeric metric values listed below.",
+        "Do NOT introduce any other decimal metric values in the Abstract, Experiments, Results, Discussion, or Conclusion.",
+        "Do NOT convert these values to percentages unless that percentage value is explicitly listed here.",
+        "If a desired number is not listed, write an em dash (---) or omit the numeric claim.",
+    ]
+    for source, key, value in entries[:160]:
+        lines.append(f"- {source} :: {key} = {value:.4f}")
+    return "\n".join(lines) + "\n"
+
+
 def _write_paper_sections(
     *,
     llm: LLMClient,
@@ -411,6 +485,7 @@ def _write_paper_sections(
         call1_user = (
             f"{preamble}\n\n"
             f"{topic_constraint}"
+            f"{exp_metrics_instruction}\n\n"
             f"{citation_instruction}\n\n"
             f"{academic_style_guide}\n"
             f"{narrative_writing_rules}\n"
@@ -438,6 +513,7 @@ def _write_paper_sections(
         call1_user = (
             f"{preamble}\n\n"
             f"{topic_constraint}"
+            f"{exp_metrics_instruction}\n\n"
             f"{citation_instruction}\n\n"
             f"{title_guidelines}\n\n"
             f"{academic_style_guide}\n"
@@ -1444,6 +1520,11 @@ def _execute_paper_draft(
             has_real_metrics = True
         exp_metrics_instruction += raw_metrics_block
 
+    grounded_metric_whitelist = _collect_grounded_metric_whitelist(run_dir)
+    if grounded_metric_whitelist:
+        has_real_metrics = True
+        exp_metrics_instruction += grounded_metric_whitelist
+
     # R18-1 + R19-6: Inject paired statistical comparisons AND condition summaries
     if exp_summary_text:
         exp_summary_parsed = _safe_json_loads(exp_summary_text, {})
@@ -1684,13 +1765,27 @@ def _execute_paper_draft(
     all_simulated = True
     for stage_subdir in sorted(run_dir.glob("stage-*/runs")):
         for run_file in sorted(stage_subdir.glob("*.json")):
-            if run_file.name == "results.json":
-                continue
             try:
                 _payload = json.loads(run_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
-            if isinstance(_payload, dict) and _payload.get("status") != "simulated":
+            if not isinstance(_payload, dict):
+                continue
+            # Scaffold-owned pipeline_validation results are synthetic by
+            # contract, but they are not the old formulaic "simulated mode"
+            # payloads this guard was built to block. They are valid for
+            # dry-run writing and remain non-release via release_check.
+            if (
+                run_file.name == "results.json"
+                and _payload.get("evaluator_owner") == "scaffold"
+                and isinstance(_payload.get("metrics"), dict)
+                and _payload.get("metrics")
+            ):
+                all_simulated = False
+                break
+            if run_file.name == "results.json":
+                continue
+            if _payload.get("status") != "simulated":
                 all_simulated = False
                 break
         if not all_simulated:
