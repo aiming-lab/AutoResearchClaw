@@ -485,6 +485,57 @@ class TestPhase4Review:
         assert result.critical_issues == []
         assert result.total_llm_calls == 4  # codegen + review1 + fix + review2
 
+    def test_review_fix_cannot_replace_executable_main_with_config_only(
+        self, stage_dir: Path, pm: PromptManager,
+    ) -> None:
+        code = (
+            "```filename:main.py\n"
+            "def main():\n"
+            "    print('m: 1')\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+            "```"
+        )
+        review1 = json.dumps({
+            "verdict": "REVISE",
+            "score": 3,
+            "critical_issues": ["Fix configuration mismatch"],
+            "suggestions": [],
+        })
+        bad_fix = (
+            "```filename:main.py\n"
+            "class Config:\n"
+            "    def __init__(self):\n"
+            "        self.metric = 'm'\n"
+            "```\n"
+            "```filename:helper.py\n"
+            "VALUE = 1\n"
+            "```"
+        )
+        review2 = '{"verdict": "APPROVE", "score": 8, "critical_issues": []}'
+        llm = FakeLLM(responses=[code, review1, bad_fix, review2])
+
+        agent = CodeAgent(
+            llm=llm,
+            prompts=pm,
+            config=CodeAgentConfig(
+                architecture_planning=False,
+                review_max_rounds=3,
+                hard_validation=False,
+            ),
+            stage_dir=stage_dir,
+        )
+        result = agent.generate(topic="t", exp_plan="p", metric="m", pkg_hint="")
+
+        assert "if __name__ == '__main__'" in result.files["main.py"]
+        assert "class Config" not in result.files["main.py"]
+        assert result.files["helper.py"].strip() == "VALUE = 1"
+        assert any(
+            "Review fix attempted to replace main.py" in event
+            for event in agent._log
+        )
+
     def test_review_disabled(
         self, stage_dir: Path, pm: PromptManager,
     ) -> None:

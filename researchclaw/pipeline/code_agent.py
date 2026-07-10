@@ -1467,6 +1467,15 @@ class CodeAgent:
 
             fixed = self._extract_files(fix_resp.content)
             if fixed:
+                if "main.py" in fixed and not self._has_main_guard(fixed["main.py"]):
+                    fixed = dict(fixed)
+                    fixed.pop("main.py", None)
+                    self._log_event(
+                        "  WARNING: Review fix attempted to replace main.py "
+                        "with a non-executable file; preserving previous main.py"
+                    )
+                    if not fixed:
+                        continue
                 files = dict(files)
                 files.update(fixed)
 
