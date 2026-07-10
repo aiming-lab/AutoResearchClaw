@@ -469,8 +469,11 @@ heading.
   near a quantitative unit that the deterministic normalizer cannot parse.
 
 Citation keys come from deterministic BibTeX parsing. They must not be inferred
-from draft prose. The grounded numeric whitelist uses only allowed Stage 12-14
-experiment artifacts and excludes Stage 10 diagnostics.
+from draft prose. Version 1 recognizes LaTeX `\cite{key}` and the pipeline's
+bracketed cite-key form. Pandoc `@key` syntax is explicitly unsupported because
+a broad `@` matcher would also classify email addresses and handles; adding it
+requires a typed parser and separate tests. The grounded numeric whitelist uses
+only allowed Stage 12-14 experiment artifacts and excludes Stage 10 diagnostics.
 
 Numeric comparison must normalize equivalent forms. At minimum:
 
@@ -478,17 +481,38 @@ Numeric comparison must normalize equivalent forms. At minimum:
   `0.85`, `85%`, and `8.5e-1`;
 - thousands separators;
 - scientific notation;
-- English number-word sequences adjacent to quantitative units such as
-  `percent`, `trials`, `seeds`, `samples`, `counters`, `ms`, and `us`; an
-  unrecognized sequence fails rather than being ignored;
+- digit-plus-word percentages, so `85 percent` normalizes to `0.85` just as
+  `85%` does;
+- English number-word sequences adjacent to a unit in the versioned v1 lexicon,
+  which explicitly includes `percent`, `trials`, `seeds`, `samples`,
+  `counters`, `ms`, and `us`; an unrecognized sequence fails rather than being
+  ignored;
 - relative tolerance is fixed at no more than `1e-3`, matching the existing
   provenance comparison. It is only for float serialization; `0.475` becoming
   `0.48` must fail as materially different rounding.
 
-Numbers in citation years, section labels, figure/table labels, and bibliography
-metadata require typed classification so they are not mistaken for experiment
-metrics. The validator may preserve numbers already present in the original
-section, but it must record them as `source_preserved`, not `grounded_metric`.
+In B1 this is implemented as the closed, versioned constant
+`QUANTITATIVE_UNIT_LEXICON_V1`; implementations must not silently add units at
+runtime. Expanding the lexicon requires a version change and positive/negative
+tests. Fraction phrases such as `two thirds` are parsed independently; ambiguous
+quantifiers such as `several trials` fail explicitly.
+
+Numbers in typed author-year citations, section labels, figure/table labels, and
+bibliography metadata require typed classification so they are not mistaken for
+experiment metrics. A naked four-digit number is not exempt merely because it
+falls between 1900 and 2099: `2000 samples`, `2048 windows`, and `N=2000` must be
+grounded like any other quantity. Plural references such as `Figures 2 and 3`,
+`Tables 4 & 5`, and `Eqs. 6, 7` must expand to individual typed targets.
+
+Math spans are not a blanket numeric exemption. Decimal, scientific-notation,
+and percentage literals inside inline or display math participate in numeric
+grounding, so `$F_1 = 0.97$` cannot bypass the whitelist. Version 1 deliberately
+ignores structural integers in expressions such as `$x^2$` and
+`$\frac{1}{2}$` to limit false positives; the isolated critic and Stage 24 still
+review the semantic claim.
+
+The validator may preserve numbers already present in the original section, but
+it must record them as `source_preserved`, not `grounded_metric`.
 Preservation does not prove that an old number is true. If a review comment
 targets an ungrounded number and the candidate leaves it unchanged, the critic
 must keep that comment unresolved; later Stage 20/24 gates remain authoritative
@@ -638,6 +662,12 @@ fallbacks.
 - add manifest construction and internal consistency validation;
 - add the CommonMark line-protocol property test requested in Phase A review.
 
+B1 binds assessment and unresolved artifacts by hash and deterministically
+rebuilds unresolved comments from the ledger. It does not yet validate critic
+semantics; that authority arrives with the isolated assessment contracts in B3.
+Therefore a B1 manifest, including `completed: true` in a fixture, is not by
+itself evidence of release readiness and is not consumed by production stages.
+
 ### Pre-B2: Upstream format contracts
 
 - update Stage 17 generation/validation so a new draft has unique canonical
@@ -657,6 +687,9 @@ fallbacks.
 - require the Pre-B2 upstream-format commit and a new Stage 17 artifact that
   passes strict parsing; do not use permissive parsing or automatic heading
   repair.
+- build `SectionValidationContext` only from canonical `references.bib`, allowed
+  Stage 12-14 artifacts, and validated `PaperRevisionConfig`; record source paths
+  and hashes for the citation and numeric whitelists in the Stage 19 manifest.
 
 ### B3: Bounded LLM planner and section proposer
 
@@ -668,6 +701,10 @@ fallbacks.
 
 Each milestone is a separate narrow commit and review boundary. No milestone may
 combine release-check changes.
+
+Phase C must independently compare the manifest `claim_scope` with the canonical
+Stage 9 experiment contract. A matching string inside the manifest is not
+self-authenticating.
 
 ## 13. Required Tests
 
@@ -707,6 +744,13 @@ combine release-check changes.
   fails;
 - Stage 10 smoke numbers do not enter the whitelist;
 - numeric equivalence `0.85 == 85% == 8.5e-1` is tested;
+- `85 percent` normalizes to `0.85`;
+- `2000 samples` and `2048 windows` are not exempt as citation years;
+- an ungrounded decimal metric inside math fails while structural integer math
+  remains outside the v1 numeric extractor;
+- plural Figure/Table/Equation references expand to individual targets;
+- Pandoc `@key` remains explicitly unsupported rather than being guessed by a
+  broad regular expression;
 - a number-word quantitative phrase is parsed or fails explicitly, and
   `0.475 -> 0.48` is rejected under the `1e-3` tolerance ceiling;
 - fabricated metric, removed figure/table ref, shrink, and growth fail;
@@ -751,7 +795,8 @@ For B0/B1, the implementation must at minimum pass:
   tests/test_release_check_v2.py -q
 .venv/bin/python -m py_compile \
   researchclaw/pipeline/manuscript_sections.py \
-  researchclaw/pipeline/sectional_revision.py
+  researchclaw/pipeline/sectional_revision.py \
+  researchclaw/pipeline/sectional_validation.py
 git diff --check
 ```
 
