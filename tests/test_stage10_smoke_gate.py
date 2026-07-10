@@ -15,8 +15,10 @@ from researchclaw.pipeline.stage_impls._code_generation import (
     _repair_harness_api_misuse,
     _repair_missing_dataset_origin,
     _run_stage10_smoke_gate,
+    _seal_selected_candidate,
     _scrub_packaged_experiment_outputs,
 )
+from researchclaw.experiment_runtime.contract import derive_contract, dump_contract
 from researchclaw.pipeline.stages import StageStatus
 
 
@@ -89,6 +91,15 @@ def _write_main(exp_dir: Path, *, include_dataset_origin: bool = True) -> None:
     )
 
 
+def _write_stage9_contract(run_dir: Path, cfg: RCConfig) -> None:
+    stage9 = run_dir / "stage-09"
+    stage9.mkdir(parents=True, exist_ok=True)
+    dump_contract(
+        derive_contract(cfg, {"datasets": ["synthetic traces"]}),
+        stage9 / "experiment_contract.yaml",
+    )
+
+
 def test_stage10_smoke_gate_writes_quarantined_results(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     stage_dir = run_dir / "stage-10"
@@ -133,6 +144,30 @@ def test_smoke_results_and_residual_sandbox_are_not_collected(
     assert collected["runs"] == []
     assert collected["metrics_summary"] == {}
     assert collected["best_run"] is None
+
+
+def test_stage10_selected_candidate_is_python_only(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    stage9 = run_dir / "stage-09"
+    stage10 = run_dir / "stage-10"
+    exp_dir = stage10 / "experiment"
+    cfg = _cfg(tmp_path)
+    stage9.mkdir(parents=True)
+    contract_path = stage9 / "experiment_contract.yaml"
+    dump_contract(derive_contract(cfg, {"datasets": ["synthetic"]}), contract_path)
+    _write_main(exp_dir)
+    (exp_dir / "requirements.txt").write_text("numpy\n", encoding="utf-8")
+    (exp_dir / "config.yaml").write_text("x: 1\n", encoding="utf-8")
+    (exp_dir / "results.json").write_text("{}", encoding="utf-8")
+
+    _seal_selected_candidate(stage10, exp_dir, contract_path)
+
+    selected = stage10 / "selected_candidate"
+    assert sorted(p.name for p in selected.iterdir()) == ["main.py"]
+    manifest = json.loads(
+        (stage10 / "selected_candidate_manifest.json").read_text(encoding="utf-8")
+    )
+    assert sorted(manifest["files"]) == ["main.py"]
 
 
 def test_stage10_smoke_gate_fails_without_dataset_origin(tmp_path: Path) -> None:
@@ -297,6 +332,8 @@ def test_smoke_blocker_propagates_to_stage_failed(
     run_dir = tmp_path / "run"
     stage_dir = run_dir / "stage-10"
     stage_dir.mkdir(parents=True)
+    cfg = _cfg(tmp_path)
+    _write_stage9_contract(run_dir, cfg)
     llm = _FakeLLM(
         "\n".join(
             [
@@ -323,7 +360,7 @@ def test_smoke_blocker_propagates_to_stage_failed(
     result = codegen._execute_code_generation(
         stage_dir,
         run_dir,
-        _cfg(tmp_path),
+        cfg,
         AdapterBundle(),
         llm=llm,
     )
@@ -338,6 +375,8 @@ def test_stage10_repairs_missing_dataset_origin_and_reruns_smoke(
     run_dir = tmp_path / "run"
     stage_dir = run_dir / "stage-10"
     stage_dir.mkdir(parents=True)
+    cfg = _cfg(tmp_path)
+    _write_stage9_contract(run_dir, cfg)
     llm = _FakeLLM(
         "\n".join(
             [
@@ -359,7 +398,7 @@ def test_stage10_repairs_missing_dataset_origin_and_reruns_smoke(
     result = codegen._execute_code_generation(
         stage_dir,
         run_dir,
-        _cfg(tmp_path),
+        cfg,
         AdapterBundle(),
         llm=llm,
     )
@@ -379,6 +418,8 @@ def test_stage10_repairs_harness_elapsed_before_smoke(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     stage_dir = run_dir / "stage-10"
     stage_dir.mkdir(parents=True)
+    cfg = _cfg(tmp_path)
+    _write_stage9_contract(run_dir, cfg)
     llm = _FakeLLM(
         "\n".join(
             [
@@ -404,7 +445,7 @@ def test_stage10_repairs_harness_elapsed_before_smoke(tmp_path: Path) -> None:
     result = codegen._execute_code_generation(
         stage_dir,
         run_dir,
-        _cfg(tmp_path),
+        cfg,
         AdapterBundle(),
         llm=llm,
     )

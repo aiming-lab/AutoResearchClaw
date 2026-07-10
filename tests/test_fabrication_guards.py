@@ -83,6 +83,13 @@ class TestStage12HardGuards:
         """Invoke _execute_experiment_run with mocked sandbox."""
         from researchclaw.pipeline.stage_impls._execution import _execute_experiment_run
 
+        # Phase 2: _load_sealed_candidate requires a real manifest. We mock it
+        # to return a temp dir with main.py so the Stage 12 hard-guard logic
+        # (zero-metrics / suspiciously-fast / crash-signal) is exercised.
+        _fake_candidate = stage_dir / "_fake_selected"
+        _fake_candidate.mkdir(parents=True, exist_ok=True)
+        (_fake_candidate / "main.py").write_text("print('test')\n", encoding="utf-8")
+
         # Mock the sandbox creation and run
         mock_sandbox = MagicMock()
         mock_sandbox.run.return_value = result_mock
@@ -90,6 +97,7 @@ class TestStage12HardGuards:
 
         with patch("researchclaw.experiment.factory.create_sandbox", return_value=mock_sandbox), \
              patch("researchclaw.pipeline.stage_impls._execution._ensure_sandbox_deps"), \
+             patch("researchclaw.pipeline.stage_impls._execution._load_sealed_candidate", return_value=_fake_candidate), \
              patch("researchclaw.pipeline.stage_impls._execution._read_prior_artifact", return_value=""), \
              patch("researchclaw.pipeline.stage_impls._execution._utcnow_iso", return_value="2026-01-01T00:00:00Z"):
             return _execute_experiment_run(

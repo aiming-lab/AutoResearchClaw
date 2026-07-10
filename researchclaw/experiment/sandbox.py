@@ -18,9 +18,11 @@ from researchclaw.hardware import is_metric_name
 logger = logging.getLogger(__name__)
 
 STALE_PROJECT_OUTPUT_FILES: frozenset[str] = frozenset(
-    {"results.json", "smoke_results.json"}
+    {"results.json", "smoke_results.json", "attempt.json", "metrics.json"}
 )
-STALE_PROJECT_OUTPUT_DIRS: frozenset[str] = frozenset({"runs"})
+STALE_PROJECT_OUTPUT_DIRS: frozenset[str] = frozenset(
+    {"runs", "attempts", "candidates", ".smoke_sandbox"}
+)
 
 
 def validate_entry_point(entry_point: str) -> str | None:

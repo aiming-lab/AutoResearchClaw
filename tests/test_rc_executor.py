@@ -12,6 +12,11 @@ import pytest
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.experiment_runtime.contract import (
+    derive_contract,
+    dump_contract,
+    sha256_file,
+)
 from researchclaw.pipeline import executor as rc_executor
 from researchclaw.pipeline.stages import Stage, StageStatus
 
@@ -88,6 +93,35 @@ def _write_prior_artifact(
     stage_dir = run_dir / f"stage-{stage_num:02d}"
     stage_dir.mkdir(parents=True, exist_ok=True)
     (stage_dir / filename).write_text(content, encoding="utf-8")
+
+
+def _write_experiment_contract(run_dir: Path, cfg: RCConfig) -> Path:
+    stage_dir = run_dir / "stage-09"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    contract_path = stage_dir / "experiment_contract.yaml"
+    dump_contract(derive_contract(cfg, {"datasets": ["synthetic traces"]}), contract_path)
+    return contract_path
+
+
+def _write_sealed_candidate(run_dir: Path, cfg: RCConfig, main_code: str) -> Path:
+    from researchclaw.pipeline.stage_impls._execution import _scaffold_sha256
+
+    contract_path = _write_experiment_contract(run_dir, cfg)
+    selected = run_dir / "stage-10" / "selected_candidate"
+    selected.mkdir(parents=True, exist_ok=True)
+    main = selected / "main.py"
+    main.write_text(main_code, encoding="utf-8")
+    manifest = {
+        "schema_version": 1,
+        "contract_sha256": sha256_file(contract_path),
+        "scaffold_sha256": _scaffold_sha256(),
+        "entry_point": "main.py",
+        "files": {"main.py": {"sha256": sha256_file(main)}},
+    }
+    (run_dir / "stage-10" / "selected_candidate_manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    return selected
 
 
 def test_executor_map_has_25_entries() -> None:
@@ -2377,6 +2411,7 @@ class TestComputeBudgetBlock:
 
         # Write exp_plan prior artifact
         _write_prior_artifact(run_dir, 10, "exp_plan.yaml", "objectives: test")
+        _write_experiment_contract(run_dir, cfg)
 
         # Capture what the LLM receives
         llm = FakeLLMClient(
@@ -2446,15 +2481,14 @@ class TestPartialTimeoutStatus:
         }
         cfg = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
 
-        # Write experiment code that prints some metrics then sleeps
-        exp_dir = run_dir / "stage-11" / "experiment"
-        exp_dir.mkdir(parents=True, exist_ok=True)
-        (exp_dir / "main.py").write_text(
+        # Write sealed candidate code that prints some metrics then sleeps
+        _write_sealed_candidate(
+            run_dir,
+            cfg,
             "import time, sys\n"
             "print('best_loss: 0.5', flush=True)\n"
             "sys.stdout.flush()\n"
             "time.sleep(10)\n",
-            encoding="utf-8",
         )
 
         stage_dir = run_dir / "stage-12"
@@ -3174,13 +3208,6 @@ class TestStdoutFailureDetection:
         # Create necessary structure
         run_dir = tmp_path / "run"
         run_dir.mkdir()
-        (run_dir / "stage-10").mkdir()
-        exp_dir = run_dir / "stage-10" / "experiment"
-        exp_dir.mkdir()
-        # Simple code that prints FAIL but exits 0
-        (exp_dir / "main.py").write_text(
-            "print('FAIL: NaN/divergence detected')\n", encoding="utf-8"
-        )
         (run_dir / "stage-11").mkdir()
         (run_dir / "stage-11" / "schedule.json").write_text("{}", encoding="utf-8")
 
@@ -3216,6 +3243,11 @@ class TestStdoutFailureDetection:
         }
         cfg = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
         adapters = AdapterBundle()
+        _write_sealed_candidate(
+            run_dir,
+            cfg,
+            "print('FAIL: NaN/divergence detected')\n",
+        )
 
         result = _execute_experiment_run(
             stage_dir, run_dir, cfg, adapters
@@ -3234,12 +3266,6 @@ class TestStdoutFailureDetection:
 
         run_dir = tmp_path / "run"
         run_dir.mkdir()
-        (run_dir / "stage-10").mkdir()
-        exp_dir = run_dir / "stage-10" / "experiment"
-        exp_dir.mkdir()
-        (exp_dir / "main.py").write_text(
-            "print('primary_metric: 0.95')\n", encoding="utf-8"
-        )
         (run_dir / "stage-11").mkdir()
         (run_dir / "stage-11" / "schedule.json").write_text("{}", encoding="utf-8")
 
@@ -3275,6 +3301,11 @@ class TestStdoutFailureDetection:
         }
         cfg = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
         adapters = AdapterBundle()
+        _write_sealed_candidate(
+            run_dir,
+            cfg,
+            "print('primary_metric: 0.95')\n",
+        )
 
         result = _execute_experiment_run(
             stage_dir, run_dir, cfg, adapters

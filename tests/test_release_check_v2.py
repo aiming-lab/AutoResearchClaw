@@ -47,6 +47,28 @@ def good_run(tmp_path: Path) -> Path:
     evidence_rel = "stage-14/experiment_summary.json"
     evidence_sha = ra.sha256_file(run / evidence_rel)
 
+    _write(
+        run / "stage-09" / "experiment_contract.yaml",
+        "\n".join(
+            [
+                "schema_version: 1",
+                "topic: release check fixture",
+                "claim_scope: pipeline_validation",
+                "dataset_origin: synthetic",
+                "primary_metric:",
+                "  key: loss",
+                "  direction: minimize",
+                "smoke_budget_sec: 60",
+                "run_budget_sec: 300",
+                "evaluator:",
+                "  owner: scaffold",
+                "  required_result_keys:",
+                "    - dataset_origin",
+                "    - metrics",
+            ]
+        ),
+    )
+
     # --- v1 artifacts ---
     _write(
         run / "pipeline_summary.json",
@@ -755,6 +777,53 @@ def test_no_real_data_waiver_downgrades_to_warning(good_run: Path) -> None:
     checker = _check(good_run)
     assert "no_real_data" not in _codes(checker)
     assert any(f.code == "no_real_data_waived" for f in checker.findings)
+
+
+def test_release_check_blocks_synthetic_research_release(good_run: Path) -> None:
+    contract = (good_run / "stage-09" / "experiment_contract.yaml").read_text(
+        encoding="utf-8"
+    )
+    contract = contract.replace(
+        "claim_scope: pipeline_validation", "claim_scope: research_release"
+    )
+    _write(good_run / "stage-09" / "experiment_contract.yaml", contract)
+    assert "synthetic_research_release_blocked" in _codes(_check(good_run))
+
+
+def test_release_check_warns_for_synthetic_research_release_waiver(good_run: Path) -> None:
+    contract = (good_run / "stage-09" / "experiment_contract.yaml").read_text(
+        encoding="utf-8"
+    )
+    contract = contract.replace(
+        "claim_scope: pipeline_validation", "claim_scope: research_release"
+    )
+    _write(good_run / "stage-09" / "experiment_contract.yaml", contract)
+    _write(
+        good_run / "waivers" / "synthetic_research_release.json",
+        {"reason": "benchmark-only methods paper", "approved_by": "human-reviewer"},
+    )
+    checker = _check(good_run)
+    assert "synthetic_research_release_blocked" not in _codes(checker)
+    assert any(
+        f.code == "synthetic_research_release_waived" for f in checker.findings
+    )
+
+
+def test_release_check_requires_experiment_contract(good_run: Path) -> None:
+    (good_run / "stage-09" / "experiment_contract.yaml").unlink()
+    assert "experiment_contract_missing" in _codes(_check(good_run))
+
+
+def test_evidence_path_rejects_stage10_smoke() -> None:
+    assert not release_check.is_allowed_claim_evidence_path(
+        "stage-10/smoke/smoke_results.json", "quantitative"
+    )
+
+
+def test_evidence_path_rejects_stage10_candidates() -> None:
+    assert not release_check.is_allowed_claim_evidence_path(
+        "stage-10/candidates/cand-001/attempt.json", "quantitative"
+    )
 
 
 def test_placeholder_paper_fails(good_run: Path) -> None:

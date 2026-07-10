@@ -12,6 +12,12 @@ from typing import Any
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.experiment_runtime.contract import (
+    ContractValidationError,
+    find_stage09_contract,
+    load_contract,
+    sha256_file,
+)
 from researchclaw.experiment.validator import (
     CodeValidation,
     format_issues_for_llm,
@@ -39,6 +45,12 @@ from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.prompts import PromptManager
 
 logger = logging.getLogger(__name__)
+
+_HARNESS_TEMPLATE = Path(__file__).resolve().parents[2] / "experiment" / "harness_template.py"
+_BANNED_SELECTED_FILES = frozenset(
+    {"results.json", "smoke_results.json", "attempt.json", "experiment_summary.json", "metrics.json"}
+)
+_BANNED_SELECTED_DIRS = frozenset({"runs", "attempts", "candidates", ".smoke_sandbox"})
 
 
 def _execute_resource_planning(
@@ -129,6 +141,98 @@ def _estimate_stage12_footprint_bytes(run_dir: Path) -> int:
     return total
 
 
+def _scaffold_sha256() -> str:
+    return sha256_file(_HARNESS_TEMPLATE)
+
+
+def _load_sealed_candidate(run_dir: Path) -> Path:
+    stage10_dir = run_dir / "stage-10"
+    manifest_path = stage10_dir / "selected_candidate_manifest.json"
+    if not manifest_path.is_file():
+        raise RuntimeError("sealed candidate manifest missing")
+    selected_dir = stage10_dir / "selected_candidate"
+    if not selected_dir.is_dir():
+        raise RuntimeError("sealed selected_candidate directory missing")
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError(f"sealed candidate manifest invalid: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise RuntimeError("sealed candidate manifest root must be an object")
+    if manifest.get("schema_version") != 1:
+        raise RuntimeError("sealed candidate manifest schema_version must be 1")
+
+    files_meta = manifest.get("files")
+    if not isinstance(files_meta, dict) or not files_meta:
+        raise RuntimeError("sealed candidate manifest files must be a non-empty object")
+
+    manifest_files = {str(name) for name in files_meta.keys()}
+    if any("/" in name or "\\" in name or name in {"", ".", ".."} for name in manifest_files):
+        raise RuntimeError("sealed candidate manifest contains unsafe file names")
+    if any(not name.endswith(".py") for name in manifest_files):
+        raise RuntimeError("sealed candidate manifest may list only Python files")
+
+    actual_files = {p.name for p in selected_dir.iterdir() if p.is_file()}
+    actual_dirs = {p.name for p in selected_dir.iterdir() if p.is_dir()}
+    extra_files = actual_files - manifest_files
+    missing_files = manifest_files - actual_files
+    if extra_files:
+        raise RuntimeError(
+            "unmanifested files in selected_candidate: " + ", ".join(sorted(extra_files))
+        )
+    if missing_files:
+        raise RuntimeError(
+            "manifested files missing from selected_candidate: "
+            + ", ".join(sorted(missing_files))
+        )
+    if actual_dirs:
+        raise RuntimeError(
+            "directories in selected_candidate: " + ", ".join(sorted(actual_dirs))
+        )
+    banned_files = actual_files & _BANNED_SELECTED_FILES
+    if banned_files:
+        raise RuntimeError(
+            "banned files in selected_candidate: " + ", ".join(sorted(banned_files))
+        )
+    banned_dirs = actual_dirs & _BANNED_SELECTED_DIRS
+    if banned_dirs:
+        raise RuntimeError(
+            "banned directories in selected_candidate: " + ", ".join(sorted(banned_dirs))
+        )
+
+    contract_path = find_stage09_contract(run_dir)
+    if contract_path is None:
+        raise RuntimeError("stage-09 experiment_contract.yaml missing")
+    try:
+        load_contract(contract_path)
+    except ContractValidationError as exc:
+        raise RuntimeError(f"stage-09 experiment_contract.yaml invalid: {exc}") from exc
+    expected_contract_sha = str(manifest.get("contract_sha256") or "").strip()
+    if not expected_contract_sha:
+        raise RuntimeError("sealed candidate manifest missing contract_sha256")
+    if sha256_file(contract_path) != expected_contract_sha:
+        raise RuntimeError("sealed candidate contract_sha256 mismatch")
+
+    expected_scaffold_sha = str(manifest.get("scaffold_sha256") or "").strip()
+    if not expected_scaffold_sha:
+        raise RuntimeError("sealed candidate manifest missing scaffold_sha256")
+    if _scaffold_sha256() != expected_scaffold_sha:
+        raise RuntimeError("sealed candidate scaffold_sha256 mismatch")
+
+    for name, meta in files_meta.items():
+        if not isinstance(meta, dict):
+            raise RuntimeError(f"sealed candidate manifest entry invalid for {name}")
+        expected_sha = str(meta.get("sha256") or "").strip()
+        if not expected_sha:
+            raise RuntimeError(f"sealed candidate manifest missing sha256 for {name}")
+        actual_sha = sha256_file(selected_dir / str(name))
+        if actual_sha != expected_sha:
+            raise RuntimeError(f"sha256 mismatch for selected_candidate/{name}")
+
+    return selected_dir
+
+
 def _execute_experiment_run(
     stage_dir: Path,
     run_dir: Path,
@@ -142,22 +246,48 @@ def _execute_experiment_run(
     from researchclaw.experiment.runner import ExperimentRunner
 
     schedule_text = _read_prior_artifact(run_dir, "schedule.json") or "{}"
-    # Try multi-file experiment directory first, fall back to single file
-    exp_dir_path = _read_prior_artifact(run_dir, "experiment/")
-    code_text = ""
-    if exp_dir_path and Path(exp_dir_path).is_dir():
-        main_path = Path(exp_dir_path) / "main.py"
-        if main_path.exists():
-            try:
-                code_text = main_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                code_text = ""
-    if not code_text:
-        code_text = _read_prior_artifact(run_dir, "experiment.py") or ""
-
     runs_dir = stage_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     mode = config.experiment.mode
+
+    # Phase 2 sealed-boundary invariant: Stage 12 reads only the Stage 10
+    # selected candidate after manifest/hash/default-deny verification.
+    # ColliderAgent mode uses a prompt file (collider_plan.md), not a Python
+    # selected candidate — its integrity model is different and does not
+    # require the sealed manifest gate (the contract gate still applies via
+    # release_check).
+    if mode != "collider_agent":
+        try:
+            sealed_candidate_dir = _load_sealed_candidate(run_dir)
+        except RuntimeError as exc:
+            error = str(exc)
+            logger.error("Stage 12: %s", error)
+            return StageResult(
+                stage=Stage.EXPERIMENT_RUN,
+                status=StageStatus.FAILED,
+                artifacts=(),
+                evidence_refs=(),
+                error=error,
+            )
+        exp_dir_path = str(sealed_candidate_dir)
+        code_text = ""
+        main_path = sealed_candidate_dir / "main.py"
+        try:
+            code_text = main_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            code_text = ""
+        if not code_text:
+            error = "sealed selected_candidate/main.py missing or unreadable"
+            return StageResult(
+                stage=Stage.EXPERIMENT_RUN,
+                status=StageStatus.FAILED,
+                artifacts=(),
+                evidence_refs=(),
+                error=error,
+            )
+    else:
+        exp_dir_path = ""
+        code_text = ""
 
     # ── ColliderAgent physics mode ─────────────────────────────────────
     if mode == "collider_agent":
@@ -316,6 +446,7 @@ def _execute_experiment_run(
             config.experiment, runs_dir / "sandbox", metadata_dir=stage_dir
         )
         # Use run_project for multi-file, run for single-file
+        sandbox_start_time = _time.time()
         if exp_dir_path and Path(exp_dir_path).is_dir():
             result = sandbox.run_project(
                 Path(exp_dir_path), timeout_sec=config.experiment.time_budget_sec
@@ -329,6 +460,19 @@ def _execute_experiment_run(
         sandbox_project = runs_dir / "sandbox" / "_project"
         results_json_path = sandbox_project / "results.json"
         if results_json_path.exists():
+            try:
+                if results_json_path.stat().st_mtime <= sandbox_start_time:
+                    error = "Stage 12 sandbox results.json is stale pre-execution output"
+                    logger.error(error)
+                    return StageResult(
+                        stage=Stage.EXPERIMENT_RUN,
+                        status=StageStatus.FAILED,
+                        artifacts=(),
+                        evidence_refs=(),
+                        error=error,
+                    )
+            except OSError:
+                pass
             try:
                 structured_results = json.loads(
                     results_json_path.read_text(encoding="utf-8")

@@ -12,6 +12,11 @@ import yaml
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.experiment_runtime.contract import (
+    ContractValidationError,
+    derive_contract,
+    dump_contract,
+)
 from researchclaw.llm.client import LLMClient
 from researchclaw.pipeline._helpers import (
     StageResult,
@@ -594,9 +599,28 @@ def _execute_experiment_design(
         yaml.dump(plan, default_flow_style=False, allow_unicode=True),
         encoding="utf-8",
     )
+    try:
+        contract = derive_contract(config, plan)
+        contract_sha = dump_contract(contract, stage_dir / "experiment_contract.yaml")
+        (stage_dir / "experiment_contract.sha256").write_text(
+            contract_sha + "\n", encoding="utf-8"
+        )
+    except ContractValidationError as exc:
+        error = f"Experiment contract invalid: {exc}"
+        logger.error("Stage 9: %s", error)
+        return StageResult(
+            stage=Stage.EXPERIMENT_DESIGN,
+            status=StageStatus.FAILED,
+            artifacts=("exp_plan.yaml",),
+            evidence_refs=("stage-09/exp_plan.yaml",),
+            error=error,
+        )
     return StageResult(
         stage=Stage.EXPERIMENT_DESIGN,
         status=StageStatus.DONE,
-        artifacts=("exp_plan.yaml",),
-        evidence_refs=("stage-09/exp_plan.yaml",),
+        artifacts=("exp_plan.yaml", "experiment_contract.yaml", "experiment_contract.sha256"),
+        evidence_refs=(
+            "stage-09/exp_plan.yaml",
+            "stage-09/experiment_contract.yaml",
+        ),
     )

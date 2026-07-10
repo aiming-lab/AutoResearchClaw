@@ -13,6 +13,12 @@ from typing import Any
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.experiment_runtime.contract import (
+    ContractValidationError,
+    find_stage09_contract,
+    load_contract,
+    sha256_file,
+)
 from researchclaw.experiment.validator import (
     CodeValidation,
     format_issues_for_llm,
@@ -39,6 +45,7 @@ from researchclaw.prompts import PromptManager
 logger = logging.getLogger(__name__)
 
 _DATASET_ORIGIN_BLOCKER = "Stage 10 smoke results missing explicit dataset_origin"
+_HARNESS_TEMPLATE = Path(__file__).resolve().parents[2] / "experiment" / "harness_template.py"
 
 # Improvement G: Continuous-action environments that are incompatible with DQN
 _CONTINUOUS_ENVS = {
@@ -170,6 +177,48 @@ def _latest_sandbox_results_json(sandbox: object) -> dict[str, Any] | None:
         if isinstance(data, dict):
             return data
     return None
+
+
+def _scaffold_sha256() -> str:
+    return sha256_file(_HARNESS_TEMPLATE)
+
+
+def _seal_selected_candidate(
+    stage_dir: Path,
+    exp_dir: Path,
+    contract_path: Path,
+) -> tuple[str, str]:
+    """Copy code-only selected candidate files and write the sealing manifest."""
+    selected_dir = stage_dir / "selected_candidate"
+    if selected_dir.exists():
+        shutil.rmtree(selected_dir)
+    selected_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_files: dict[str, dict[str, str]] = {}
+    for src in sorted(exp_dir.glob("*.py")):
+        if not src.is_file():
+            continue
+        dst = selected_dir / src.name
+        shutil.copy2(src, dst)
+        manifest_files[src.name] = {"sha256": sha256_file(dst)}
+
+    if not manifest_files:
+        raise RuntimeError("selected_candidate contains no Python files")
+    if "main.py" not in manifest_files:
+        raise RuntimeError("selected_candidate missing required main.py")
+
+    manifest = {
+        "schema_version": 1,
+        "generated": _utcnow_iso(),
+        "contract_path": "stage-09/experiment_contract.yaml",
+        "contract_sha256": sha256_file(contract_path),
+        "scaffold_sha256": _scaffold_sha256(),
+        "entry_point": "main.py",
+        "files": manifest_files,
+    }
+    manifest_path = stage_dir / "selected_candidate_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return "selected_candidate/", "selected_candidate_manifest.json"
 
 
 def _run_stage10_smoke_gate(
@@ -484,6 +533,27 @@ def _execute_code_generation(
     # ── End ColliderAgent bypass ──────────────────────────────────────────────
 
     exp_plan = _read_prior_artifact(run_dir, "exp_plan.yaml") or ""
+    contract_path = find_stage09_contract(run_dir)
+    if contract_path is None:
+        error = "Experiment contract missing: stage-09/experiment_contract.yaml"
+        return StageResult(
+            stage=Stage.CODE_GENERATION,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            evidence_refs=(),
+            error=error,
+        )
+    try:
+        load_contract(contract_path)
+    except ContractValidationError as exc:
+        error = f"Experiment contract invalid: {exc}"
+        return StageResult(
+            stage=Stage.CODE_GENERATION,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            evidence_refs=(),
+            error=error,
+        )
     metric = config.experiment.metric_key
     max_repair = 5  # BUG-14: Increased from 3 to give more chances for critical bugs
     files: dict[str, str] = {}
@@ -1904,6 +1974,34 @@ Multi-file experiment project with {len(files)} file(s): {file_list}
             evidence_refs=tuple(f"stage-10/{a}" for a in artifacts),
             error=f"Topic-experiment misalignment: {alignment_note}",
         )
+
+    try:
+        selected_artifact, manifest_artifact = _seal_selected_candidate(
+            stage_dir, exp_dir, contract_path
+        )
+    except Exception as exc:  # noqa: BLE001
+        error = f"Stage 10 sealing failed: {exc}"
+        logger.error(error)
+        artifacts.append("stage10_blockers.json")
+        (stage_dir / "stage10_blockers.json").write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "blockers": [error],
+                    "generated": _utcnow_iso(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return StageResult(
+            stage=Stage.CODE_GENERATION,
+            status=StageStatus.FAILED,
+            artifacts=tuple(artifacts),
+            evidence_refs=tuple(f"stage-10/{a}" for a in artifacts),
+            error=error,
+        )
+    artifacts.extend([selected_artifact, manifest_artifact])
 
     return StageResult(
         stage=Stage.CODE_GENERATION,

@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import yaml
+
 
 EXIT_PASS = 0
 EXIT_FAIL = 1
@@ -85,6 +87,7 @@ class ReleaseChecker:
         self.check_summary(summary, expected_final)
         self.check_degradation_signal(quality)
         self.check_quality_report(quality)
+        self.check_experiment_contract()
         self.check_fabrication_flags(fabrication)
         self.check_paper_artifacts()
         self.check_citations(verification)
@@ -194,6 +197,53 @@ class ReleaseChecker:
                 f"Quality verdict is not release-ready: {verdict!r}.",
                 "stage-20/quality_report.json",
             )
+
+    def check_experiment_contract(self) -> None:
+        contract_path = find_experiment_contract(self.run_dir)
+        if contract_path is None:
+            self.error(
+                "experiment_contract_missing",
+                "stage-09/experiment_contract.yaml is required for release checks.",
+                "stage-09/experiment_contract.yaml",
+            )
+            return
+        try:
+            payload = yaml.safe_load(contract_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            self.error(
+                "experiment_contract_invalid",
+                f"Cannot parse experiment contract: {exc}",
+                relpath(contract_path, self.run_dir),
+            )
+            return
+        if not isinstance(payload, dict):
+            self.error(
+                "experiment_contract_invalid",
+                "experiment contract root must be an object.",
+                relpath(contract_path, self.run_dir),
+            )
+            return
+        claim_scope = str(payload.get("claim_scope") or "").strip()
+        dataset_origin = str(payload.get("dataset_origin") or "").strip()
+        if claim_scope == "research_release" and dataset_origin == "synthetic":
+            waiver = self.read_json(
+                "waivers/synthetic_research_release.json", required=False
+            )
+            reason = str((waiver or {}).get("reason", "")).strip()
+            approved_by = str((waiver or {}).get("approved_by", "")).strip()
+            if waiver and reason and approved_by:
+                self.warning(
+                    "synthetic_research_release_waived",
+                    f"research_release + synthetic waived by {approved_by!r}: {reason[:200]}",
+                    "waivers/synthetic_research_release.json",
+                )
+            else:
+                self.error(
+                    "synthetic_research_release_blocked",
+                    "experiment_contract.yaml declares claim_scope=research_release "
+                    "with dataset_origin=synthetic and no valid waiver.",
+                    relpath(contract_path, self.run_dir),
+                )
 
     def check_fabrication_flags(self, fabrication: dict[str, Any] | None) -> None:
         if not fabrication:
@@ -1169,11 +1219,13 @@ def is_allowed_claim_evidence_path(rel: str, claim_type: str) -> bool:
     could become "evidence" merely by matching its own digest.
     """
     rel = str(rel or "")
+    parts = rel.split("/")
+    if parts and parts[0].startswith("stage-10"):
+        return False
     if claim_type == "citation":
         return rel == _CITATION_EVIDENCE_PATH
     if rel == _CITATION_EVIDENCE_PATH:
         return False
-    parts = rel.split("/")
     if rel in {"experiment_summary_best.json", "attempts/attempt_log.jsonl"}:
         return True
     if len(parts) == 2 and _is_stage_dir(parts[0], 14) and parts[1] == "experiment_summary.json":
@@ -1190,6 +1242,36 @@ def is_allowed_claim_evidence_path(rel: str, claim_type: str) -> bool:
 
 def _is_stage_dir(value: str, stage: int) -> bool:
     return bool(re.fullmatch(rf"stage-{stage}(?:_v\d+)?", value))
+
+
+def find_experiment_contract(run_dir: Path) -> Path | None:
+    direct = run_dir / "stage-09" / "experiment_contract.yaml"
+    if direct.is_file():
+        return direct
+    candidates = [
+        path
+        for path in run_dir.glob("stage-09_v*/experiment_contract.yaml")
+        if path.is_file()
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda p: _stage09_version(p.parent.name), reverse=True)[0]
+
+
+def _stage09_version(name: str) -> int:
+    if "_v" not in name:
+        return 0
+    try:
+        return int(name.rsplit("_v", 1)[1])
+    except ValueError:
+        return -1
+
+
+def relpath(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
 
 
 def sha256_of_file(path: Path) -> str | None:

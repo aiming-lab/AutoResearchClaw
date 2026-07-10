@@ -606,6 +606,9 @@ class ExperimentConfig:
     max_refine_duration_sec: int = 0  # 0 = auto (3× time_budget_sec)
     metric_key: str = "primary_metric"
     metric_direction: str = "minimize"
+    claim_scope: str = "pipeline_validation"
+    dataset_origin: str = "synthetic"
+    allow_legacy_experiment_path: bool = False
     keep_threshold: float = 0.0
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     docker: DockerSandboxConfig = field(default_factory=DockerSandboxConfig)
@@ -1337,6 +1340,11 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         max_refine_duration_sec=_safe_int(data.get("max_refine_duration_sec"), 0),
         metric_key=data.get("metric_key", "primary_metric"),
         metric_direction=data.get("metric_direction", "minimize"),
+        claim_scope=data.get("claim_scope", "pipeline_validation"),
+        dataset_origin=data.get("dataset_origin", "synthetic"),
+        allow_legacy_experiment_path=bool(
+            data.get("allow_legacy_experiment_path", False)
+        ),
         keep_threshold=_safe_float(data.get("keep_threshold"), 0.0),
         sandbox=SandboxConfig(
             python_path=sandbox_data.get("python_path", DEFAULT_PYTHON_PATH),

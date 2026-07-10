@@ -42,6 +42,7 @@ experiment:
   time_budget_sec: 300
   metric_key: detection_f1
   metric_direction: maximize
+  allow_legacy_experiment_path: false
   code_agent:
     exec_fix_timeout_sec: 180
     tree_search_eval_timeout_sec: 180
