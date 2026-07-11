@@ -6,6 +6,7 @@ breaks one gate at a time and asserts the corresponding failure code.
 
 from __future__ import annotations
 
+import builtins
 import json
 import sys
 from pathlib import Path
@@ -787,10 +788,10 @@ def test_release_check_blocks_synthetic_research_release(good_run: Path) -> None
         "dataset_origin: public", "dataset_origin: synthetic"
     )
     _write(good_run / "stage-09" / "experiment_contract.yaml", contract)
-    assert "synthetic_research_release_blocked" in _codes(_check(good_run))
+    assert "experiment_contract_invalid" in _codes(_check(good_run))
 
 
-def test_release_check_warns_for_synthetic_research_release_waiver(good_run: Path) -> None:
+def test_synthetic_research_release_waiver_is_ineffective(good_run: Path) -> None:
     contract = (good_run / "stage-09" / "experiment_contract.yaml").read_text(
         encoding="utf-8"
     )
@@ -803,9 +804,9 @@ def test_release_check_warns_for_synthetic_research_release_waiver(good_run: Pat
         {"reason": "benchmark-only methods paper", "approved_by": "human-reviewer"},
     )
     checker = _check(good_run)
-    assert "synthetic_research_release_blocked" not in _codes(checker)
-    assert any(
-        f.code == "synthetic_research_release_waived" for f in checker.findings
+    assert "experiment_contract_invalid" in _codes(checker)
+    assert all(
+        f.code != "synthetic_research_release_waived" for f in checker.findings
     )
 
 
@@ -840,6 +841,84 @@ def test_release_check_passes_research_release_claim_scope(good_run: Path) -> No
     # good_run fixture already has claim_scope: research_release
     checker = _check(good_run)
     assert "non_release_claim_scope" not in _codes(checker)
+
+
+def test_release_check_uses_runtime_contract_validation(good_run: Path) -> None:
+    contract_path = good_run / "stage-09" / "experiment_contract.yaml"
+    contract = contract_path.read_text(encoding="utf-8").replace(
+        "owner: scaffold", "owner: model"
+    )
+    _write(contract_path, contract)
+    assert "experiment_contract_invalid" in _codes(_check(good_run))
+
+
+def test_contract_validator_import_failure_is_explicit_finding(
+    good_run: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def fail_runtime_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "researchclaw.experiment_runtime":
+            raise ImportError("package unavailable")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fail_runtime_import)
+    checker = release_check.ReleaseChecker(
+        good_run, quality_threshold=5.0, allow_suspicious=False
+    )
+    checker.check_experiment_contract()
+    assert "experiment_contract_unverifiable" in _codes(checker)
+
+
+def test_invalid_utf8_contract_is_explicit_finding(good_run: Path) -> None:
+    (good_run / "stage-09" / "experiment_contract.yaml").write_bytes(b"\xff\xfe")
+    assert "experiment_contract_invalid" in _codes(_check(good_run))
+
+
+def test_local_hardware_research_release_contract_passes(good_run: Path) -> None:
+    contract_path = good_run / "stage-09" / "experiment_contract.yaml"
+    contract = contract_path.read_text(encoding="utf-8").replace(
+        "dataset_origin: public", "dataset_origin: local_hardware"
+    )
+    _write(contract_path, contract)
+    assert "experiment_contract_invalid" not in _codes(_check(good_run))
+    assert "non_release_claim_scope" not in _codes(_check(good_run))
+
+
+def test_contract_selector_prefers_direct_stage09(good_run: Path) -> None:
+    direct = good_run / "stage-09" / "experiment_contract.yaml"
+    versioned = direct.read_text(encoding="utf-8").replace(
+        "claim_scope: research_release", "claim_scope: exploratory"
+    )
+    _write(good_run / "stage-09_v2" / "experiment_contract.yaml", versioned)
+    assert "non_release_claim_scope" not in _codes(_check(good_run))
+
+
+def test_contract_selector_uses_latest_version_when_direct_missing(
+    good_run: Path,
+) -> None:
+    direct = good_run / "stage-09" / "experiment_contract.yaml"
+    release_contract = direct.read_text(encoding="utf-8")
+    direct.unlink()
+    _write(good_run / "stage-09_v1" / "experiment_contract.yaml", release_contract)
+    exploratory = release_contract.replace(
+        "claim_scope: research_release", "claim_scope: exploratory"
+    )
+    _write(good_run / "stage-09_v2" / "experiment_contract.yaml", exploratory)
+    assert "non_release_claim_scope" in _codes(_check(good_run))
+
+
+def test_contract_selector_orders_versions_numerically(good_run: Path) -> None:
+    direct = good_run / "stage-09" / "experiment_contract.yaml"
+    release_contract = direct.read_text(encoding="utf-8")
+    direct.unlink()
+    exploratory = release_contract.replace(
+        "claim_scope: research_release", "claim_scope: exploratory"
+    )
+    _write(good_run / "stage-09_v2" / "experiment_contract.yaml", exploratory)
+    _write(good_run / "stage-09_v10" / "experiment_contract.yaml", release_contract)
+    assert "non_release_claim_scope" not in _codes(_check(good_run))
 
 
 def test_evidence_path_rejects_stage10_smoke() -> None:

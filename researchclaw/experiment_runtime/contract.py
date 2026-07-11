@@ -169,7 +169,7 @@ def validate_contract_dict(data: dict[str, Any]) -> ExperimentContract:
 def load_contract(path: Path) -> ExperimentContract:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise ContractValidationError(f"cannot read contract: {exc}") from exc
     if not isinstance(raw, dict):
         raise ContractValidationError("contract root must be an object")
