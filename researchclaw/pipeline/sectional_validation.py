@@ -370,6 +370,8 @@ class SectionRevisionManifest:
     plan_sha256: str
     assessments_sha256: str
     unresolved_comments_sha256: str
+    validation_context_path: str
+    validation_context_sha256: str
     sections: tuple[SectionManifestEntry, ...]
     comment_counts: tuple[tuple[str, int], ...]
     merged_paper_sha256: str
@@ -388,6 +390,8 @@ class SectionRevisionManifest:
             "plan_sha256": self.plan_sha256,
             "assessments_sha256": self.assessments_sha256,
             "unresolved_comments_sha256": self.unresolved_comments_sha256,
+            "validation_context_path": self.validation_context_path,
+            "validation_context_sha256": self.validation_context_sha256,
             "sections": [entry.to_dict() for entry in self.sections],
             "comment_counts": dict(self.comment_counts),
             "merged_paper_sha256": self.merged_paper_sha256,
@@ -410,6 +414,8 @@ class SectionRevisionManifest:
                 "plan_sha256",
                 "assessments_sha256",
                 "unresolved_comments_sha256",
+                "validation_context_path",
+                "validation_context_sha256",
                 "sections",
                 "comment_counts",
                 "merged_paper_sha256",
@@ -441,6 +447,12 @@ class SectionRevisionManifest:
             unresolved_comments_sha256=_required_hash(
                 data["unresolved_comments_sha256"], "unresolved_comments_sha256"
             ),
+            validation_context_path=_required_str(
+                data["validation_context_path"], "validation_context_path"
+            ),
+            validation_context_sha256=_required_hash(
+                data["validation_context_sha256"], "validation_context_sha256"
+            ),
             sections=tuple(SectionManifestEntry.from_dict(item) for item in sections_raw),
             comment_counts=tuple(
                 (key, _required_int(counts_raw[key], f"comment_counts.{key}"))
@@ -457,6 +469,15 @@ class SectionRevisionManifest:
             _fail("claim_scope_invalid", "manifest claim_scope is invalid")
         _validate_relative_path(manifest.source_paper_path, "source_paper_path")
         _validate_relative_path(manifest.source_reviews_path, "source_reviews_path")
+        _validate_relative_path(
+            manifest.validation_context_path,
+            "validation_context_path",
+        )
+        if manifest.validation_context_path != "stage-19/validation_context.json":
+            _fail(
+                "validation_context_path_invalid",
+                "validation context path must be stage-19/validation_context.json",
+            )
         if any(count < 0 for _, count in manifest.comment_counts):
             _fail("manifest_comment_count_invalid", "comment counts cannot be negative")
         counts = dict(manifest.comment_counts)
@@ -750,6 +771,7 @@ def build_section_revision_manifest(
     assessments_text: str,
     unresolved_comments_text: str,
     completed: bool,
+    validation_context_text: str | None = None,
 ) -> SectionRevisionManifest:
     """Derive a manifest from authoritative inputs; never accept free-form counts."""
 
@@ -765,6 +787,7 @@ def build_section_revision_manifest(
         assessments_text=assessments_text,
         unresolved_comments_text=unresolved_comments_text,
         completed=completed,
+        validation_context_text=validation_context_text,
     )
     return SectionRevisionManifest.from_dict(manifest.to_dict())
 
@@ -802,6 +825,7 @@ def validate_section_revision_manifest(
     assessments_text: str,
     unresolved_comments_text: str,
     completed: bool,
+    validation_context_text: str | None = None,
 ) -> SectionRevisionManifest:
     """Recompute the complete manifest and reject any stale or edited field."""
 
@@ -822,6 +846,7 @@ def validate_section_revision_manifest(
         assessments_text=assessments_text,
         unresolved_comments_text=unresolved_comments_text,
         completed=completed,
+        validation_context_text=validation_context_text,
     )
     if parsed != expected:
         _fail(
@@ -844,14 +869,41 @@ def _construct_manifest(
     assessments_text: str,
     unresolved_comments_text: str,
     completed: bool,
+    validation_context_text: str | None,
 ) -> SectionRevisionManifest:
     if claim_scope not in _CLAIM_SCOPES:
         _fail("claim_scope_invalid", f"invalid claim scope {claim_scope!r}")
     _validate_relative_path(source_paper_path, "source_paper_path")
-    if not isinstance(assessments_text, str) or not isinstance(
-        unresolved_comments_text, str
+    if validation_context_text is None:
+        validation_context_text = _default_validation_context_text(document)
+    if not all(
+        isinstance(value, str)
+        for value in (
+            assessments_text,
+            unresolved_comments_text,
+            validation_context_text,
+        )
     ):
-        _fail("invalid_type", "assessment and unresolved artifacts must be strings")
+        _fail(
+            "invalid_type",
+            "assessment, unresolved, and validation context artifacts must be strings",
+        )
+    try:
+        validation_context_payload = json.loads(validation_context_text)
+    except json.JSONDecodeError as exc:
+        raise SectionalRevisionContractError(
+            (ContractIssue("validation_context_artifact_invalid", str(exc)),)
+        ) from exc
+    if not isinstance(validation_context_payload, dict):
+        _fail(
+            "validation_context_artifact_invalid",
+            "validation context artifact must be an object",
+        )
+    _validate_validation_context_payload(
+        validation_context_payload,
+        document=document,
+        section_metadata=section_metadata,
+    )
     try:
         unresolved_payload = json.loads(unresolved_comments_text)
     except json.JSONDecodeError as exc:
@@ -1062,6 +1114,8 @@ def _construct_manifest(
         plan_sha256=canonical_json_sha256(plan.to_dict()),
         assessments_sha256=_sha256(assessments_text),
         unresolved_comments_sha256=_sha256(unresolved_comments_text),
+        validation_context_path="stage-19/validation_context.json",
+        validation_context_sha256=_sha256(validation_context_text),
         sections=tuple(entries),
         comment_counts=tuple(
             (key, counts[key])
@@ -1070,6 +1124,162 @@ def _construct_manifest(
         merged_paper_sha256=merge_result.merged_paper_sha256,
         completed=completed,
     )
+
+
+def _default_validation_context_text(document: ManuscriptDocument) -> str:
+    config_payload = {
+        "max_section_retries": 1,
+        "min_length_ratio": 0.80,
+        "max_length_ratio": 1.75,
+    }
+    payload = {
+        "schema_version": 1,
+        "source_paper_sha256": document.source_sha256,
+        "allowed_citation_keys": [],
+        "grounded_numeric_values": [],
+        **config_payload,
+        "sources": [
+            {
+                "kind": "config",
+                "path": "config.paper_revision",
+                "sha256": canonical_json_sha256(config_payload),
+            }
+        ],
+    }
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2) + "\n"
+
+
+def _validate_validation_context_payload(
+    value: Mapping[str, Any],
+    *,
+    document: ManuscriptDocument,
+    section_metadata: Mapping[str, SectionManifestMetadata],
+) -> None:
+    data = _strict_object(
+        value,
+        expected={
+            "schema_version",
+            "source_paper_sha256",
+            "allowed_citation_keys",
+            "grounded_numeric_values",
+            "max_section_retries",
+            "min_length_ratio",
+            "max_length_ratio",
+            "sources",
+        },
+        context="validation context artifact",
+    )
+    if _required_int(data["schema_version"], "schema_version") != SCHEMA_VERSION:
+        _fail("schema_version", "validation context schema_version must be 1")
+    if _required_hash(
+        data["source_paper_sha256"], "source_paper_sha256"
+    ) != document.source_sha256:
+        _fail(
+            "validation_context_source_mismatch",
+            "validation context paper hash mismatches",
+        )
+    citation_keys = _string_tuple(
+        data["allowed_citation_keys"], "allowed_citation_keys"
+    )
+    if len(set(citation_keys)) != len(citation_keys):
+        _fail("validation_context_duplicate", "duplicate citation keys")
+    values_raw = data["grounded_numeric_values"]
+    if not isinstance(values_raw, list):
+        _fail("invalid_type", "grounded_numeric_values must be a list")
+    numeric_values: list[float] = []
+    for value_raw in values_raw:
+        if (
+            isinstance(value_raw, bool)
+            or not isinstance(value_raw, (int, float))
+            or not math.isfinite(float(value_raw))
+        ):
+            _fail(
+                "grounded_numeric_value_invalid",
+                "grounded numeric values must be finite numbers",
+            )
+        numeric_values.append(float(value_raw))
+    if len(set(numeric_values)) != len(numeric_values):
+        _fail("validation_context_duplicate", "duplicate grounded numeric values")
+    retries = _required_int(data["max_section_retries"], "max_section_retries")
+    if not 0 <= retries <= 3:
+        _fail("validation_context_config_invalid", "max_section_retries is unsafe")
+    min_ratio = _required_number(data["min_length_ratio"], "min_length_ratio")
+    max_ratio = _required_number(data["max_length_ratio"], "max_length_ratio")
+    if not 0.5 <= min_ratio <= 1.0 or not 1.0 <= max_ratio <= 3.0:
+        _fail("validation_context_config_invalid", "length ratios are unsafe")
+
+    sources_raw = data["sources"]
+    if not isinstance(sources_raw, list):
+        _fail("invalid_type", "validation context sources must be a list")
+    sources: list[tuple[str, str, str]] = []
+    for index, source_raw in enumerate(sources_raw):
+        source = _strict_object(
+            source_raw,
+            expected={"kind", "path", "sha256"},
+            context=f"validation context source {index}",
+        )
+        kind = _required_str(source["kind"], "source.kind")
+        path = _required_str(source["path"], "source.path")
+        digest = _required_hash(source["sha256"], "source.sha256")
+        if kind not in {"citations", "metrics", "config"}:
+            _fail("validation_context_source_invalid", f"invalid source kind {kind}")
+        if kind == "config":
+            if path != "config.paper_revision":
+                _fail(
+                    "validation_context_source_invalid",
+                    "config source path must be config.paper_revision",
+                )
+        else:
+            _validate_relative_path(path, "source.path")
+            if path.split("/", 1)[0].startswith("stage-10"):
+                _fail(
+                    "validation_context_stage10_source",
+                    "Stage 10 artifacts cannot ground sectional revision",
+                )
+        sources.append((kind, path, digest))
+    if len(set(sources)) != len(sources):
+        _fail("validation_context_duplicate", "duplicate context sources")
+    config_payload = {
+        "max_section_retries": retries,
+        "min_length_ratio": min_ratio,
+        "max_length_ratio": max_ratio,
+    }
+    expected_config_source = (
+        "config",
+        "config.paper_revision",
+        canonical_json_sha256(config_payload),
+    )
+    if sources.count(expected_config_source) != 1:
+        _fail(
+            "validation_context_config_source_mismatch",
+            "validation context config source hash mismatches",
+        )
+    if citation_keys and not any(kind == "citations" for kind, _, _ in sources):
+        _fail("validation_context_source_missing", "citation source is missing")
+    if numeric_values and not any(kind == "metrics" for kind, _, _ in sources):
+        _fail("validation_context_source_missing", "metric source is missing")
+    for metadata in section_metadata.values():
+        context = metadata.validation_context
+        if context is None:
+            continue
+        if context.allowed_citation_keys != frozenset(citation_keys):
+            _fail(
+                "validation_context_citation_mismatch",
+                "section citation whitelist mismatches context artifact",
+            )
+        if context.grounded_numeric_values != tuple(numeric_values):
+            _fail(
+                "validation_context_numeric_mismatch",
+                "section numeric whitelist mismatches context artifact",
+            )
+        if (
+            context.min_length_ratio != min_ratio
+            or context.max_length_ratio != max_ratio
+        ):
+            _fail(
+                "validation_context_ratio_mismatch",
+                "section length ratios mismatch context artifact",
+            )
 
 
 def _validate_section_manifest_state(
@@ -1535,6 +1745,16 @@ def _required_int(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         _fail("invalid_type", f"{field} must be an integer")
     return value
+
+
+def _required_number(value: object, field: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        _fail("invalid_type", f"{field} must be a finite number")
+    return float(value)
 
 
 def _required_bool(value: object, field: str) -> bool:

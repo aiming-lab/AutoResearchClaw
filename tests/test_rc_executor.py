@@ -13,7 +13,7 @@ from typing import Any, cast
 import pytest
 
 from researchclaw.adapters import AdapterBundle
-from researchclaw.config import RCConfig
+from researchclaw.config import PaperRevisionConfig, RCConfig
 from researchclaw.experiment_runtime.contract import (
     derive_contract,
     dump_contract,
@@ -157,6 +157,85 @@ class TestPaperRevisionRecovery:
             )
 
         assert not stale_revision.exists()
+
+    def test_sectional_flag_without_reviewed_provider_fails_without_legacy_fallback(
+        self,
+        tmp_path: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+    ) -> None:
+        run_dir = tmp_path / "run"
+        stage_dir = run_dir / "stage-19"
+        stage_dir.mkdir(parents=True)
+        _write_prior_artifact(
+            run_dir,
+            17,
+            "paper_draft.md",
+            "## Title\n\nExample\n\n## Method\n\nBody.\n",
+        )
+        _write_prior_artifact(
+            run_dir,
+            18,
+            "reviews.md",
+            "## Reviewer A\n\n### Actionable Revisions\n1. Clarify.\n",
+        )
+        stale_revision = stage_dir / "paper_revised.md"
+        stale_revision.write_text("stale legacy output", encoding="utf-8")
+        config = replace(
+            rc_config,
+            paper_revision=PaperRevisionConfig(sectional_enabled=True),
+        )
+        llm = FakeLLMClient("legacy revision must not run")
+
+        result = rc_executor._execute_paper_revision(
+            stage_dir,
+            run_dir,
+            config,
+            adapters,
+            llm=llm,
+        )
+
+        assert result.status == StageStatus.FAILED
+        assert "no reviewed provider" in (result.error or "")
+        assert not stale_revision.exists()
+        assert llm.calls == []
+
+    def test_sectional_flag_routes_to_deterministic_execution_shell(
+        self,
+        tmp_path: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+    ) -> None:
+        from tests.test_sectional_execution import (
+            _FakeProvider,
+            _config,
+            _prepare_run,
+        )
+
+        run_dir, stage_dir = _prepare_run(tmp_path)
+        config = replace(
+            rc_config,
+            paper_revision=_config(),
+            experiment=replace(
+                rc_config.experiment,
+                claim_scope="pipeline_validation",
+            ),
+        )
+        llm = FakeLLMClient("legacy revision must not run")
+
+        result = rc_executor._execute_paper_revision(
+            stage_dir,
+            run_dir,
+            config,
+            adapters,
+            llm=llm,
+            sectional_provider=_FakeProvider(),
+        )
+
+        assert result.status == StageStatus.DONE
+        assert result.decision == "sectional"
+        assert "paper_revised.md" in result.artifacts
+        assert llm.calls == []
 
     @pytest.mark.parametrize(
         ("claim_scope", "invalid_contract"),

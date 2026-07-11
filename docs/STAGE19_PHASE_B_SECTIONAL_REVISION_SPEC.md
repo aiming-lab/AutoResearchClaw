@@ -333,6 +333,8 @@ validation evidence.
   "plan_sha256": "...",
   "assessments_sha256": "...",
   "unresolved_comments_sha256": "...",
+  "validation_context_path": "stage-19/validation_context.json",
+  "validation_context_sha256": "...",
   "sections": [
     {
       "section_id": "s003-method-...",
@@ -360,7 +362,11 @@ Every source section appears exactly once and in parser order. Allowed section
 final states are `unchanged`, `accepted`, and `unresolved_original_preserved`.
 The manifest's comment counts must equal the final ledger and sum to input. All
 referenced attempt, validation, assessment, ledger, plan, and unresolved hashes
-must recompute from current Stage 19 files.
+must recompute from current Stage 19 files. `validation_context.json` records the
+sorted citation keys, grounded numeric values, length ratios, and canonical
+source path/SHA pairs used to construct every section validator. Its fixed path
+and byte hash are mandatory manifest fields; Stage 10 paths are never eligible
+context sources.
 
 ### 6.6 `resolution_assessments.jsonl`
 
@@ -699,6 +705,16 @@ fail Stage 18 rather than being dropped from the ledger.
 - build `SectionValidationContext` only from canonical `references.bib`, allowed
   Stage 12-14 artifacts, and validated `PaperRevisionConfig`; record source paths
   and hashes for the citation and numeric whitelists in the Stage 19 manifest.
+
+The B2 implementation is an execution shell, not an LLM implementation. The
+checked-in feature flag remains false. If sectional mode is enabled without an
+explicit reviewed provider, Stage 19 fails and never invokes the legacy
+whole-paper path. Tests inject a deterministic provider with distinct writer and
+critic identities; production LLM planning, proposal, and assessment adapters
+remain B3 work. Only a candidate that passes every hard validator and receives a
+resolved isolated assessment is merged. Strict claim scopes with unresolved
+required comments write an incomplete manifest and do not expose
+`paper_revised.md`.
 
 ### B3: Bounded LLM planner and section proposer
 

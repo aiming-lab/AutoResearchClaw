@@ -627,6 +627,15 @@ class ExperimentConfig:
 
 
 @dataclass(frozen=True)
+class PaperRevisionConfig:
+    sectional_enabled: bool = False
+    max_section_retries: int = 1
+    min_length_ratio: float = 0.80
+    max_length_ratio: float = 1.75
+    critic_model: str = ""
+
+
+@dataclass(frozen=True)
 class MetaClawPRMConfig:
     """PRM quality gate settings for MetaClaw bridge."""
 
@@ -897,6 +906,7 @@ class RCConfig:
     llm: LlmConfig
     security: SecurityConfig = field(default_factory=SecurityConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
+    paper_revision: PaperRevisionConfig = field(default_factory=PaperRevisionConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     prompts: PromptsConfig = field(default_factory=PromptsConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
@@ -949,6 +959,7 @@ class RCConfig:
         llm = data["llm"]
         security = data.get("security") or {}
         experiment = data.get("experiment") or {}
+        paper_revision = data.get("paper_revision") or {}
         export = data.get("export") or {}
         prompts = data.get("prompts") or {}
         web_search = data.get("web_search") or {}
@@ -1025,6 +1036,7 @@ class RCConfig:
                 q1_spine_max_rollbacks=int(security.get("q1_spine_max_rollbacks", 1)),
             ),
             experiment=_parse_experiment_config(experiment),
+            paper_revision=_parse_paper_revision_config(paper_revision),
             export=ExportConfig(
                 target_conference=export.get("target_conference", "neurips_2025"),
                 authors=export.get("authors", "Anonymous"),
@@ -1201,6 +1213,72 @@ def validate_config(
     if not _is_blank(exp_direction) and exp_direction not in ("minimize", "maximize"):
         errors.append(f"Invalid experiment.metric_direction: {exp_direction}")
 
+    revision = data.get("paper_revision")
+    if revision is not None:
+        if not isinstance(revision, dict):
+            errors.append("paper_revision must be a mapping")
+        else:
+            allowed_revision_fields = {
+                "sectional_enabled",
+                "max_section_retries",
+                "min_length_ratio",
+                "max_length_ratio",
+                "critic_model",
+            }
+            unknown_revision_fields = sorted(
+                set(revision) - allowed_revision_fields
+            )
+            if unknown_revision_fields:
+                errors.append(
+                    "Unknown paper_revision fields: "
+                    + ", ".join(unknown_revision_fields)
+                )
+            sectional_enabled = revision.get("sectional_enabled", False)
+            critic_model = revision.get("critic_model", "")
+            if not isinstance(sectional_enabled, bool):
+                errors.append("paper_revision.sectional_enabled must be a boolean")
+            if not isinstance(critic_model, str):
+                errors.append("paper_revision.critic_model must be a string")
+            if sectional_enabled is True and not (
+                isinstance(critic_model, str) and critic_model.strip()
+            ):
+                errors.append(
+                    "paper_revision.critic_model is required when sectional_enabled is true"
+                )
+            retries = revision.get("max_section_retries", 1)
+            if (
+                isinstance(retries, bool)
+                or not isinstance(retries, int)
+                or not 0 <= retries <= 3
+            ):
+                errors.append(
+                    "paper_revision.max_section_retries must be an integer in 0..3"
+                )
+            min_ratio = revision.get("min_length_ratio", 0.80)
+            max_ratio = revision.get("max_length_ratio", 1.75)
+            if (
+                isinstance(min_ratio, bool)
+                or not isinstance(min_ratio, (int, float))
+                or not 0.5 <= float(min_ratio) <= 1.0
+            ):
+                errors.append("paper_revision.min_length_ratio must be in 0.5..1.0")
+            if (
+                isinstance(max_ratio, bool)
+                or not isinstance(max_ratio, (int, float))
+                or not 1.0 <= float(max_ratio) <= 3.0
+            ):
+                errors.append("paper_revision.max_length_ratio must be in 1.0..3.0")
+            if (
+                isinstance(min_ratio, (int, float))
+                and not isinstance(min_ratio, bool)
+                and isinstance(max_ratio, (int, float))
+                and not isinstance(max_ratio, bool)
+                and float(min_ratio) > float(max_ratio)
+            ):
+                errors.append(
+                    "paper_revision.min_length_ratio must not exceed max_length_ratio"
+                )
+
     cli_agent_provider = _get_by_path(data, "experiment.cli_agent.provider")
     if (
         not _is_blank(cli_agent_provider)
@@ -1249,6 +1327,19 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
             session_name=acp_data.get("session_name", "researchclaw"),
             timeout_sec=int(acp_data.get("timeout_sec", 1800)),
         ),
+    )
+
+
+def _parse_paper_revision_config(data: dict[str, Any]) -> PaperRevisionConfig:
+    sectional_enabled = data.get("sectional_enabled", False)
+    if not isinstance(sectional_enabled, bool):
+        raise ValueError("paper_revision.sectional_enabled must be a boolean")
+    return PaperRevisionConfig(
+        sectional_enabled=sectional_enabled,
+        max_section_retries=_safe_int(data.get("max_section_retries"), 1),
+        min_length_ratio=_safe_float(data.get("min_length_ratio"), 0.80),
+        max_length_ratio=_safe_float(data.get("max_length_ratio"), 1.75),
+        critic_model=str(data.get("critic_model", "") or ""),
     )
 
 

@@ -338,7 +338,38 @@ def _execute_paper_revision(
     *,
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
+    sectional_provider: object | None = None,
 ) -> StageResult:
+    if config.paper_revision.sectional_enabled:
+        from researchclaw.pipeline.sectional_execution import (
+            execute_sectional_revision,
+        )
+
+        try:
+            outcome = execute_sectional_revision(
+                stage_dir=stage_dir,
+                run_dir=run_dir,
+                config=config.paper_revision,
+                claim_scope=_paper_revision_claim_scope(run_dir, config),
+                provider=sectional_provider,  # type: ignore[arg-type]
+            )
+        except Exception as exc:  # deterministic sectional stage boundary
+            logger.error("Stage 19 sectional revision failed: %s", exc)
+            return StageResult(
+                stage=Stage.PAPER_REVISION,
+                status=StageStatus.FAILED,
+                artifacts=(),
+                error=f"Sectional revision failed: {exc}",
+            )
+        return StageResult(
+            stage=Stage.PAPER_REVISION,
+            status=(StageStatus.DONE if outcome.completed else StageStatus.FAILED),
+            artifacts=outcome.artifacts,
+            error=outcome.error,
+            evidence_refs=tuple(f"stage-19/{name}" for name in outcome.artifacts),
+            decision="sectional" if outcome.completed else "sectional_incomplete",
+        )
+
     # A resumed run may reuse the same stage directory. Remove outputs owned by
     # this stage before any LLM call so a failed retry cannot expose artifacts
     # from an earlier attempt as current output.

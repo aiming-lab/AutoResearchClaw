@@ -168,6 +168,39 @@ def _manifest_inputs(*, final_status: str = "resolved", changed: bool = True):
                 validation_context=None,
             )
         }
+    config_payload = {
+        "max_section_retries": 1,
+        "min_length_ratio": 0.50,
+        "max_length_ratio": 2.50,
+    }
+    validation_context_text = json.dumps(
+        {
+            "schema_version": 1,
+            "source_paper_sha256": document.source_sha256,
+            "allowed_citation_keys": ["jones2023", "smith2024"],
+            "grounded_numeric_values": [0.475, 0.85, 2.0, 3.0],
+            **config_payload,
+            "sources": [
+                {
+                    "kind": "citations",
+                    "path": "stage-04/references.bib",
+                    "sha256": "a" * 64,
+                },
+                {
+                    "kind": "metrics",
+                    "path": "stage-12/runs/results.json",
+                    "sha256": "b" * 64,
+                },
+                {
+                    "kind": "config",
+                    "path": "config.paper_revision",
+                    "sha256": canonical_json_sha256(config_payload),
+                },
+            ],
+        },
+        sort_keys=True,
+        indent=2,
+    ) + "\n"
     return {
         "document": document,
         "merge_result": merge_result,
@@ -182,6 +215,7 @@ def _manifest_inputs(*, final_status: str = "resolved", changed: bool = True):
             sort_keys=True,
         ),
         "completed": True,
+        "validation_context_text": validation_context_text,
     }
 
 
@@ -533,6 +567,7 @@ def test_manifest_is_derived_from_authoritative_inputs_and_round_trips() -> None
         "plan_sha256",
         "assessments_sha256",
         "unresolved_comments_sha256",
+        "validation_context_sha256",
         "merged_paper_sha256",
     ],
 )
@@ -576,6 +611,63 @@ def test_manifest_rejects_section_order_and_nested_unknown_fields() -> None:
     with pytest.raises(SectionalRevisionContractError) as field_error:
         SectionRevisionManifest.from_dict(payload)
     assert any(issue.code == "unknown_fields" for issue in field_error.value.issues)
+
+
+def test_manifest_rejects_noncanonical_validation_context_path() -> None:
+    inputs = _manifest_inputs()
+    payload = build_section_revision_manifest(
+        claim_scope="pipeline_validation", **inputs
+    ).to_dict()
+    payload["validation_context_path"] = "stage-18/validation_context.json"
+
+    with pytest.raises(SectionalRevisionContractError) as caught:
+        SectionRevisionManifest.from_dict(payload)
+
+    assert any(
+        issue.code == "validation_context_path_invalid"
+        for issue in caught.value.issues
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_code"),
+    (
+        (lambda payload: payload.clear(), "missing_fields"),
+        (
+            lambda payload: payload["sources"].append(
+                {
+                    "kind": "metrics",
+                    "path": "stage-10/smoke/smoke_results.json",
+                    "sha256": "c" * 64,
+                }
+            ),
+            "validation_context_stage10_source",
+        ),
+        (
+            lambda payload: payload.__setitem__(
+                "grounded_numeric_values", [0.999]
+            ),
+            "validation_context_numeric_mismatch",
+        ),
+    ),
+)
+def test_manifest_rejects_invalid_or_unbound_validation_context(
+    mutate,
+    expected_code: str,
+) -> None:
+    inputs = _manifest_inputs()
+    payload = json.loads(inputs["validation_context_text"])
+    mutate(payload)
+    inputs["validation_context_text"] = json.dumps(
+        payload, sort_keys=True, indent=2
+    ) + "\n"
+
+    with pytest.raises(SectionalRevisionContractError) as caught:
+        build_section_revision_manifest(
+            claim_scope="pipeline_validation", **inputs
+        )
+
+    assert any(issue.code == expected_code for issue in caught.value.issues)
 
 
 def test_manifest_recomputes_assessment_and_unresolved_artifact_hashes() -> None:

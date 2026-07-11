@@ -3,13 +3,16 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import yaml
 
 from researchclaw.config import (
     ExperimentConfig,
+    PaperRevisionConfig,
     RCConfig,
     SandboxConfig,
     SecurityConfig,
     ValidationResult,
+    _parse_paper_revision_config,
     load_config,
     validate_config,
 )
@@ -128,6 +131,69 @@ def test_opencode_fallback_to_code_agent_is_parsed(tmp_path: Path):
     config = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
 
     assert config.experiment.opencode.fallback_to_code_agent is False
+
+
+def test_paper_revision_defaults_disabled_and_parses_bounded_values(
+    tmp_path: Path,
+) -> None:
+    config = RCConfig.from_dict(
+        _valid_config_data(), project_root=tmp_path, check_paths=False
+    )
+    assert config.paper_revision == PaperRevisionConfig()
+
+    data = _valid_config_data()
+    data["paper_revision"] = {
+        "sectional_enabled": True,
+        "max_section_retries": 2,
+        "min_length_ratio": 0.75,
+        "max_length_ratio": 1.5,
+        "critic_model": "critic-model",
+    }
+    parsed = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+    assert parsed.paper_revision.sectional_enabled is True
+    assert parsed.paper_revision.max_section_retries == 2
+    assert parsed.paper_revision.min_length_ratio == 0.75
+    assert parsed.paper_revision.max_length_ratio == 1.5
+
+
+@pytest.mark.parametrize(
+    ("paper_revision", "expected"),
+    (
+        ({"max_section_retries": -1}, "max_section_retries"),
+        ({"max_section_retries": 4}, "max_section_retries"),
+        ({"min_length_ratio": 0.49}, "min_length_ratio"),
+        ({"max_length_ratio": 3.01}, "max_length_ratio"),
+        ({"sectional_enabled": True}, "critic_model is required"),
+        ({"sectional_enabled": "false"}, "sectional_enabled must be a boolean"),
+        ({"critic_model": ["critic"]}, "critic_model must be a string"),
+        ({"unexpected": True}, "Unknown paper_revision fields"),
+    ),
+)
+def test_paper_revision_config_rejects_unsafe_or_unknown_values(
+    tmp_path: Path,
+    paper_revision: dict[str, object],
+    expected: str,
+) -> None:
+    data = _valid_config_data()
+    data["paper_revision"] = paper_revision
+
+    result = validate_config(data, project_root=tmp_path, check_paths=False)
+
+    assert result.ok is False
+    assert any(expected in error for error in result.errors)
+
+
+def test_checked_in_configs_do_not_enable_sectional_revision() -> None:
+    root = Path(__file__).resolve().parents[1]
+    for path in root.glob("config*.yaml"):
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        revision = payload.get("paper_revision") or {}
+        assert revision.get("sectional_enabled", False) is False, path
+
+
+def test_private_paper_revision_parser_does_not_coerce_non_boolean_flag() -> None:
+    with pytest.raises(ValueError, match="sectional_enabled must be a boolean"):
+        _parse_paper_revision_config({"sectional_enabled": "yes"})
 
 
 def test_validate_config_missing_required_fields_returns_errors(tmp_path: Path):
