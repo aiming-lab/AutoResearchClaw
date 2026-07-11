@@ -1134,12 +1134,24 @@ def execute_pipeline(
             writer_model=_writer_model,
             critic_model=_critic_model,
             critic_source=_critic_source,
+            sectional_writer_model=(
+                _writer_model if config.paper_revision.sectional_enabled else ""
+            ),
+            sectional_critic_model=(
+                config.paper_revision.critic_model
+                if config.paper_revision.sectional_enabled
+                else ""
+            ),
             external_review_path=_ext_path,
             sandbox=_sandbox_meta,
             environment_policy=_env_meta,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.warning("run_manifest.json write failed", exc_info=True)
+        if config.paper_revision.sectional_enabled:
+            raise RuntimeError(
+                "sectional run requires a complete run_manifest.json"
+            ) from exc
 
     # ── Event log: pipeline end ──
     if event_log:

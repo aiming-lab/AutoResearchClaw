@@ -265,6 +265,192 @@ class SectionValidationContext:
 
 
 @dataclass(frozen=True)
+class SectionAttemptRecord:
+    schema_version: int
+    attempt_id: str
+    section_id: str
+    source_section_sha256: str
+    comment_ids: tuple[str, ...]
+    resolution_comment_ids: tuple[str, ...]
+    writer_model: str
+    attempt: int
+    status: str
+    candidate_path: str | None
+    candidate_body_sha256: str | None
+    validation_report_path: str | None
+    validation_report_sha256: str | None
+    validator_codes: tuple[str, ...]
+    error_type: str | None
+    error: str | None
+    timestamp: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "attempt_id": self.attempt_id,
+            "section_id": self.section_id,
+            "source_section_sha256": self.source_section_sha256,
+            "comment_ids": list(self.comment_ids),
+            "resolution_comment_ids": list(self.resolution_comment_ids),
+            "writer_model": self.writer_model,
+            "attempt": self.attempt,
+            "status": self.status,
+            "candidate_path": self.candidate_path,
+            "candidate_body_sha256": self.candidate_body_sha256,
+            "validation_report_path": self.validation_report_path,
+            "validation_report_sha256": self.validation_report_sha256,
+            "validator_codes": list(self.validator_codes),
+            "error_type": self.error_type,
+            "error": self.error,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> SectionAttemptRecord:
+        data = _strict_object(
+            value,
+            expected={
+                "schema_version",
+                "attempt_id",
+                "section_id",
+                "source_section_sha256",
+                "comment_ids",
+                "resolution_comment_ids",
+                "writer_model",
+                "attempt",
+                "status",
+                "candidate_path",
+                "candidate_body_sha256",
+                "validation_report_path",
+                "validation_report_sha256",
+                "validator_codes",
+                "error_type",
+                "error",
+                "timestamp",
+            },
+            context="section attempt",
+        )
+        record = cls(
+            schema_version=_required_int(data["schema_version"], "schema_version"),
+            attempt_id=_required_str(data["attempt_id"], "attempt_id"),
+            section_id=_required_str(data["section_id"], "section_id"),
+            source_section_sha256=_required_hash(
+                data["source_section_sha256"], "source_section_sha256"
+            ),
+            comment_ids=_string_tuple(data["comment_ids"], "comment_ids"),
+            resolution_comment_ids=_string_tuple(
+                data["resolution_comment_ids"], "resolution_comment_ids"
+            ),
+            writer_model=_required_str(data["writer_model"], "writer_model"),
+            attempt=_required_int(data["attempt"], "attempt"),
+            status=_required_str(data["status"], "status"),
+            candidate_path=_optional_str(data["candidate_path"], "candidate_path"),
+            candidate_body_sha256=_optional_hash(
+                data["candidate_body_sha256"], "candidate_body_sha256"
+            ),
+            validation_report_path=_optional_str(
+                data["validation_report_path"], "validation_report_path"
+            ),
+            validation_report_sha256=_optional_hash(
+                data["validation_report_sha256"], "validation_report_sha256"
+            ),
+            validator_codes=_string_tuple(data["validator_codes"], "validator_codes"),
+            error_type=_optional_str(data["error_type"], "error_type"),
+            error=_optional_str(data["error"], "error"),
+            timestamp=_required_str(data["timestamp"], "timestamp"),
+        )
+        _validate_attempt_record(record)
+        return record
+
+
+@dataclass(frozen=True)
+class ResolutionAssessmentRecord:
+    schema_version: int
+    assessment_id: str
+    comment_id: str
+    section_id: str
+    attempt_id: str
+    critic_model: str
+    context_isolated: bool
+    verdict: str
+    reason: str
+    timestamp: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "assessment_id": self.assessment_id,
+            "comment_id": self.comment_id,
+            "section_id": self.section_id,
+            "attempt_id": self.attempt_id,
+            "critic_model": self.critic_model,
+            "context_isolated": self.context_isolated,
+            "verdict": self.verdict,
+            "reason": self.reason,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> ResolutionAssessmentRecord:
+        data = _strict_object(
+            value,
+            expected={
+                "schema_version",
+                "assessment_id",
+                "comment_id",
+                "section_id",
+                "attempt_id",
+                "critic_model",
+                "context_isolated",
+                "verdict",
+                "reason",
+                "timestamp",
+            },
+            context="resolution assessment",
+        )
+        record = cls(
+            schema_version=_required_int(data["schema_version"], "schema_version"),
+            assessment_id=_required_str(data["assessment_id"], "assessment_id"),
+            comment_id=_required_str(data["comment_id"], "comment_id"),
+            section_id=_required_str(data["section_id"], "section_id"),
+            attempt_id=_required_str(data["attempt_id"], "attempt_id"),
+            critic_model=_required_str(data["critic_model"], "critic_model"),
+            context_isolated=_required_bool(
+                data["context_isolated"], "context_isolated"
+            ),
+            verdict=_required_str(data["verdict"], "verdict"),
+            reason=_required_str(data["reason"], "reason"),
+            timestamp=_required_str(data["timestamp"], "timestamp"),
+        )
+        _validate_assessment_record(record)
+        return record
+
+
+def parse_section_attempts_jsonl(text: str) -> tuple[SectionAttemptRecord, ...]:
+    records = tuple(
+        SectionAttemptRecord.from_dict(value)
+        for value in _parse_strict_jsonl(text, "section attempts")
+    )
+    ids = [record.attempt_id for record in records]
+    if len(set(ids)) != len(ids):
+        _fail("duplicate_attempt_id", "section attempt IDs must be unique")
+    return records
+
+
+def parse_resolution_assessments_jsonl(
+    text: str,
+) -> tuple[ResolutionAssessmentRecord, ...]:
+    records = tuple(
+        ResolutionAssessmentRecord.from_dict(value)
+        for value in _parse_strict_jsonl(text, "resolution assessments")
+    )
+    ids = [record.assessment_id for record in records]
+    if len(set(ids)) != len(ids):
+        _fail("duplicate_assessment_id", "assessment IDs must be unique")
+    return records
+
+
+@dataclass(frozen=True)
 class ValidatedSectionReplacement:
     section_id: str
     body: str
@@ -362,12 +548,17 @@ class SectionRevisionManifest:
     schema_version: int
     mode: str
     claim_scope: str
+    experiment_contract_path: str
+    experiment_contract_sha256: str
+    writer_model: str
+    critic_model: str
     source_paper_path: str
     source_paper_sha256: str
     source_reviews_path: str
     source_reviews_sha256: str
     ledger_sha256: str
     plan_sha256: str
+    attempts_sha256: str
     assessments_sha256: str
     unresolved_comments_sha256: str
     validation_context_path: str
@@ -382,12 +573,17 @@ class SectionRevisionManifest:
             "schema_version": self.schema_version,
             "mode": self.mode,
             "claim_scope": self.claim_scope,
+            "experiment_contract_path": self.experiment_contract_path,
+            "experiment_contract_sha256": self.experiment_contract_sha256,
+            "writer_model": self.writer_model,
+            "critic_model": self.critic_model,
             "source_paper_path": self.source_paper_path,
             "source_paper_sha256": self.source_paper_sha256,
             "source_reviews_path": self.source_reviews_path,
             "source_reviews_sha256": self.source_reviews_sha256,
             "ledger_sha256": self.ledger_sha256,
             "plan_sha256": self.plan_sha256,
+            "attempts_sha256": self.attempts_sha256,
             "assessments_sha256": self.assessments_sha256,
             "unresolved_comments_sha256": self.unresolved_comments_sha256,
             "validation_context_path": self.validation_context_path,
@@ -406,12 +602,17 @@ class SectionRevisionManifest:
                 "schema_version",
                 "mode",
                 "claim_scope",
+                "experiment_contract_path",
+                "experiment_contract_sha256",
+                "writer_model",
+                "critic_model",
                 "source_paper_path",
                 "source_paper_sha256",
                 "source_reviews_path",
                 "source_reviews_sha256",
                 "ledger_sha256",
                 "plan_sha256",
+                "attempts_sha256",
                 "assessments_sha256",
                 "unresolved_comments_sha256",
                 "validation_context_path",
@@ -435,6 +636,14 @@ class SectionRevisionManifest:
             schema_version=_required_int(data["schema_version"], "schema_version"),
             mode=_required_str(data["mode"], "mode"),
             claim_scope=_required_str(data["claim_scope"], "claim_scope"),
+            experiment_contract_path=_required_str(
+                data["experiment_contract_path"], "experiment_contract_path"
+            ),
+            experiment_contract_sha256=_required_hash(
+                data["experiment_contract_sha256"], "experiment_contract_sha256"
+            ),
+            writer_model=_required_str(data["writer_model"], "writer_model"),
+            critic_model=_required_str(data["critic_model"], "critic_model"),
             source_paper_path=_required_str(data["source_paper_path"], "source_paper_path"),
             source_paper_sha256=_required_hash(data["source_paper_sha256"], "source_paper_sha256"),
             source_reviews_path=_required_str(data["source_reviews_path"], "source_reviews_path"),
@@ -443,6 +652,7 @@ class SectionRevisionManifest:
             ),
             ledger_sha256=_required_hash(data["ledger_sha256"], "ledger_sha256"),
             plan_sha256=_required_hash(data["plan_sha256"], "plan_sha256"),
+            attempts_sha256=_required_hash(data["attempts_sha256"], "attempts_sha256"),
             assessments_sha256=_required_hash(data["assessments_sha256"], "assessments_sha256"),
             unresolved_comments_sha256=_required_hash(
                 data["unresolved_comments_sha256"], "unresolved_comments_sha256"
@@ -467,6 +677,19 @@ class SectionRevisionManifest:
             _fail("manifest_mode_invalid", "manifest mode must be sectional")
         if manifest.claim_scope not in _CLAIM_SCOPES:
             _fail("claim_scope_invalid", "manifest claim_scope is invalid")
+        if manifest.writer_model == manifest.critic_model:
+            _fail("manifest_model_identity_invalid", "writer and critic must differ")
+        _validate_relative_path(
+            manifest.experiment_contract_path, "experiment_contract_path"
+        )
+        if not re.fullmatch(
+            r"stage-09(?:_v[1-9]\d*)?/experiment_contract\.yaml",
+            manifest.experiment_contract_path,
+        ):
+            _fail(
+                "experiment_contract_path_invalid",
+                "manifest experiment contract path is not canonical",
+            )
         _validate_relative_path(manifest.source_paper_path, "source_paper_path")
         _validate_relative_path(manifest.source_reviews_path, "source_reviews_path")
         _validate_relative_path(
@@ -766,8 +989,13 @@ def build_section_revision_manifest(
     plan: RevisionPlan,
     reviews: str,
     claim_scope: str,
+    experiment_contract_path: str,
+    experiment_contract_sha256: str,
+    writer_model: str,
+    critic_model: str,
     source_paper_path: str,
     section_metadata: Mapping[str, SectionManifestMetadata],
+    attempts_text: str,
     assessments_text: str,
     unresolved_comments_text: str,
     completed: bool,
@@ -782,8 +1010,13 @@ def build_section_revision_manifest(
         plan=plan,
         reviews=reviews,
         claim_scope=claim_scope,
+        experiment_contract_path=experiment_contract_path,
+        experiment_contract_sha256=experiment_contract_sha256,
+        writer_model=writer_model,
+        critic_model=critic_model,
         source_paper_path=source_paper_path,
         section_metadata=section_metadata,
+        attempts_text=attempts_text,
         assessments_text=assessments_text,
         unresolved_comments_text=unresolved_comments_text,
         completed=completed,
@@ -820,8 +1053,13 @@ def validate_section_revision_manifest(
     plan: RevisionPlan,
     reviews: str,
     claim_scope: str,
+    experiment_contract_path: str,
+    experiment_contract_sha256: str,
+    writer_model: str,
+    critic_model: str,
     source_paper_path: str,
     section_metadata: Mapping[str, SectionManifestMetadata],
+    attempts_text: str,
     assessments_text: str,
     unresolved_comments_text: str,
     completed: bool,
@@ -841,8 +1079,13 @@ def validate_section_revision_manifest(
         plan=plan,
         reviews=reviews,
         claim_scope=claim_scope,
+        experiment_contract_path=experiment_contract_path,
+        experiment_contract_sha256=experiment_contract_sha256,
+        writer_model=writer_model,
+        critic_model=critic_model,
         source_paper_path=source_paper_path,
         section_metadata=section_metadata,
+        attempts_text=attempts_text,
         assessments_text=assessments_text,
         unresolved_comments_text=unresolved_comments_text,
         completed=completed,
@@ -864,8 +1107,13 @@ def _construct_manifest(
     plan: RevisionPlan,
     reviews: str,
     claim_scope: str,
+    experiment_contract_path: str,
+    experiment_contract_sha256: str,
+    writer_model: str,
+    critic_model: str,
     source_paper_path: str,
     section_metadata: Mapping[str, SectionManifestMetadata],
+    attempts_text: str,
     assessments_text: str,
     unresolved_comments_text: str,
     completed: bool,
@@ -873,6 +1121,12 @@ def _construct_manifest(
 ) -> SectionRevisionManifest:
     if claim_scope not in _CLAIM_SCOPES:
         _fail("claim_scope_invalid", f"invalid claim scope {claim_scope!r}")
+    _validate_relative_path(experiment_contract_path, "experiment_contract_path")
+    _required_hash(experiment_contract_sha256, "experiment_contract_sha256")
+    writer_model = _required_str(writer_model, "writer_model")
+    critic_model = _required_str(critic_model, "critic_model")
+    if writer_model == critic_model:
+        _fail("manifest_model_identity_invalid", "writer and critic must differ")
     _validate_relative_path(source_paper_path, "source_paper_path")
     if validation_context_text is None:
         validation_context_text = _default_validation_context_text(document)
@@ -880,14 +1134,21 @@ def _construct_manifest(
         isinstance(value, str)
         for value in (
             assessments_text,
+            attempts_text,
             unresolved_comments_text,
             validation_context_text,
         )
     ):
         _fail(
             "invalid_type",
-            "assessment, unresolved, and validation context artifacts must be strings",
+            "attempt, assessment, unresolved, and validation context artifacts must be strings",
         )
+    attempt_records = parse_section_attempts_jsonl(attempts_text)
+    assessment_records = parse_resolution_assessments_jsonl(assessments_text)
+    if any(record.writer_model != writer_model for record in attempt_records):
+        _fail("manifest_writer_model_mismatch", "attempt writer model is inconsistent")
+    if any(record.critic_model != critic_model for record in assessment_records):
+        _fail("manifest_critic_model_mismatch", "assessment critic model is inconsistent")
     try:
         validation_context_payload = json.loads(validation_context_text)
     except json.JSONDecodeError as exc:
@@ -1106,12 +1367,17 @@ def _construct_manifest(
         schema_version=SCHEMA_VERSION,
         mode="sectional",
         claim_scope=claim_scope,
+        experiment_contract_path=experiment_contract_path,
+        experiment_contract_sha256=experiment_contract_sha256,
+        writer_model=writer_model,
+        critic_model=critic_model,
         source_paper_path=source_paper_path,
         source_paper_sha256=document.source_sha256,
         source_reviews_path=ledger.source_reviews_path,
         source_reviews_sha256=ledger.source_reviews_sha256,
         ledger_sha256=canonical_json_sha256(ledger.to_dict()),
         plan_sha256=canonical_json_sha256(plan.to_dict()),
+        attempts_sha256=_sha256(attempts_text),
         assessments_sha256=_sha256(assessments_text),
         unresolved_comments_sha256=_sha256(unresolved_comments_text),
         validation_context_path="stage-19/validation_context.json",
@@ -1722,6 +1988,114 @@ def _span_overlaps(span: tuple[int, int], occupied: Sequence[tuple[int, int]]) -
     return any(span[0] < end and start < span[1] for start, end in occupied)
 
 
+def _validate_attempt_record(record: SectionAttemptRecord) -> None:
+    if record.schema_version != SCHEMA_VERSION:
+        _fail("schema_version", "section attempt schema_version must be 1")
+    if not 1 <= record.attempt <= 4 or record.attempt_id != make_attempt_id(
+        record.section_id, record.attempt
+    ):
+        _fail(
+            "attempt_id_invalid",
+            "attempt identity must match section and bounded ordinal 1..4",
+        )
+    if not record.comment_ids:
+        _fail("attempt_state_invalid", "section attempt requires assigned comments")
+    if len(set(record.comment_ids)) != len(record.comment_ids):
+        _fail("duplicate_comment_id", "attempt comment IDs must be unique")
+    if len(set(record.resolution_comment_ids)) != len(record.resolution_comment_ids):
+        _fail("duplicate_comment_id", "attempt resolution IDs must be unique")
+    if not set(record.resolution_comment_ids).issubset(record.comment_ids):
+        _fail("unknown_comment_id", "attempt resolution IDs must be assigned comments")
+    if len(set(record.validator_codes)) != len(record.validator_codes):
+        _fail("duplicate_validator_code", "attempt validator codes must be unique")
+    if not set(record.validator_codes).issubset(_CHECK_CODES):
+        _fail("validator_code_invalid", "attempt contains an unknown validator code")
+    if record.status not in {"accepted", "rejected", "transport_failed"}:
+        _fail("attempt_status_invalid", "attempt status is invalid")
+
+    if record.status == "transport_failed":
+        if any(
+            value is not None
+            for value in (
+                record.candidate_path,
+                record.candidate_body_sha256,
+                record.validation_report_path,
+                record.validation_report_sha256,
+            )
+        ):
+            _fail("attempt_state_invalid", "transport failure cannot own artifacts")
+        if record.resolution_comment_ids or record.validator_codes:
+            _fail("attempt_state_invalid", "transport failure cannot report validation")
+        if record.error_type is None or record.error is None:
+            _fail("attempt_state_invalid", "transport failure requires error details")
+        return
+
+    expected_candidate = (
+        f"stage-19/sections/{record.section_id}.attempt-{record.attempt}.md"
+    )
+    expected_validation = (
+        "stage-19/section_validation/"
+        f"{record.section_id}.attempt-{record.attempt}.json"
+    )
+    if record.candidate_path != expected_candidate:
+        _fail("attempt_path_invalid", "candidate path is not canonical")
+    if record.validation_report_path != expected_validation:
+        _fail("attempt_path_invalid", "validation report path is not canonical")
+    if record.candidate_body_sha256 is None or record.validation_report_sha256 is None:
+        _fail("attempt_state_invalid", "non-transport attempt requires artifact hashes")
+    _validate_relative_path(record.candidate_path, "candidate_path")
+    _validate_relative_path(record.validation_report_path, "validation_report_path")
+    if record.status == "accepted":
+        if record.validator_codes or record.error_type is not None or record.error is not None:
+            _fail("attempt_state_invalid", "accepted attempt cannot contain failures")
+    elif record.error is None:
+        _fail("attempt_state_invalid", "rejected attempt requires an error")
+
+
+def _validate_assessment_record(record: ResolutionAssessmentRecord) -> None:
+    if record.schema_version != SCHEMA_VERSION:
+        _fail("schema_version", "assessment schema_version must be 1")
+    if record.assessment_id != f"ra-{record.comment_id}-{record.attempt_id}":
+        _fail("assessment_id_invalid", "assessment identity is not canonical")
+    if not _attempt_id_matches(record.attempt_id, record.section_id):
+        _fail("attempt_id_invalid", "assessment attempt does not match section")
+    if not record.context_isolated:
+        _fail("critic_isolation_invalid", "assessment context must be isolated")
+    if record.verdict not in {"resolved", "unresolved"}:
+        _fail("assessment_verdict_invalid", "assessment verdict is invalid")
+
+
+def _parse_strict_jsonl(text: str, context: str) -> tuple[dict[str, Any], ...]:
+    if not isinstance(text, str):
+        _fail("invalid_type", f"{context} must be text")
+    if not text:
+        return ()
+    records: list[dict[str, Any]] = []
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    for line_no, line in enumerate(lines, start=1):
+        if not line.strip():
+            _fail("jsonl_blank_line", f"{context} line {line_no} is blank")
+        try:
+            value = json.loads(line, object_pairs_hook=_reject_duplicate_json_keys)
+        except (json.JSONDecodeError, ValueError) as exc:
+            _fail("jsonl_invalid", f"{context} line {line_no} is invalid: {exc}")
+        if not isinstance(value, dict):
+            _fail("invalid_type", f"{context} line {line_no} must be an object")
+        records.append(value)
+    return tuple(records)
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
 def _strict_object(value: object, *, expected: set[str], context: str) -> Mapping[str, Any]:
     if not isinstance(value, dict):
         _fail("invalid_type", f"{context} must be an object")
@@ -1774,6 +2148,12 @@ def _optional_hash(value: object, field: str) -> str | None:
     if value is None:
         return None
     return _required_hash(value, field)
+
+
+def _optional_str(value: object, field: str) -> str | None:
+    if value is None:
+        return None
+    return _required_str(value, field)
 
 
 def _string_tuple(value: object, field: str) -> tuple[str, ...]:

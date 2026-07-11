@@ -98,6 +98,82 @@ def test_execute_pipeline_runs_stages_in_sequence(
     assert all(r.status == StageStatus.DONE for r in results)
 
 
+def test_sectional_run_manifest_records_role_specific_models(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    monkeypatch.setattr(
+        rc_runner,
+        "execute_stage",
+        lambda stage, **kwargs: _done(stage),
+    )
+    config = dataclasses.replace(
+        rc_config,
+        llm=dataclasses.replace(
+            rc_config.llm,
+            primary_model="section-writer",
+            critic_model="stage15-critic",
+        ),
+        paper_revision=dataclasses.replace(
+            rc_config.paper_revision,
+            sectional_enabled=True,
+            critic_model="section-critic",
+        ),
+    )
+
+    rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-sectional-manifest",
+        config=config,
+        adapters=adapters,
+    )
+
+    manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    reviewer = manifest["reviewer"]
+    assert reviewer["writer_model"] == "section-writer"
+    assert reviewer["critic_model"] == "stage15-critic"
+    assert reviewer["sectional_writer_model"] == "section-writer"
+    assert reviewer["sectional_critic_model"] == "section-critic"
+
+
+def test_sectional_run_manifest_write_failure_is_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    from researchclaw.pipeline import release_artifacts
+
+    monkeypatch.setattr(
+        rc_runner,
+        "execute_stage",
+        lambda stage, **kwargs: _done(stage),
+    )
+
+    def fail_manifest(*args, **kwargs):
+        raise OSError("manifest write failed")
+
+    monkeypatch.setattr(release_artifacts, "write_run_manifest", fail_manifest)
+    config = dataclasses.replace(
+        rc_config,
+        paper_revision=dataclasses.replace(
+            rc_config.paper_revision,
+            sectional_enabled=True,
+            critic_model="section-critic",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="requires a complete run_manifest"):
+        rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-sectional-manifest-failure",
+            config=config,
+            adapters=adapters,
+        )
+
+
 def test_execute_pipeline_stops_on_failed_stage(
     monkeypatch: pytest.MonkeyPatch,
     run_dir: Path,

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from researchclaw.config import PaperRevisionConfig
+from researchclaw.experiment_runtime.contract import dump_contract, validate_contract_dict
 from researchclaw.pipeline.sectional_execution import (
     ResolutionAssessment,
     SectionProposal,
@@ -108,7 +109,11 @@ class _FakeProvider:
         )
 
 
-def _prepare_run(tmp_path: Path) -> tuple[Path, Path]:
+def _prepare_run(
+    tmp_path: Path,
+    *,
+    claim_scope: str = "pipeline_validation",
+) -> tuple[Path, Path]:
     run_dir = tmp_path / "run"
     stage_dir = run_dir / "stage-19"
     stage_dir.mkdir(parents=True)
@@ -134,6 +139,33 @@ def _prepare_run(tmp_path: Path) -> tuple[Path, Path]:
     stage10 = run_dir / "stage-10" / "smoke" / "smoke_results.json"
     stage10.parent.mkdir(parents=True)
     stage10.write_text(json.dumps({"metrics": {"fabricated": 0.99}}), encoding="utf-8")
+    contract = validate_contract_dict(
+        {
+            "schema_version": 1,
+            "topic": "sectional execution fixture",
+            "claim_scope": claim_scope,
+            "dataset_origin": (
+                "public" if claim_scope == "research_release" else "synthetic"
+            ),
+            "dataset_name": (
+                "fixture-public" if claim_scope == "research_release" else "fixture-synthetic"
+            ),
+            "primary_metric": {"key": "detection_f1", "direction": "maximize"},
+            "smoke_budget_sec": 60,
+            "run_budget_sec": 300,
+            "allowed_inputs": [],
+            "allowed_outputs": [{"path": "results.json", "required": True}],
+            "evaluator": {
+                "owner": "scaffold",
+                "required_result_keys": ["dataset_origin", "metrics"],
+            },
+            "safety": {},
+            "sealing": {},
+        }
+    )
+    contract_path = run_dir / "stage-09" / "experiment_contract.yaml"
+    contract_path.parent.mkdir(parents=True, exist_ok=True)
+    dump_contract(contract, contract_path)
     return run_dir, stage_dir
 
 
@@ -226,10 +258,24 @@ def test_pipeline_validation_writes_complete_hash_bound_artifacts(tmp_path: Path
         (stage_dir / "section_revision_manifest.json").read_text(encoding="utf-8")
     )
     context_bytes = (stage_dir / "validation_context.json").read_bytes()
+    attempts_bytes = (stage_dir / "section_attempts.jsonl").read_bytes()
+    contract_path = run_dir / manifest["experiment_contract_path"]
     assert manifest["completed"] is True
+    assert manifest["experiment_contract_path"] == "stage-09/experiment_contract.yaml"
+    assert manifest["experiment_contract_sha256"] == hashlib.sha256(
+        contract_path.read_bytes()
+    ).hexdigest()
+    assert manifest["attempts_sha256"] == hashlib.sha256(attempts_bytes).hexdigest()
+    assert manifest["writer_model"] == "writer-model"
+    assert manifest["critic_model"] == "critic-model"
     assert manifest["validation_context_path"] == "stage-19/validation_context.json"
     assert manifest["validation_context_sha256"] == hashlib.sha256(context_bytes).hexdigest()
     assert (stage_dir / "paper_revised.md").is_file()
+    attempt = json.loads(
+        (stage_dir / "section_attempts.jsonl").read_text(encoding="utf-8")
+    )
+    assert attempt["candidate_path"].startswith("stage-19/sections/")
+    assert attempt["resolution_comment_ids"] == attempt["comment_ids"]
 
 
 def test_pipeline_validation_preserves_original_when_critic_rejects(
@@ -263,7 +309,7 @@ def test_pipeline_validation_preserves_original_when_critic_rejects(
 def test_research_release_does_not_expose_paper_with_unresolved_required_comment(
     tmp_path: Path,
 ) -> None:
-    run_dir, stage_dir = _prepare_run(tmp_path)
+    run_dir, stage_dir = _prepare_run(tmp_path, claim_scope="research_release")
 
     result = execute_sectional_revision(
         stage_dir=stage_dir,
@@ -338,6 +384,31 @@ def test_context_source_mutation_during_provider_execution_fails_closed(
             stage_dir=stage_dir,
             run_dir=run_dir,
             config=replace(_config(), max_section_retries=0),
+            claim_scope="pipeline_validation",
+            provider=MutatingProvider(),
+        )
+
+
+def test_contract_mutation_during_provider_execution_fails_closed(
+    tmp_path: Path,
+) -> None:
+    run_dir, stage_dir = _prepare_run(tmp_path)
+
+    class MutatingProvider(_FakeProvider):
+        def propose(self, **kwargs):
+            result = super().propose(**kwargs)
+            contract_path = run_dir / "stage-09" / "experiment_contract.yaml"
+            contract_path.write_text(
+                contract_path.read_text(encoding="utf-8") + "# changed\n",
+                encoding="utf-8",
+            )
+            return result
+
+    with pytest.raises(RuntimeError, match="Stage 9 contract changed"):
+        execute_sectional_revision(
+            stage_dir=stage_dir,
+            run_dir=run_dir,
+            config=_config(),
             claim_scope="pipeline_validation",
             provider=MutatingProvider(),
         )

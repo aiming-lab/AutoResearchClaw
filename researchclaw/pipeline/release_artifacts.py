@@ -449,6 +449,8 @@ def write_run_manifest(
     writer_model: str,
     critic_model: str,
     critic_source: str,
+    sectional_writer_model: str = "",
+    sectional_critic_model: str = "",
     external_review_path: str = "",
     sandbox: dict[str, Any] | None = None,
     environment_policy: dict[str, Any] | None = None,
@@ -484,6 +486,8 @@ def write_run_manifest(
             "writer_model": writer_model,
             "critic_model": critic_model,
             "critic_source": critic_source,  # "model" | "external" | "none"
+            "sectional_writer_model": sectional_writer_model,
+            "sectional_critic_model": sectional_critic_model,
             "external_review_path": external_review_path,
             "shared_context": False,
         },

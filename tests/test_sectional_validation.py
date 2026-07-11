@@ -25,8 +25,10 @@ from researchclaw.pipeline.sectional_validation import (
     QUANTITATIVE_UNIT_LEXICON_V1,
     SectionValidationContext,
     SectionValidationResult,
+    SectionAttemptRecord,
     SectionManifestMetadata,
     SectionRevisionManifest,
+    ResolutionAssessmentRecord,
     ValidatedSectionReplacement,
     build_section_revision_manifest,
     build_unresolved_comments_artifact,
@@ -36,6 +38,8 @@ from researchclaw.pipeline.sectional_validation import (
     extract_quantitative_values,
     extract_reference_mentions,
     merge_validated_sections,
+    parse_resolution_assessments_jsonl,
+    parse_section_attempts_jsonl,
     validate_section_revision_manifest,
     validate_section_candidate,
 )
@@ -201,15 +205,67 @@ def _manifest_inputs(*, final_status: str = "resolved", changed: bool = True):
         sort_keys=True,
         indent=2,
     ) + "\n"
+    attempt_status = "accepted" if changed else "rejected"
+    attempt_record = SectionAttemptRecord.from_dict(
+        SectionAttemptRecord(
+            schema_version=1,
+            attempt_id=attempt_id,
+            section_id=section_id,
+            source_section_sha256=document.sections[1].original_sha256,
+            comment_ids=(final_comment.comment_id,),
+            resolution_comment_ids=(final_comment.comment_id,),
+            writer_model="writer-model",
+            attempt=1,
+            status=attempt_status,
+            candidate_path=f"stage-19/sections/{section_id}.attempt-1.md",
+            candidate_body_sha256=validation.candidate_sha256,
+            validation_report_path=(
+                f"stage-19/section_validation/{section_id}.attempt-1.json"
+            ),
+            validation_report_sha256=canonical_json_sha256(validation.to_dict()),
+            validator_codes=(),
+            error_type=None,
+            error=None if changed else "candidate not accepted",
+            timestamp="2026-07-11T00:00:00+00:00",
+        ).to_dict()
+    )
+    attempts_text = json.dumps(attempt_record.to_dict(), sort_keys=True) + "\n"
+    assessment_records = ()
+    if changed:
+        assessment_records = (
+            ResolutionAssessmentRecord.from_dict(
+                ResolutionAssessmentRecord(
+                    schema_version=1,
+                    assessment_id=f"ra-{final_comment.comment_id}-{attempt_id}",
+                    comment_id=final_comment.comment_id,
+                    section_id=section_id,
+                    attempt_id=attempt_id,
+                    critic_model="critic-model",
+                    context_isolated=True,
+                    verdict="resolved",
+                    reason="The deterministic fixture resolves the comment.",
+                    timestamp="2026-07-11T00:00:00+00:00",
+                ).to_dict()
+            ),
+        )
+    assessments_text = "".join(
+        json.dumps(record.to_dict(), sort_keys=True) + "\n"
+        for record in assessment_records
+    )
     return {
         "document": document,
         "merge_result": merge_result,
         "ledger": final_ledger,
         "plan": plan,
         "reviews": reviews,
+        "experiment_contract_path": "stage-09/experiment_contract.yaml",
+        "experiment_contract_sha256": "c" * 64,
+        "writer_model": "writer-model",
+        "critic_model": "critic-model",
         "source_paper_path": "stage-17/paper_draft.md",
         "section_metadata": metadata,
-        "assessments_text": '{"schema_version":1,"verdict":"test"}\n',
+        "attempts_text": attempts_text,
+        "assessments_text": assessments_text,
         "unresolved_comments_text": json.dumps(
             build_unresolved_comments_artifact(final_ledger),
             sort_keys=True,
@@ -553,9 +609,114 @@ def test_manifest_is_derived_from_authoritative_inputs_and_round_trips() -> None
         inputs["ledger"].to_dict()
     )
     assert manifest.plan_sha256 == canonical_json_sha256(inputs["plan"].to_dict())
+    assert manifest.experiment_contract_path == "stage-09/experiment_contract.yaml"
+    assert manifest.experiment_contract_sha256 == "c" * 64
+    assert manifest.writer_model == "writer-model"
+    assert manifest.critic_model == "critic-model"
     assert [entry.section_id for entry in manifest.sections] == [
         section.section_id for section in inputs["document"].sections
     ]
+
+
+def test_strict_attempt_and_assessment_loaders_round_trip() -> None:
+    inputs = _manifest_inputs()
+    attempts = parse_section_attempts_jsonl(inputs["attempts_text"])
+    assessments = parse_resolution_assessments_jsonl(inputs["assessments_text"])
+
+    assert len(attempts) == 1
+    assert attempts[0].candidate_path and attempts[0].candidate_path.startswith(
+        "stage-19/sections/"
+    )
+    assert attempts[0].resolution_comment_ids == attempts[0].comment_ids
+    assert len(assessments) == 1
+    assert assessments[0].context_isolated is True
+
+
+def test_attempt_loader_rejects_unknown_fields_and_invalid_transport_state() -> None:
+    inputs = _manifest_inputs()
+    payload = json.loads(inputs["attempts_text"])
+    payload["unexpected"] = True
+    with pytest.raises(SectionalRevisionContractError):
+        parse_section_attempts_jsonl(json.dumps(payload) + "\n")
+
+    payload.pop("unexpected")
+    payload["status"] = "transport_failed"
+    payload["error_type"] = "RuntimeError"
+    payload["error"] = "network failed"
+    with pytest.raises(SectionalRevisionContractError) as caught:
+        parse_section_attempts_jsonl(json.dumps(payload) + "\n")
+    assert any(issue.code == "attempt_state_invalid" for issue in caught.value.issues)
+
+
+def test_jsonl_loaders_reject_duplicate_keys_and_duplicate_ids() -> None:
+    with pytest.raises(SectionalRevisionContractError) as duplicate_key:
+        parse_section_attempts_jsonl('{"schema_version":1,"schema_version":1}\n')
+    assert any(issue.code == "jsonl_invalid" for issue in duplicate_key.value.issues)
+
+    inputs = _manifest_inputs()
+    with pytest.raises(SectionalRevisionContractError) as duplicate_id:
+        parse_resolution_assessments_jsonl(
+            inputs["assessments_text"] + inputs["assessments_text"]
+        )
+    assert any(
+        issue.code == "duplicate_assessment_id" for issue in duplicate_id.value.issues
+    )
+
+
+def test_jsonl_loader_preserves_unicode_line_separator_inside_string() -> None:
+    inputs = _manifest_inputs()
+    assessment = json.loads(inputs["assessments_text"])
+    assessment["reason"] = "First clause.\u2028Second clause."
+    text = json.dumps(assessment, ensure_ascii=False, sort_keys=True) + "\n"
+
+    records = parse_resolution_assessments_jsonl(text)
+
+    assert records[0].reason == "First clause.\u2028Second clause."
+
+
+@pytest.mark.parametrize(
+    ("artifact_key", "model_key", "model_value", "expected_code"),
+    (
+        (
+            "attempts_text",
+            "writer_model",
+            "third-writer-model",
+            "manifest_writer_model_mismatch",
+        ),
+        (
+            "assessments_text",
+            "critic_model",
+            "third-critic-model",
+            "manifest_critic_model_mismatch",
+        ),
+    ),
+)
+def test_manifest_rejects_bundle_model_identity_drift(
+    artifact_key: str,
+    model_key: str,
+    model_value: str,
+    expected_code: str,
+) -> None:
+    inputs = _manifest_inputs()
+    record = json.loads(inputs[artifact_key])
+    record[model_key] = model_value
+    inputs[artifact_key] = json.dumps(record, sort_keys=True) + "\n"
+
+    with pytest.raises(SectionalRevisionContractError) as caught:
+        build_section_revision_manifest(claim_scope="pipeline_validation", **inputs)
+    assert any(issue.code == expected_code for issue in caught.value.issues)
+
+
+@pytest.mark.parametrize("attempt", (0, 5))
+def test_attempt_loader_rejects_unbounded_attempt_ordinal(attempt: int) -> None:
+    inputs = _manifest_inputs()
+    payload = json.loads(inputs["attempts_text"])
+    payload["attempt"] = attempt
+
+    with pytest.raises(SectionalRevisionContractError) as caught:
+        parse_section_attempts_jsonl(json.dumps(payload) + "\n")
+
+    assert any(issue.code == "attempt_id_invalid" for issue in caught.value.issues)
 
 
 @pytest.mark.parametrize(
@@ -565,6 +726,8 @@ def test_manifest_is_derived_from_authoritative_inputs_and_round_trips() -> None
         "source_reviews_sha256",
         "ledger_sha256",
         "plan_sha256",
+        "attempts_sha256",
+        "experiment_contract_sha256",
         "assessments_sha256",
         "unresolved_comments_sha256",
         "validation_context_sha256",
@@ -676,7 +839,9 @@ def test_manifest_recomputes_assessment_and_unresolved_artifact_hashes() -> None
         claim_scope="pipeline_validation", **inputs
     )
     changed = dict(inputs)
-    changed["assessments_text"] += "tampered\n"
+    assessment = json.loads(changed["assessments_text"])
+    assessment["reason"] = "Tampered but schema-valid reason."
+    changed["assessments_text"] = json.dumps(assessment, sort_keys=True) + "\n"
 
     with pytest.raises(SectionalRevisionContractError) as caught:
         validate_section_revision_manifest(

@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from researchclaw.config import PaperRevisionConfig
-from researchclaw.experiment_runtime.contract import sha256_file
+from researchclaw.experiment_runtime.contract import (
+    ContractValidationError,
+    find_stage09_contract,
+    load_contract,
+    sha256_file,
+)
 from researchclaw.literature.verify import parse_bibtex_entries
 from researchclaw.pipeline.manuscript_sections import (
     ManuscriptDocument,
@@ -31,6 +36,8 @@ from researchclaw.pipeline.sectional_revision import (
     validate_revision_plan,
 )
 from researchclaw.pipeline.sectional_validation import (
+    ResolutionAssessmentRecord,
+    SectionAttemptRecord,
     SectionManifestMetadata,
     SectionValidationContext,
     ValidatedSectionReplacement,
@@ -38,6 +45,8 @@ from researchclaw.pipeline.sectional_validation import (
     build_unresolved_comments_artifact,
     extract_citation_keys,
     merge_validated_sections,
+    parse_resolution_assessments_jsonl,
+    parse_section_attempts_jsonl,
     validate_section_candidate,
     validate_section_revision_manifest,
 )
@@ -153,6 +162,20 @@ def execute_sectional_revision(
         raise SectionalExecutionError(
             "sectional provider critic model does not match paper_revision.critic_model"
         )
+
+    contract_path = find_stage09_contract(run_dir)
+    if contract_path is None:
+        raise SectionalExecutionError("canonical Stage 9 experiment contract is missing")
+    try:
+        contract = load_contract(contract_path)
+    except ContractValidationError as exc:
+        raise SectionalExecutionError(f"canonical Stage 9 contract is invalid: {exc}") from exc
+    if contract.claim_scope != claim_scope:
+        raise SectionalExecutionError(
+            "Stage 19 claim scope does not match the canonical Stage 9 contract"
+        )
+    contract_rel = contract_path.relative_to(run_dir).as_posix()
+    contract_sha = sha256_file(contract_path)
 
     paper_path = run_dir / "stage-17" / "paper_draft.md"
     reviews_path = run_dir / "stage-18" / "reviews.md"
@@ -291,29 +314,37 @@ def execute_sectional_revision(
             )
             status = "accepted" if validation.accepted and all_resolved else "rejected"
             attempts.append(
-                {
-                    "schema_version": 1,
-                    "attempt_id": attempt_id,
-                    "section_id": section_id,
-                    "source_section_sha256": section.original_sha256,
-                    "comment_ids": [c.comment_id for c in assigned_comments],
-                    "writer_model": writer_model,
-                    "attempt": attempt,
-                    "status": status,
-                    "candidate_body_sha256": _sha256(proposal.revised_body),
-                    "validation_report_path": validation_rel,
-                    "validation_report_sha256": _sha256(validation_text),
-                    "validator_codes": list(failed_codes),
-                    "error_type": (
-                        type(assessment_error).__name__ if assessment_error else None
-                    ),
-                    "error": (
-                        None
-                        if status == "accepted"
-                        else str(assessment_error or "candidate not accepted")
-                    ),
-                    "timestamp": _utcnow(),
-                }
+                SectionAttemptRecord.from_dict(
+                    SectionAttemptRecord(
+                        schema_version=1,
+                        attempt_id=attempt_id,
+                        section_id=section_id,
+                        source_section_sha256=section.original_sha256,
+                        comment_ids=tuple(c.comment_id for c in assigned_comments),
+                        resolution_comment_ids=proposal.resolution_comment_ids,
+                        writer_model=writer_model,
+                        attempt=attempt,
+                        status=status,
+                        candidate_path=(
+                            f"stage-19/sections/{section_id}.attempt-{attempt}.md"
+                        ),
+                        candidate_body_sha256=_sha256(proposal.revised_body),
+                        validation_report_path=validation_rel,
+                        validation_report_sha256=_sha256(validation_text),
+                        validator_codes=failed_codes,
+                        error_type=(
+                            type(assessment_error).__name__
+                            if assessment_error
+                            else None
+                        ),
+                        error=(
+                            None
+                            if status == "accepted"
+                            else str(assessment_error or "candidate not accepted")
+                        ),
+                        timestamp=_utcnow(),
+                    ).to_dict()
+                ).to_dict()
             )
             for assessment in attempt_assessments:
                 payload = _assessment_payload(assessment)
@@ -355,6 +386,8 @@ def execute_sectional_revision(
         ledger=ledger,
         context_text=context_bundle.text,
         config=config,
+        contract_path=contract_path,
+        contract_sha256=contract_sha,
     )
     final_ledger = _finalize_ledger(
         ledger=ledger,
@@ -366,6 +399,8 @@ def execute_sectional_revision(
     merge_result = merge_validated_sections(document, replacements)
     assessments_text = _jsonl_text(assessments)
     attempts_text = _jsonl_text(attempts)
+    parse_section_attempts_jsonl(attempts_text)
+    parse_resolution_assessments_jsonl(assessments_text)
     unresolved_text = _pretty_json_text(
         build_unresolved_comments_artifact(final_ledger)
     )
@@ -383,8 +418,13 @@ def execute_sectional_revision(
             plan=plan,
             reviews=reviews,
             claim_scope=claim_scope,
+            experiment_contract_path=contract_rel,
+            experiment_contract_sha256=contract_sha,
+            writer_model=writer_model,
+            critic_model=critic_model,
             source_paper_path="stage-17/paper_draft.md",
             section_metadata=metadata,
+            attempts_text=attempts_text,
             assessments_text=assessments_text,
             unresolved_comments_text=unresolved_text,
             completed=True,
@@ -401,8 +441,13 @@ def execute_sectional_revision(
             plan=plan,
             reviews=reviews,
             claim_scope=claim_scope,
+            experiment_contract_path=contract_rel,
+            experiment_contract_sha256=contract_sha,
+            writer_model=writer_model,
+            critic_model=critic_model,
             source_paper_path="stage-17/paper_draft.md",
             section_metadata=metadata,
+            attempts_text=attempts_text,
             assessments_text=assessments_text,
             unresolved_comments_text=unresolved_text,
             completed=False,
@@ -419,8 +464,13 @@ def execute_sectional_revision(
         plan=plan,
         reviews=reviews,
         claim_scope=claim_scope,
+        experiment_contract_path=contract_rel,
+        experiment_contract_sha256=contract_sha,
+        writer_model=writer_model,
+        critic_model=critic_model,
         source_paper_path="stage-17/paper_draft.md",
         section_metadata=metadata,
+        attempts_text=attempts_text,
         assessments_text=assessments_text,
         unresolved_comments_text=unresolved_text,
         completed=completed,
@@ -578,11 +628,15 @@ def _verify_input_immutability(
     ledger: ReviewLedger,
     context_text: str,
     config: PaperRevisionConfig,
+    contract_path: Path,
+    contract_sha256: str,
 ) -> None:
     if _sha256(paper_path.read_text(encoding="utf-8")) != document.source_sha256:
         raise SectionalExecutionError("canonical Stage 17 paper changed during revision")
     if _sha256(reviews_path.read_text(encoding="utf-8")) != ledger.source_reviews_sha256:
         raise SectionalExecutionError("canonical Stage 18 reviews changed during revision")
+    if not contract_path.is_file() or sha256_file(contract_path) != contract_sha256:
+        raise SectionalExecutionError("canonical Stage 9 contract changed during revision")
     payload = json.loads(context_text)
     for source in payload["sources"]:
         kind = source["kind"]
@@ -652,18 +706,20 @@ def _validate_assessment(
 
 
 def _assessment_payload(assessment: ResolutionAssessment) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "assessment_id": f"ra-{assessment.comment_id}-{assessment.attempt_id}",
-        "comment_id": assessment.comment_id,
-        "section_id": assessment.section_id,
-        "attempt_id": assessment.attempt_id,
-        "critic_model": assessment.critic_model,
-        "context_isolated": assessment.context_isolated,
-        "verdict": assessment.verdict,
-        "reason": assessment.reason,
-        "timestamp": _utcnow(),
-    }
+    return ResolutionAssessmentRecord.from_dict(
+        ResolutionAssessmentRecord(
+            schema_version=1,
+            assessment_id=f"ra-{assessment.comment_id}-{assessment.attempt_id}",
+            comment_id=assessment.comment_id,
+            section_id=assessment.section_id,
+            attempt_id=assessment.attempt_id,
+            critic_model=assessment.critic_model,
+            context_isolated=assessment.context_isolated,
+            verdict=assessment.verdict,
+            reason=assessment.reason,
+            timestamp=_utcnow(),
+        ).to_dict()
+    ).to_dict()
 
 
 def _transport_failure_attempt(
@@ -676,23 +732,27 @@ def _transport_failure_attempt(
     source_section_sha256: str,
     exc: Exception,
 ) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "attempt_id": attempt_id,
-        "section_id": section_id,
-        "source_section_sha256": source_section_sha256,
-        "comment_ids": list(comment_ids),
-        "writer_model": writer_model,
-        "attempt": attempt,
-        "status": "transport_failed",
-        "candidate_body_sha256": None,
-        "validation_report_path": None,
-        "validation_report_sha256": None,
-        "validator_codes": [],
-        "error_type": type(exc).__name__,
-        "error": str(exc),
-        "timestamp": _utcnow(),
-    }
+    return SectionAttemptRecord.from_dict(
+        SectionAttemptRecord(
+            schema_version=1,
+            attempt_id=attempt_id,
+            section_id=section_id,
+            source_section_sha256=source_section_sha256,
+            comment_ids=comment_ids,
+            resolution_comment_ids=(),
+            writer_model=writer_model,
+            attempt=attempt,
+            status="transport_failed",
+            candidate_path=None,
+            candidate_body_sha256=None,
+            validation_report_path=None,
+            validation_report_sha256=None,
+            validator_codes=(),
+            error_type=type(exc).__name__,
+            error=str(exc),
+            timestamp=_utcnow(),
+        ).to_dict()
+    ).to_dict()
 
 
 def clean_sectional_outputs(stage_dir: Path) -> None:
