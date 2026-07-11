@@ -138,7 +138,7 @@ def execute_sectional_revision(
 ) -> SectionalExecutionResult:
     """Execute B2 using an explicitly injected provider and deterministic gates."""
 
-    _clean_owned_outputs(stage_dir)
+    clean_sectional_outputs(stage_dir)
     if provider is None:
         raise SectionalExecutionError(
             "sectional revision is enabled but no reviewed provider is configured"
@@ -695,7 +695,9 @@ def _transport_failure_attempt(
     }
 
 
-def _clean_owned_outputs(stage_dir: Path) -> None:
+def clean_sectional_outputs(stage_dir: Path) -> None:
+    """Remove only artifacts owned by the current Stage 19 attempt."""
+
     for name in _OWNED_FILES:
         (stage_dir / name).unlink(missing_ok=True)
         (stage_dir / f"{name}.tmp").unlink(missing_ok=True)

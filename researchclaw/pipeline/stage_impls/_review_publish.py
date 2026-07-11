@@ -342,10 +342,21 @@ def _execute_paper_revision(
 ) -> StageResult:
     if config.paper_revision.sectional_enabled:
         from researchclaw.pipeline.sectional_execution import (
+            clean_sectional_outputs,
             execute_sectional_revision,
+        )
+        from researchclaw.pipeline.sectional_llm import (
+            LLMSectionalRevisionProvider,
         )
 
         try:
+            clean_sectional_outputs(stage_dir)
+            if sectional_provider is None and llm is not None:
+                sectional_provider = LLMSectionalRevisionProvider(
+                    llm=llm,
+                    writer_model=config.llm.primary_model,
+                    critic_model=config.paper_revision.critic_model,
+                )
             outcome = execute_sectional_revision(
                 stage_dir=stage_dir,
                 run_dir=run_dir,

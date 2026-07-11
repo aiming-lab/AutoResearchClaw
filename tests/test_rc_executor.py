@@ -158,7 +158,7 @@ class TestPaperRevisionRecovery:
 
         assert not stale_revision.exists()
 
-    def test_sectional_flag_without_reviewed_provider_fails_without_legacy_fallback(
+    def test_sectional_flag_without_configured_models_fails_without_legacy_fallback(
         self,
         tmp_path: Path,
         rc_config: RCConfig,
@@ -196,7 +196,7 @@ class TestPaperRevisionRecovery:
         )
 
         assert result.status == StageStatus.FAILED
-        assert "no reviewed provider" in (result.error or "")
+        assert "writer_model and critic_model are required" in (result.error or "")
         assert not stale_revision.exists()
         assert llm.calls == []
 
@@ -236,6 +236,130 @@ class TestPaperRevisionRecovery:
         assert result.decision == "sectional"
         assert "paper_revised.md" in result.artifacts
         assert llm.calls == []
+
+    def test_sectional_flag_builds_isolated_llm_provider(
+        self,
+        tmp_path: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+    ) -> None:
+        from tests.test_sectional_execution import _config, _prepare_run
+
+        run_dir, stage_dir = _prepare_run(tmp_path)
+        config = replace(
+            rc_config,
+            llm=replace(rc_config.llm, primary_model="writer-model"),
+            paper_revision=_config(),
+            experiment=replace(
+                rc_config.experiment,
+                claim_scope="pipeline_validation",
+            ),
+        )
+
+        class SectionalLLM:
+            def __init__(self) -> None:
+                self.calls: list[tuple[dict[str, object], dict[str, object]]] = []
+
+            def chat(self, messages, **kwargs):
+                payload = json.loads(messages[0]["content"])
+                self.calls.append((payload, kwargs))
+                if "sections" in payload:
+                    method = next(
+                        section
+                        for section in payload["sections"]
+                        if section["title"] == "Method"
+                    )
+                    content = {
+                        "schema_version": 1,
+                        "planner_version": 1,
+                        "source_paper_sha256": payload["source_paper_sha256"],
+                        "source_reviews_sha256": payload["source_reviews_sha256"],
+                        "section_model_version": 1,
+                        "assignments": [
+                            {
+                                "comment_id": comment["comment_id"],
+                                "target_section_ids": [method["section_id"]],
+                                "disposition": "assigned",
+                                "reason": None,
+                            }
+                            for comment in payload["comments"]
+                        ],
+                    }
+                elif "deterministic_validator_codes" in payload:
+                    content = {
+                        "schema_version": 1,
+                        "comment_id": payload["comment"]["comment_id"],
+                        "section_id": payload["section"]["section_id"],
+                        "attempt_id": payload["attempt_id"],
+                        "verdict": "resolved",
+                        "reason": "The requested change is present in the revision.",
+                    }
+                else:
+                    content = {
+                        "schema_version": 1,
+                        "section_id": payload["section"]["section_id"],
+                        "revised_body": (
+                            "\nThe recorded detector score was 0.475 across three "
+                            "seeds \\cite{smith2024}. This sentence clarifies the "
+                            "reporting basis.\n\n"
+                        ),
+                        "resolutions": [
+                            {
+                                "comment_id": comment["comment_id"],
+                                "writer_status": "addressed",
+                                "reason": "The requested wording was added.",
+                            }
+                            for comment in payload["comments"]
+                        ],
+                    }
+                from researchclaw.llm.client import LLMResponse
+
+                return LLMResponse(
+                    content=json.dumps(content),
+                    model=str(kwargs["model"]),
+                )
+
+        llm = SectionalLLM()
+        result = rc_executor._execute_paper_revision(
+            stage_dir,
+            run_dir,
+            config,
+            adapters,
+            llm=llm,  # type: ignore[arg-type]
+        )
+
+        assert result.status == StageStatus.DONE
+        assert result.decision == "sectional"
+        assert llm.calls[0][1]["model"] == "writer-model"
+        assert any(call[1]["model"] == "critic-model" for call in llm.calls)
+        assert all(call[1]["json_mode"] is True for call in llm.calls)
+
+    def test_sectional_llm_provider_identity_error_fails_at_stage_boundary(
+        self,
+        tmp_path: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+    ) -> None:
+        from tests.test_sectional_execution import _config, _prepare_run
+
+        run_dir, stage_dir = _prepare_run(tmp_path)
+        config = replace(
+            rc_config,
+            llm=replace(rc_config.llm, primary_model="critic-model"),
+            paper_revision=_config(),
+        )
+
+        result = rc_executor._execute_paper_revision(
+            stage_dir,
+            run_dir,
+            config,
+            adapters,
+            llm=FakeLLMClient(),
+        )
+
+        assert result.status == StageStatus.FAILED
+        assert result.artifacts == ()
+        assert "must differ" in (result.error or "")
 
     @pytest.mark.parametrize(
         ("claim_scope", "invalid_contract"),

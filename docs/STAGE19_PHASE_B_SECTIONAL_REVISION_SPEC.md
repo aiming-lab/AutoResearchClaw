@@ -706,23 +706,36 @@ fail Stage 18 rather than being dropped from the ledger.
   Stage 12-14 artifacts, and validated `PaperRevisionConfig`; record source paths
   and hashes for the citation and numeric whitelists in the Stage 19 manifest.
 
-The B2 implementation is an execution shell, not an LLM implementation. The
-checked-in feature flag remains false. If sectional mode is enabled without an
-explicit reviewed provider, Stage 19 fails and never invokes the legacy
-whole-paper path. Tests inject a deterministic provider with distinct writer and
-critic identities; production LLM planning, proposal, and assessment adapters
-remain B3 work. Only a candidate that passes every hard validator and receives a
-resolved isolated assessment is merged. Strict claim scopes with unresolved
-required comments write an incomplete manifest and do not expose
-`paper_revised.md`.
+The B2 implementation is the deterministic execution shell. The checked-in
+feature flag remains false. Tests may inject a deterministic provider with
+distinct writer and critic identities. B3 supplies the production provider only
+when sectional mode is explicitly enabled and an LLM client is available. It
+never falls back to the legacy whole-paper path. Only a candidate that passes
+every hard validator and receives a resolved isolated assessment is merged.
+Strict claim scopes with unresolved required comments write an incomplete
+manifest and do not expose `paper_revised.md`.
 
 ### B3: Bounded LLM planner and section proposer
 
-- add strict JSON calls for assignment and one-section revision;
-- add an isolated critic call for resolution assessment;
-- add per-section retry only;
-- preserve all deterministic validators as authority;
-- run a new `pipeline_validation` dry run before any default change.
+- use strict JSON calls for assignment and one-section revision; truncated,
+  malformed, non-object, prose-wrapped, missing-field, and unknown-field
+  responses fail;
+- require the writer to account for every assigned comment exactly once while
+  preventing it from setting validator, critic, hash, retry, or manifest state;
+- invoke the critic with an explicit model override that differs from the writer
+  model, a newly constructed message list, and no writer conversation history;
+- use explicit model overrides for all B3 calls so the LLM client's fallback
+  model chain cannot silently collapse writer/critic isolation;
+- keep retries per section only and preserve all deterministic validators as
+  authority;
+- keep `sectional_enabled: false` in checked-in configuration and run a new
+  `pipeline_validation` dry run before any default change.
+
+The production factory constructs the bounded provider only inside the
+sectional branch. A missing LLM client or invalid/identical model identity fails
+through the B2 provider boundary. B3 is not a release authorization: Phase C
+must still independently gate unresolved comments, recompute merge/manifest
+hashes, and compare manifest claim scope with the canonical Stage 9 contract.
 
 Each milestone is a separate narrow commit and review boundary. No milestone may
 combine release-check changes.
