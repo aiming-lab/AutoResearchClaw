@@ -1,0 +1,73 @@
+# Non-release DeepSeek dry run for the Stage 19 sectional workflow.
+# Expected release_check result: nonzero (pipeline_validation + synthetic).
+# Set the key first: export DEEPSEEK_API_KEY="sk-..."
+project:
+  name: hwsec-sectional-dry-run
+  mode: "full-auto"
+
+research:
+  topic: >
+    Hardware-performance-counter based runtime detection of Spectre/Meltdown
+    and transient-execution side-channel attacks using lightweight change-point
+    or anomaly detection on SPEC CPU-style workloads; focus on systems-security
+    and microarchitecture papers, exclude generic machine-learning surveys and
+    general scientific-computing papers
+  domains:
+    - systems security
+    - microarchitecture
+    - side-channel analysis
+  quality_threshold: 6.0
+  graceful_degradation: true
+
+llm:
+  provider: "openai-compatible"
+  base_url: "https://api.deepseek.com"
+  wire_api: "chat_completions"
+  api_key_env: "DEEPSEEK_API_KEY"
+  api_key: ""
+  primary_model: "deepseek-v4-flash"
+  fallback_models: []
+  critic_model: "deepseek-v4-pro"
+  critic_source: "model"
+  timeout_sec: 900
+  max_retries: 4
+  retry_base_delay: 3.0
+
+experiment:
+  mode: sandbox
+  time_budget_sec: 300
+  metric_key: detection_f1
+  metric_direction: maximize
+  claim_scope: pipeline_validation
+  dataset_origin: synthetic
+  allow_legacy_experiment_path: false
+  code_agent:
+    exec_fix_timeout_sec: 180
+    tree_search_eval_timeout_sec: 180
+    long_call_max_tokens: 8192
+  opencode:
+    enabled: false
+    workspace_cleanup: false
+    fallback_to_code_agent: false
+  sandbox:
+    python_path: ".venv/bin/python"
+    env_policy: allowlist
+
+paper_revision:
+  sectional_enabled: true
+  max_section_retries: 1
+  min_length_ratio: 0.80
+  max_length_ratio: 1.75
+  critic_model: "deepseek-v4-pro"
+
+runtime:
+  timezone: "Asia/Shanghai"
+  skip_stages: []
+
+knowledge_base:
+  root: "./kb-hwsec-sectional-dry-run"
+
+notifications:
+  channel: "none"
+  on_stage_start: false
+  on_gate_required: false

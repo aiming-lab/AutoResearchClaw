@@ -183,12 +183,31 @@ def test_paper_revision_config_rejects_unsafe_or_unknown_values(
     assert any(expected in error for error in result.errors)
 
 
-def test_checked_in_configs_do_not_enable_sectional_revision() -> None:
+def test_only_dedicated_dry_run_config_enables_sectional_revision() -> None:
     root = Path(__file__).resolve().parents[1]
+    enabled: list[str] = []
     for path in root.glob("config*.yaml"):
         payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         revision = payload.get("paper_revision") or {}
-        assert revision.get("sectional_enabled", False) is False, path
+        if revision.get("sectional_enabled", False) is True:
+            enabled.append(path.name)
+
+    assert enabled == ["config.deepseek.sectional-dry-run.yaml"]
+
+
+def test_sectional_dry_run_config_is_explicitly_non_release() -> None:
+    root = Path(__file__).resolve().parents[1]
+    path = root / "config.deepseek.sectional-dry-run.yaml"
+    config = RCConfig.load(path, project_root=root, check_paths=False)
+
+    assert config.project.name == "hwsec-sectional-dry-run"
+    assert config.experiment.claim_scope == "pipeline_validation"
+    assert config.experiment.dataset_origin == "synthetic"
+    assert config.experiment.allow_legacy_experiment_path is False
+    assert config.paper_revision.sectional_enabled is True
+    assert config.paper_revision.critic_model == config.llm.critic_model
+    assert config.paper_revision.critic_model != config.llm.primary_model
+    assert config.experiment.opencode.fallback_to_code_agent is False
 
 
 def test_private_paper_revision_parser_does_not_coerce_non_boolean_flag() -> None:
