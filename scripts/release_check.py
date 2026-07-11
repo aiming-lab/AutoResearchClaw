@@ -68,6 +68,9 @@ class ReleaseChecker:
         self.quality_threshold = quality_threshold
         self.allow_suspicious = allow_suspicious
         self.findings: list[Finding] = []
+        self._experiment_contract_loaded = False
+        self._experiment_contract_path: Path | None = None
+        self._experiment_contract: Any = None
 
     def run(self) -> int:
         if not self.run_dir.exists() or not self.run_dir.is_dir():
@@ -86,6 +89,7 @@ class ReleaseChecker:
         self.check_degradation_signal(quality)
         self.check_quality_report(quality)
         self.check_experiment_contract()
+        self.check_sectional_revision(manifest)
         self.check_fabrication_flags(fabrication)
         self.check_paper_artifacts()
         self.check_citations(verification)
@@ -197,6 +201,26 @@ class ReleaseChecker:
             )
 
     def check_experiment_contract(self) -> None:
+        loaded = self._load_experiment_contract()
+        if loaded is None:
+            return
+        contract_path, contract = loaded
+        claim_scope = contract.claim_scope
+        if claim_scope != "research_release":
+            self.error(
+                "non_release_claim_scope",
+                f"experiment_contract.yaml declares claim_scope={claim_scope!r}. "
+                "Only claim_scope=research_release is eligible for release. "
+                "pipeline_validation and exploratory runs cannot be release-ready.",
+                relpath(contract_path, self.run_dir),
+            )
+
+    def _load_experiment_contract(self) -> tuple[Path, Any] | None:
+        if self._experiment_contract_loaded:
+            if self._experiment_contract_path is None or self._experiment_contract is None:
+                return None
+            return self._experiment_contract_path, self._experiment_contract
+        self._experiment_contract_loaded = True
         try:
             from researchclaw.experiment_runtime import (
                 ContractValidationError,
@@ -228,14 +252,46 @@ class ReleaseChecker:
                 relpath(contract_path, self.run_dir),
             )
             return
-        claim_scope = contract.claim_scope
-        if claim_scope != "research_release":
+        self._experiment_contract_path = contract_path
+        self._experiment_contract = contract
+        return contract_path, contract
+
+    def check_sectional_revision(self, manifest: dict[str, Any] | None) -> None:
+        loaded = self._load_experiment_contract()
+        if loaded is None:
             self.error(
-                "non_release_claim_scope",
-                f"experiment_contract.yaml declares claim_scope={claim_scope!r}. "
-                "Only claim_scope=research_release is eligible for release. "
-                "pipeline_validation and exploratory runs cannot be release-ready.",
-                relpath(contract_path, self.run_dir),
+                "sectional_contract_binding_missing",
+                "Cannot audit Stage 19 without a valid canonical Stage 9 contract.",
+                "stage-19/section_revision_manifest.json",
+            )
+            return
+        contract_path, contract = loaded
+        try:
+            from researchclaw.pipeline.sectional_release_audit import (
+                SectionalAuditError,
+                audit_sectional_revision,
+            )
+        except ImportError as exc:
+            self.error(
+                "sectional_revision_artifact_invalid",
+                f"Sectional release auditor is unavailable: {exc}",
+                "stage-19/section_revision_manifest.json",
+            )
+            return
+        try:
+            audit_sectional_revision(
+                self.run_dir,
+                run_manifest=manifest,
+                contract_path=contract_path,
+                contract=contract,
+            )
+        except SectionalAuditError as exc:
+            self.error(exc.code, exc.message, exc.path)
+        except Exception as exc:  # noqa: BLE001 - release audit must report, not crash
+            self.error(
+                "sectional_revision_artifact_invalid",
+                f"Sectional release replay failed unexpectedly: {type(exc).__name__}: {exc}",
+                "stage-19/section_revision_manifest.json",
             )
 
     def check_fabrication_flags(self, fabrication: dict[str, Any] | None) -> None:

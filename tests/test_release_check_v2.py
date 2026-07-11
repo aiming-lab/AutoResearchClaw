@@ -18,6 +18,12 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import release_check  # noqa: E402
 from researchclaw.pipeline import release_artifacts as ra  # noqa: E402
+from researchclaw.config import PaperRevisionConfig  # noqa: E402
+from researchclaw.pipeline.sectional_execution import (  # noqa: E402
+    ResolutionAssessment,
+    SectionProposal,
+    execute_sectional_revision,
+)
 from researchclaw.pipeline.stages import FINAL_STAGE, Stage  # noqa: E402
 
 
@@ -25,6 +31,87 @@ PAPER = (
     "# Result\n\nOur method reaches 0.1234 loss, beating the baseline "
     "[smith2024deep]. Related work [jones2023survey] surveys the field.\n"
 )
+
+SECTIONAL_DRAFT = """## Title
+
+Release Fixture
+
+## Method
+
+The detector scored 0.1234 using three seeds \\cite{smith2024deep}.
+
+## Results
+
+The recorded score was 0.1234.
+"""
+
+SECTIONAL_REVIEWS = """## Reviewer A
+
+### Strengths
+The method is concise.
+
+### Weaknesses
+The reporting basis is terse.
+
+### Actionable Revisions
+1. Clarify how the recorded metric is reported.
+"""
+
+
+class _SectionalFixtureProvider:
+    writer_model = "writer-model-y"
+    critic_model = "section-critic-z"
+
+    def build_plan(self, *, ledger, document):
+        method = next(section for section in document.sections if section.title == "Method")
+        return {
+            "schema_version": 1,
+            "planner_version": 1,
+            "source_paper_sha256": document.source_sha256,
+            "source_reviews_sha256": ledger.source_reviews_sha256,
+            "section_model_version": 1,
+            "assignments": [
+                {
+                    "comment_id": comment.comment_id,
+                    "target_section_ids": [method.section_id],
+                    "disposition": "assigned",
+                    "reason": None,
+                }
+                for comment in ledger.comments
+            ],
+        }
+
+    def propose(self, *, section, comments, attempt, context):
+        _ = attempt, context
+        return SectionProposal(
+            section_id=section.section_id,
+            revised_body=(
+                "\nThe recorded detector score was 0.1234 across three seeds "
+                "\\cite{smith2024deep}. This sentence clarifies the reporting basis.\n\n"
+            ),
+            resolution_comment_ids=tuple(comment.comment_id for comment in comments),
+        )
+
+    def assess(
+        self,
+        *,
+        comment,
+        section,
+        original_body,
+        revised_body,
+        attempt_id,
+        validator_codes,
+    ):
+        _ = original_body, revised_body, validator_codes
+        return ResolutionAssessment(
+            comment_id=comment.comment_id,
+            section_id=section.section_id,
+            attempt_id=attempt_id,
+            critic_model=self.critic_model,
+            context_isolated=True,
+            verdict="resolved",
+            reason="The reporting basis is explicit in the revised section.",
+        )
 
 
 def _write(path: Path, obj) -> None:
@@ -69,6 +156,19 @@ def good_run(tmp_path: Path) -> Path:
             ]
         ),
     )
+    contract_sha = ra.sha256_file(run / "stage-09" / "experiment_contract.yaml")
+    _write(
+        run / "stage-10" / "selected_candidate_manifest.json",
+        {
+            "schema_version": 1,
+            "generated": "2026-07-11T00:00:00+00:00",
+            "contract_path": "stage-09/experiment_contract.yaml",
+            "contract_sha256": contract_sha,
+            "scaffold_sha256": "a" * 64,
+            "entry_point": "main.py",
+            "files": {"main.py": {"sha256": "b" * 64}},
+        },
+    )
 
     # --- v1 artifacts ---
     _write(
@@ -97,6 +197,10 @@ def good_run(tmp_path: Path) -> Path:
     _write(
         run / "stage-23" / "references_verified.bib",
         "@article{smith2024deep, title={Deep}}\n@article{jones2023survey, title={Survey}}\n",
+    )
+    _write(
+        run / "stage-04" / "references.bib",
+        "@article{smith2024deep, title={Deep}, year={2024}}\n",
     )
     _write(
         run / "stage-12" / "sandbox_metadata.json",
@@ -219,6 +323,24 @@ def good_run(tmp_path: Path) -> Path:
         },
     )
 
+    # --- Stage 19 sectional bundle, generated through the real producer ---
+    _write(run / "stage-17" / "paper_draft.md", SECTIONAL_DRAFT)
+    _write(run / "stage-18" / "reviews.md", SECTIONAL_REVIEWS)
+    sectional_result = execute_sectional_revision(
+        stage_dir=run / "stage-19",
+        run_dir=run,
+        config=PaperRevisionConfig(
+            sectional_enabled=True,
+            max_section_retries=0,
+            min_length_ratio=0.5,
+            max_length_ratio=2.0,
+            critic_model="section-critic-z",
+        ),
+        claim_scope="research_release",
+        provider=_SectionalFixtureProvider(),
+    )
+    assert sectional_result.completed is True
+
     # --- run manifest ---
     _write(
         run / "run_manifest.json",
@@ -229,6 +351,8 @@ def good_run(tmp_path: Path) -> Path:
                 "writer_model": "writer-model-y",
                 "critic_model": "critic-model-x",
                 "critic_source": "model",
+                "sectional_writer_model": "writer-model-y",
+                "sectional_critic_model": "section-critic-z",
                 "shared_context": False,
             },
         },
@@ -248,10 +372,281 @@ def _codes(checker: release_check.ReleaseChecker) -> set[str]:
     return {f.code for f in checker.findings if f.severity == "error"}
 
 
+def _stage19_manifest(run: Path) -> dict:
+    return json.loads(
+        (run / "stage-19" / "section_revision_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def _write_stage19_manifest(run: Path, manifest: dict) -> None:
+    _write(run / "stage-19" / "section_revision_manifest.json", manifest)
+
+
+def _rewrite_jsonl_record(run: Path, name: str, mutate) -> str:
+    path = run / "stage-19" / name
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mutate(payload)
+    text = json.dumps(
+        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ) + "\n"
+    path.write_text(text, encoding="utf-8")
+    return text
+
+
 def test_good_run_passes(good_run: Path) -> None:
     checker = _check(good_run)
     assert _codes(checker) == set(), _codes(checker)
     assert checker.exit_code() == release_check.EXIT_PASS
+
+
+def test_sectional_manifest_is_required(good_run: Path) -> None:
+    (good_run / "stage-19" / "section_revision_manifest.json").unlink()
+    assert "sectional_revision_manifest_missing" in _codes(_check(good_run))
+
+
+def test_legacy_stage19_is_not_release_eligible(good_run: Path) -> None:
+    stage19 = good_run / "stage-19"
+    for path in tuple(stage19.iterdir()):
+        if path.name == "paper_revised.md":
+            continue
+        if path.is_dir():
+            import shutil
+
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    assert "sectional_revision_manifest_missing" in _codes(_check(good_run))
+
+
+@pytest.mark.parametrize(
+    ("completed", "expected"),
+    ((False, "sectional_revision_incomplete"), ("true", "sectional_revision_artifact_invalid")),
+)
+def test_sectional_completed_is_strict_bool(
+    good_run: Path, completed, expected: str
+) -> None:
+    manifest = _stage19_manifest(good_run)
+    manifest["completed"] = completed
+    _write_stage19_manifest(good_run, manifest)
+    assert expected in _codes(_check(good_run))
+
+
+def test_sectional_required_artifact_missing(good_run: Path) -> None:
+    (good_run / "stage-19" / "revision_plan.json").unlink()
+    assert "sectional_revision_artifact_missing" in _codes(_check(good_run))
+
+
+def test_sectional_contract_edit_after_stage19_is_blocked(good_run: Path) -> None:
+    contract = good_run / "stage-09" / "experiment_contract.yaml"
+    contract.write_text(
+        contract.read_text(encoding="utf-8") + "\n# post-stage-19 edit\n",
+        encoding="utf-8",
+    )
+    assert "sectional_contract_hash_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_manifest_claim_scope_cannot_drift(good_run: Path) -> None:
+    manifest = _stage19_manifest(good_run)
+    manifest["claim_scope"] = "exploratory"
+    _write_stage19_manifest(good_run, manifest)
+    assert "sectional_claim_scope_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_sealed_candidate_anchor_is_required(good_run: Path) -> None:
+    (good_run / "stage-10" / "selected_candidate_manifest.json").unlink()
+    assert "sectional_sealed_candidate_missing" in _codes(_check(good_run))
+
+
+def test_sectional_sealed_candidate_contract_hash_must_match(good_run: Path) -> None:
+    path = good_run / "stage-10" / "selected_candidate_manifest.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["contract_sha256"] = "0" * 64
+    _write(path, payload)
+    assert "sectional_contract_hash_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_unresolved_artifact_cannot_hide_comment(good_run: Path) -> None:
+    path = good_run / "stage-19" / "unresolved_comments.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["comments"] = [
+        {"comment_id": "forged", "final_status": "unresolved", "reason": "x"}
+    ]
+    _write(path, payload)
+    assert "sectional_unresolved_artifact_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_numeric_whitelist_recomputes_from_sources(good_run: Path) -> None:
+    path = good_run / "stage-19" / "validation_context.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["grounded_numeric_values"].append(0.999)
+    text = json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2) + "\n"
+    path.write_text(text, encoding="utf-8")
+    manifest = _stage19_manifest(good_run)
+    manifest["validation_context_sha256"] = ra.sha256_text(text)
+    _write_stage19_manifest(good_run, manifest)
+    assert "sectional_validation_context_invalid" in _codes(_check(good_run))
+
+
+def test_sectional_ledger_comment_edit_is_blocked(good_run: Path) -> None:
+    path = good_run / "stage-19" / "review_comment_ledger.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["comments"][0]["exact_text"] = "forged review text"
+    _write(path, payload)
+    assert "sectional_ledger_recompute_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_plan_comment_omission_is_blocked(good_run: Path) -> None:
+    path = good_run / "stage-19" / "revision_plan.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["assignments"] = []
+    _write(path, payload)
+    assert "sectional_revision_plan_invalid" in _codes(_check(good_run))
+
+
+def test_sectional_candidate_missing_and_extra_are_blocked(good_run: Path) -> None:
+    candidate = next((good_run / "stage-19" / "sections").glob("*.md"))
+    candidate.unlink()
+    assert "sectional_attempt_artifact_missing" in _codes(_check(good_run))
+
+
+def test_sectional_unmanifested_temp_file_is_blocked(good_run: Path) -> None:
+    _write(good_run / "stage-19" / "sections" / "forged.tmp", "stale")
+    assert "sectional_attempt_artifact_unmanifested" in _codes(_check(good_run))
+
+
+def test_sectional_resolution_ids_are_replayed(good_run: Path) -> None:
+    attempts_text = _rewrite_jsonl_record(
+        good_run,
+        "section_attempts.jsonl",
+        lambda payload: payload.update(resolution_comment_ids=[]),
+    )
+    manifest = _stage19_manifest(good_run)
+    manifest["attempts_sha256"] = ra.sha256_text(attempts_text)
+    _write_stage19_manifest(good_run, manifest)
+    assert "sectional_validation_recompute_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_validation_report_edit_is_blocked(good_run: Path) -> None:
+    attempt = json.loads(
+        (good_run / "stage-19" / "section_attempts.jsonl").read_text(
+            encoding="utf-8"
+        )
+    )
+    path = good_run / attempt["validation_report_path"]
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["candidate_sha256"] = "0" * 64
+    text = json.dumps(
+        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    )
+    path.write_text(text, encoding="utf-8")
+    attempts_text = _rewrite_jsonl_record(
+        good_run,
+        "section_attempts.jsonl",
+        lambda row: row.update(validation_report_sha256=ra.sha256_text(text)),
+    )
+    manifest = _stage19_manifest(good_run)
+    manifest["attempts_sha256"] = ra.sha256_text(attempts_text)
+    _write_stage19_manifest(good_run, manifest)
+    assert "sectional_validation_recompute_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_third_critic_identity_is_blocked(good_run: Path) -> None:
+    assessments_text = _rewrite_jsonl_record(
+        good_run,
+        "resolution_assessments.jsonl",
+        lambda payload: payload.update(critic_model="third-critic"),
+    )
+    manifest = _stage19_manifest(good_run)
+    manifest["assessments_sha256"] = ra.sha256_text(assessments_text)
+    _write_stage19_manifest(good_run, manifest)
+    assert "sectional_run_manifest_model_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_assessment_missing_reason_is_blocked(good_run: Path) -> None:
+    _rewrite_jsonl_record(
+        good_run,
+        "resolution_assessments.jsonl",
+        lambda payload: payload.update(reason=""),
+    )
+    assert "sectional_assessment_log_invalid" in _codes(_check(good_run))
+
+
+def test_sectional_orphan_assessment_is_blocked(good_run: Path) -> None:
+    def orphan(payload: dict) -> None:
+        payload["attempt_id"] = payload["attempt_id"].rsplit("-a", 1)[0] + "-a2"
+        payload["assessment_id"] = (
+            f"ra-{payload['comment_id']}-{payload['attempt_id']}"
+        )
+
+    assessments_text = _rewrite_jsonl_record(
+        good_run, "resolution_assessments.jsonl", orphan
+    )
+    manifest = _stage19_manifest(good_run)
+    manifest["assessments_sha256"] = ra.sha256_text(assessments_text)
+    _write_stage19_manifest(good_run, manifest)
+    assert "sectional_assessment_identity_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_revised_paper_must_equal_replay(good_run: Path) -> None:
+    path = good_run / "stage-19" / "paper_revised.md"
+    path.write_text(path.read_text(encoding="utf-8") + "forged\n", encoding="utf-8")
+    assert "sectional_merge_body_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_manifest_sections_are_recomputed(good_run: Path) -> None:
+    manifest = _stage19_manifest(good_run)
+    manifest["sections"] = list(reversed(manifest["sections"]))
+    _write_stage19_manifest(good_run, manifest)
+    assert "sectional_manifest_sections_mismatch" in _codes(_check(good_run))
+
+
+def test_sectional_root_model_binding_is_required(good_run: Path) -> None:
+    path = good_run / "run_manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["reviewer"].pop("sectional_critic_model")
+    _write(path, manifest)
+    assert "sectional_run_manifest_binding_missing" in _codes(_check(good_run))
+
+
+def test_pipeline_validation_sectional_bundle_never_releases(good_run: Path) -> None:
+    contract_path = good_run / "stage-09" / "experiment_contract.yaml"
+    contract = contract_path.read_text(encoding="utf-8")
+    contract = contract.replace(
+        "claim_scope: research_release", "claim_scope: pipeline_validation"
+    ).replace("dataset_origin: public", "dataset_origin: synthetic")
+    _write(contract_path, contract)
+    sealed_path = good_run / "stage-10" / "selected_candidate_manifest.json"
+    sealed = json.loads(sealed_path.read_text(encoding="utf-8"))
+    sealed["contract_sha256"] = ra.sha256_file(contract_path)
+    _write(sealed_path, sealed)
+    result = execute_sectional_revision(
+        stage_dir=good_run / "stage-19",
+        run_dir=good_run,
+        config=PaperRevisionConfig(
+            sectional_enabled=True,
+            max_section_retries=0,
+            min_length_ratio=0.5,
+            max_length_ratio=2.0,
+            critic_model="section-critic-z",
+        ),
+        claim_scope="pipeline_validation",
+        provider=_SectionalFixtureProvider(),
+    )
+    assert result.completed is True
+
+    checker = _check(good_run)
+    assert "non_release_claim_scope" in _codes(checker)
+    assert "sectional_non_release_claim_scope" in _codes(checker)
+    assert checker.exit_code() == release_check.EXIT_FAIL
+
+
+def test_sectional_error_plus_degradation_is_exit_one(good_run: Path) -> None:
+    (good_run / "stage-19" / "section_revision_manifest.json").unlink()
+    _write(good_run / "degradation_signal.json", {"generated": "2026-07-11T00:00:00+00:00"})
+    checker = _check(good_run)
+    assert checker.exit_code() == release_check.EXIT_FAIL
 
 
 def test_final_stage_is_manifest_driven(good_run: Path) -> None:
