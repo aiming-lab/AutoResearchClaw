@@ -678,6 +678,15 @@ itself evidence of release readiness and is not consumed by production stages.
 - keep this as a separate upstream-format commit, not an automatic Stage 19
   repair.
 
+The Pre-B2 implementation appends a non-overridable per-call section-output
+contract to all Stage 17 writing calls and validates the final post-HITL draft
+with the CommonMark section model. Ambiguous output is `FAILED` and writes
+`paper_structure_report.json`; it is never auto-renamed or silently repaired.
+Stage 18 likewise appends one cross-domain output contract after every active
+prompt-bank instruction, then validates the response with the B0 extractor.
+Unknown content-bearing subsections write `review_structure_report.json` and
+fail Stage 18 rather than being dropped from the ledger.
+
 ### B2: Feature-flagged Stage 19 integration
 
 - add `PaperRevisionConfig`, default disabled;

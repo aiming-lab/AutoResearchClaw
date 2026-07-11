@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -31,10 +32,26 @@ from researchclaw.pipeline._helpers import (
     _topic_constraint_block,
     _utcnow_iso,
 )
+from researchclaw.pipeline.manuscript_sections import (
+    ManuscriptStructureError,
+    parse_manuscript,
+)
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.prompts import PromptManager
 
 logger = logging.getLogger(__name__)
+
+
+_SECTION_OUTPUT_CONTRACT = """
+
+SECTION OUTPUT CONTRACT (OVERRIDES ANY CONFLICTING FORMAT INSTRUCTIONS):
+- Output only the sections requested in this call. Never repeat, summarize, or
+  continue any section shown as prior context.
+- Use exactly one `##` heading for each requested major section, with the exact
+  requested section name. Do not renumber or rename those major headings.
+- Optional `###` subsection titles must be unique within their `##` parent.
+- Do not emit a title/preamble outside the requested `##` sections.
+"""
 
 
 def _topic_is_literature_first(config: RCConfig) -> bool:
@@ -538,6 +555,7 @@ def _write_paper_sections(
             "data verification, condition listing, or metric enumeration before the title. "
             "The paper should read like a published manuscript, not a data report."
         )
+    call1_user += _SECTION_OUTPUT_CONTRACT
     # R14-1: Higher token limit for reasoning models
     _paper_max_tokens = 12000
     if any(model_name.startswith(p) for p in ("gpt-5", "o3", "o4")):
@@ -616,6 +634,7 @@ def _write_paper_sections(
             f"Outline:\n{outline}\n\n"
             "Output markdown with ## headers. Continue from where Part 1 ended."
         )
+    call2_user += _SECTION_OUTPUT_CONTRACT
     try:
         resp2 = _chat_with_prompt(llm, system, call2_user, max_tokens=_paper_max_tokens, retries=1)
         part2 = resp2.content.strip()
@@ -709,6 +728,7 @@ def _write_paper_sections(
             "- Use \\begin{algorithm} or pseudocode notation, NOT \\begin{verbatim}\n\n"
             "Output markdown with ## headers. Do NOT include a References section."
         )
+    call3_user += _SECTION_OUTPUT_CONTRACT
     try:
         resp3 = _chat_with_prompt(llm, system, call3_user, max_tokens=_paper_max_tokens, retries=1)
         part3 = resp3.content.strip()
@@ -1403,6 +1423,51 @@ def _detect_result_contradictions(
     return advisories
 
 
+def _validate_stage17_manuscript_structure(
+    draft: str,
+    *,
+    stage_dir: Path,
+) -> dict[str, Any]:
+    """Write a deterministic structure report for the final Stage 17 draft."""
+
+    try:
+        document = parse_manuscript(draft, strict=False)
+    except ManuscriptStructureError as exc:
+        document = None
+        structure_issues = exc.issues
+    else:
+        structure_issues = document.structure_issues
+    issues = [
+        {
+            "code": issue.code,
+            "message": issue.message,
+            "ordinal": issue.ordinal,
+        }
+        for issue in structure_issues
+    ]
+    section_count = len(document.sections) if document is not None else 0
+    if not section_count:
+        issues.append(
+            {
+                "code": "manuscript_sections_empty",
+                "message": "paper draft contains no CommonMark headings",
+                "ordinal": None,
+            }
+        )
+    report = {
+        "schema_version": 1,
+        "valid": not issues,
+        "source_sha256": hashlib.sha256(draft.encode("utf-8")).hexdigest(),
+        "section_count": section_count,
+        "issues": issues,
+    }
+    (stage_dir / "paper_structure_report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return report
+
+
 def _execute_paper_draft(
     stage_dir: Path,
     run_dir: Path,
@@ -1412,6 +1477,7 @@ def _execute_paper_draft(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
+    (stage_dir / "paper_structure_report.json").unlink(missing_ok=True)
     outline = _read_prior_artifact(run_dir, "outline.md") or ""
     preamble = _build_context_preamble(
         config,
@@ -2374,6 +2440,36 @@ Generated: {_utcnow_iso()}
         except Exception:
             logger.debug("HITL guidance application to draft failed (non-blocking)")
 
+    draft_path = stage_dir / "paper_draft.md"
+    final_draft = draft_path.read_text(encoding="utf-8")
+    structure_report = _validate_stage17_manuscript_structure(
+        final_draft,
+        stage_dir=stage_dir,
+    )
+    if not structure_report["valid"]:
+        issue_codes = sorted(
+            str(issue["code"])
+            for issue in structure_report["issues"]
+            if isinstance(issue, dict) and issue.get("code")
+        )
+        logger.error(
+            "Stage 17: manuscript structure is ambiguous: %s",
+            ", ".join(issue_codes),
+        )
+        return StageResult(
+            stage=Stage.PAPER_DRAFT,
+            status=StageStatus.FAILED,
+            artifacts=("paper_draft.md", "paper_structure_report.json"),
+            error=(
+                "Paper draft failed strict structure validation: "
+                + ", ".join(issue_codes)
+            ),
+            evidence_refs=(
+                "stage-17/paper_draft.md",
+                "stage-17/paper_structure_report.json",
+            ),
+        )
+
     # --- HITL: Paper Co-Writer data persistence ---
     try:
         from researchclaw.hitl.workshops.paper import PaperCoWriter
@@ -2398,6 +2494,9 @@ Generated: {_utcnow_iso()}
     return StageResult(
         stage=Stage.PAPER_DRAFT,
         status=StageStatus.DONE,
-        artifacts=("paper_draft.md",),
-        evidence_refs=("stage-17/paper_draft.md",),
+        artifacts=("paper_draft.md", "paper_structure_report.json"),
+        evidence_refs=(
+            "stage-17/paper_draft.md",
+            "stage-17/paper_structure_report.json",
+        ),
     )

@@ -2941,6 +2941,8 @@ class TestDataIntegrityBlock:
 
         stage_dir = run_dir / "stage-17"
         stage_dir.mkdir(parents=True, exist_ok=True)
+        stale_report = stage_dir / "paper_structure_report.json"
+        stale_report.write_text('{"valid": true}', encoding="utf-8")
 
         llm = FakeLLMClient("should not be called")
         result = rc_executor._execute_paper_draft(
@@ -2953,6 +2955,7 @@ class TestDataIntegrityBlock:
         assert (stage_dir / "paper_draft.md").exists()
         meta = json.loads((stage_dir / "paper_meta.json").read_text(encoding="utf-8"))
         assert meta["outcome"] == "blocked_simulated_data"
+        assert not stale_report.exists()
         assert meta.get("is_literature_first_topic") is False
         # LLM should NOT have been called
         assert len(llm.calls) == 0
@@ -3043,7 +3046,22 @@ class TestDataIntegrityBlock:
         stage_dir = run_dir / "stage-17"
         stage_dir.mkdir(parents=True, exist_ok=True)
 
-        llm = FakeLLMClient("# Paper Title\n\n## Abstract\nSome abstract text.")
+        class SequentialPaperLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.responses = iter(
+                    (
+                        "## Title\n\nPaper Title\n\n## Abstract\n\nAbstract text.",
+                        "## Method\n\nMethod text.\n\n## Experiments\n\nSetup text.",
+                        "## Results\n\nResults text.\n\n## Conclusion\n\nConclusion text.",
+                    )
+                )
+
+            def chat(self, messages: list[dict[str, str]], **kwargs: object):
+                self.response_text = next(self.responses)
+                return super().chat(messages, **kwargs)
+
+        llm = SequentialPaperLLM()
         result = rc_executor._execute_paper_draft(
             stage_dir, run_dir, rc_config, adapters, llm=llm
         )
@@ -3053,6 +3071,40 @@ class TestDataIntegrityBlock:
         first_prompt = " ".join(m["content"] for m in llm.calls[0])
         assert "GROUNDED METRIC VALUE WHITELIST" in first_prompt
         assert "detection_f1 = 0.4753" in first_prompt
+
+    def test_paper_draft_rejects_duplicate_heading_paths(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "claim_scope": "pipeline_validation",
+                    "dataset_origin": "synthetic",
+                    "evaluator_owner": "scaffold",
+                    "metrics": {"detection_f1": 0.4753327669},
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-17"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        llm = FakeLLMClient("## Method\n\nRepeated method text.")
+
+        result = rc_executor._execute_paper_draft(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.FAILED
+        report = json.loads(
+            (stage_dir / "paper_structure_report.json").read_text(encoding="utf-8")
+        )
+        assert report["valid"] is False
+        assert "duplicate_heading_path" in {
+            issue["code"] for issue in report["issues"]
+        }
 
 
 # ── R4-3: Conference-Grade Title Guidelines Tests ────────────────────

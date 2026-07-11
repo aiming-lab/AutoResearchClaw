@@ -40,6 +40,10 @@ from researchclaw.pipeline._helpers import (
     _utcnow_iso,
     reconcile_figure_refs,
 )
+from researchclaw.pipeline.sectional_revision import (
+    SectionalRevisionContractError,
+    extract_review_ledger,
+)
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.prompts import PromptManager
 
@@ -155,6 +159,22 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
 # Stage 18: Peer Review
 # ---------------------------------------------------------------------------
 
+_STAGE18_REVIEW_FORMAT_CONTRACT = """
+
+STAGE 18 OUTPUT CONTRACT (OVERRIDES ALL EARLIER FORMAT INSTRUCTIONS):
+- Use only `## Reviewer A`, `## Reviewer B`, and `## Reviewer C` reviewer headings.
+- Under each reviewer, use only these exact `###` subsections: `Strengths`,
+  `Weaknesses`, and `Actionable Revisions`.
+- Every Actionable Revisions item must be a markdown list item. Put every issue
+  that requires a manuscript change in that subsection; do not invent headings
+  such as Summary, Required Revisions, Additional Rigor Issues, Recommendation,
+  or Score.
+- After Reviewer C, optionally add exactly one
+  `### General Comments (Applicable to All Reviewers)` subsection. Its comments
+  must also be markdown list items.
+- Do not emit any other markdown heading at any level.
+"""
+
 def _execute_peer_review(
     stage_dir: Path,
     run_dir: Path,
@@ -198,7 +218,7 @@ def _execute_peer_review(
         # prompt bank (ML bank -> NeurIPS/ICML referees, HEP bank -> HEP
         # theorist/phenomenologist/experimentalist). No adapter overlay.
         _review_system = sp.system
-        _review_user = sp.user + _quality_suffix
+        _review_user = sp.user + _quality_suffix + _STAGE18_REVIEW_FORMAT_CONTRACT
         resp = _chat_with_prompt(
             llm,
             _review_system,
@@ -208,24 +228,101 @@ def _execute_peer_review(
         )
         reviews = resp.content
     else:
-        reviews = """# Reviews
+        reviews = """## Reviewer A
 
-## Reviewer A
-- Strengths: Clear problem statement.
-- Weaknesses: Limited ablation details.
-- Actionable revisions: Add uncertainty analysis and stronger baselines.
+### Strengths
+Clear problem statement.
+
+### Weaknesses
+Limited ablation details.
+
+### Actionable Revisions
+1. Add uncertainty analysis and stronger baselines.
 
 ## Reviewer B
-- Strengths: Reproducibility focus.
-- Weaknesses: Discussion underdeveloped.
-- Actionable revisions: Expand limitations and broader impact.
+
+### Strengths
+Reproducibility focus.
+
+### Weaknesses
+Discussion underdeveloped.
+
+### Actionable Revisions
+1. Expand limitations and broader impact.
+
+## Reviewer C
+
+### Strengths
+The evaluation criteria are stated clearly.
+
+### Weaknesses
+Statistical reporting is incomplete.
+
+### Actionable Revisions
+1. Report uncertainty and the number of independent seeds.
+
+### General Comments (Applicable to All Reviewers)
+1. Keep every quantitative claim tied to experiment evidence.
 """
     (stage_dir / "reviews.md").write_text(reviews, encoding="utf-8")
+    try:
+        ledger = extract_review_ledger(
+            reviews,
+            source_path="stage-18/reviews.md",
+        )
+    except SectionalRevisionContractError as exc:
+        report = {
+            "schema_version": 1,
+            "valid": False,
+            "source_reviews_sha256": hashlib.sha256(
+                reviews.encode("utf-8")
+            ).hexdigest(),
+            "issues": [
+                {
+                    "code": issue.code,
+                    "message": issue.message,
+                    "line": issue.line,
+                }
+                for issue in exc.issues
+            ],
+        }
+        (stage_dir / "review_structure_report.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        issue_codes = sorted({issue.code for issue in exc.issues})
+        return StageResult(
+            stage=Stage.PEER_REVIEW,
+            status=StageStatus.FAILED,
+            artifacts=("reviews.md", "review_structure_report.json"),
+            error=(
+                "Peer review failed strict structure validation: "
+                + ", ".join(issue_codes)
+            ),
+            evidence_refs=(
+                "stage-18/reviews.md",
+                "stage-18/review_structure_report.json",
+            ),
+        )
+    report = {
+        "schema_version": 1,
+        "valid": True,
+        "source_reviews_sha256": ledger.source_reviews_sha256,
+        "comment_count": len(ledger.comments),
+        "issues": [],
+    }
+    (stage_dir / "review_structure_report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     return StageResult(
         stage=Stage.PEER_REVIEW,
         status=StageStatus.DONE,
-        artifacts=("reviews.md",),
-        evidence_refs=("stage-18/reviews.md",),
+        artifacts=("reviews.md", "review_structure_report.json"),
+        evidence_refs=(
+            "stage-18/reviews.md",
+            "stage-18/review_structure_report.json",
+        ),
     )
 
 
