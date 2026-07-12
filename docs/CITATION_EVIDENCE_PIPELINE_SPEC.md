@@ -970,6 +970,32 @@ Stage 24 also compares claims against the Stage 9 dataset origin. Synthetic
 runs may not claim public-dataset or local-hardware measurements. Prompt
 instructions in Stage 17 are preventive; Stage 24 is the authoritative audit.
 
+E8 writes `stage-24/citation_support.json` as the support authority. Every
+final-paper citation occurrence becomes a separate obligation bound to the
+canonical final plan, the planned retained excerpt IDs, the Stage 4 source
+artifact hash and span, and the exact sentence containing the citation. The
+isolated critic receives only that sentence, its bounded local context, the
+planned claim, and the retained excerpts. It may return only
+`supported|unsupported` plus a reason; it cannot set IDs, paths, hashes,
+existence status, or completeness.
+
+Only Stage 23 status `verified` is eligible for a supported verdict. Missing,
+suspicious, hallucinated, or skipped existence status deterministically forces
+`unsupported`, irrespective of critic output. No critic, malformed critic
+output, any unsupported instance, or any dataset-origin contradiction makes
+Stage 24 fail in every claim scope. `citations.json` is derived from this
+closure: unsupported instances remain `unmapped` and cannot be relabeled as
+background. Stage 24 fixes its paper input to
+`stage-23/paper_final_verified.md`, checks byte identity with Stage 22, and
+cleans all owned outputs before starting.
+
+E8's hard failure surface is intentionally limited to citation-instance support
+and dataset-origin truth. Unsupported non-citation rows in the LLM-extracted
+claim ledger remain diagnostic at Stage 24; quantitative experiment facts are
+already owned by deterministic Stage 17 closure, while E9 and release checking
+independently replay the complete claim-provenance policy. The LLM claim ledger
+must not become a new self-authorizing release gate.
+
 ## 9. Source-Kind Policy
 
 `source_kind_policy_version: 1` classifies citations deterministically from
@@ -1281,6 +1307,9 @@ shadow-bibliography consumer from becoming a second authority.
 - isolated semantic support assessment;
 - unsupported closure failure;
 - dataset-origin truth audit.
+- strict `citation_support.json` schema with source/span/hash replay fields;
+- only `verified` existence status may receive supported closure;
+- no background or no-critic escape in any scope.
 
 ### E9. Release replay
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -30,6 +31,10 @@ from researchclaw.literature.citation_plan import (
     load_final_citation_plan,
     parse_citation_plan,
     validate_paper_citation_minimum,
+)
+from researchclaw.literature.citation_support import (
+    CitationSupportContractError,
+    parse_citation_support_closure,
 )
 from researchclaw.literature.evidence_cards import (
     EvidenceCardContractError,
@@ -64,6 +69,7 @@ from researchclaw.pipeline.stage_impls._review_publish import (
     _execute_peer_review,
     _execute_quality_gate,
 )
+from researchclaw.pipeline.stage_impls._release_audit import _execute_truth_audit
 from researchclaw.pipeline.stage_impls._synthesis import _execute_synthesis
 from researchclaw.pipeline.stages import StageStatus
 
@@ -205,6 +211,12 @@ def _prepare_stage23_fixture(
     fail_last_card: bool = False,
 ) -> tuple[RCConfig, str, tuple[str, ...]]:
     config = _real_config_snapshot(run_dir, claim_scope=claim_scope)
+    stage9 = run_dir / "stage-09"
+    stage9.mkdir()
+    dump_contract(
+        derive_contract(config, {"datasets": [config.experiment.dataset_origin]}),
+        stage9 / "experiment_contract.yaml",
+    )
     candidate_count = 15 if claim_scope != "pipeline_validation" else 5
     shortlist = _prepare_stage5(
         run_dir,
@@ -269,6 +281,28 @@ def _verification_report(
         skipped=sum(result.status is VerifyStatus.SKIPPED for result in results),
         results=results,
     )
+
+
+def _run_stage23_verified(
+    run_dir: Path,
+    config: RCConfig,
+    planned_keys: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "researchclaw.literature.verify.verify_citations",
+        lambda *_args, **_kwargs: _verification_report(planned_keys),
+    )
+    stage23 = run_dir / "stage-23"
+    stage23.mkdir()
+    result = _execute_citation_verify(
+        stage23,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM([json.dumps({key: 0.9 for key in planned_keys})]),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.DONE, result.error
 
 
 def test_card_batch_requires_exact_identity_closure() -> None:
@@ -1348,6 +1382,306 @@ def test_stage23_cleans_stale_verified_outputs_before_early_failure(
             "references_verified.bib",
             "paper_final_verified.md",
         )
+    )
+
+
+def test_stage24_builds_evidence_bound_support_closure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    config, paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    support_responses = [
+        json.dumps({"verdict": "supported", "reason": "The excerpt supports the claim."})
+        for _key in planned_keys
+    ]
+    support_responses.append(
+        json.dumps(
+            {
+                "claims": [
+                    {
+                        "text": "The experiment reports a bounded result.",
+                        "type": "result",
+                        "values": [],
+                        "cited_keys": [],
+                    }
+                ]
+            }
+        )
+    )
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM(support_responses),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.DONE, result.error
+    support = parse_citation_support_closure(
+        (stage24 / "citation_support.json").read_text(encoding="utf-8")
+    )
+    assert support["valid"] is True
+    assert support["counts"]["supported"] == len(planned_keys)
+    assert all(row["evidence_excerpts"] for row in support["instances"])
+    assert all(
+        row["assessment"]["critic_model"] == config.paper_revision.critic_model
+        for row in support["instances"]
+    )
+    citations = json.loads((stage24 / "citations.json").read_text())
+    assert citations["counts"]["claim_support"] == len(planned_keys)
+    truth = json.loads((stage24 / "truth_audit.json").read_text())
+    assert truth["citation_support_valid"] is True
+    assert (stage24 / "citation_support.json").is_file()
+    assert (stage23_text := run_dir / "stage-23" / "paper_final_verified.md").read_text() == paper_text
+
+
+def test_stage24_fails_unsupported_citation_without_fabricating_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    responses = [
+        json.dumps({"verdict": "unsupported", "reason": "The excerpt is insufficient."})
+        for _key in planned_keys
+    ]
+    responses.append('{"claims": []}')
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM(responses),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.FAILED
+    assert set(result.artifacts) == {
+        "claims.json",
+        "citations.json",
+        "citation_support.json",
+        "critique_resolution.json",
+        "truth_audit.json",
+    }
+    support = json.loads((stage24 / "citation_support.json").read_text())
+    assert support["valid"] is False
+    assert support["counts"]["unsupported"] == len(planned_keys)
+    citations = json.loads((stage24 / "citations.json").read_text())
+    assert citations["counts"]["claim_support"] == 0
+    assert citations["counts"]["unmapped"] == len(planned_keys)
+
+
+def test_stage24_fails_synthetic_claim_of_real_hardware_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    violating_text = "## Introduction\n\n" + " ".join(
+        f"We measured on real hardware [{key}]." for key in planned_keys
+    )
+    (run_dir / "stage-22" / "paper_final.md").write_text(violating_text)
+    (run_dir / "stage-23" / "paper_final_verified.md").write_text(violating_text)
+    responses = [
+        json.dumps({"verdict": "supported", "reason": "The excerpt supports the claim."})
+        for _key in planned_keys
+    ]
+    responses.append('{"claims": []}')
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM(responses),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.FAILED
+    support = json.loads((stage24 / "citation_support.json").read_text())
+    assert support["dataset_origin"] == "synthetic"
+    assert support["dataset_claim_violations"]
+    assert support["valid"] is False
+
+
+def test_stage24_rejects_malformed_support_critic_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM(["{}"]),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.FAILED
+    assert "support critic response" in (result.error or "")
+    assert not (stage24 / "citation_support.json").exists()
+
+
+def test_stage24_without_support_critic_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24, run_dir, config, AdapterBundle(), llm=None
+    )
+    assert result.status is StageStatus.FAILED
+    support = json.loads((stage24 / "citation_support.json").read_text())
+    assert support["counts"]["unsupported"] == len(planned_keys)
+    assert support["valid"] is False
+
+
+def test_stage24_support_replay_rejects_excerpt_tampering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    responses = [
+        json.dumps({"verdict": "supported", "reason": "The excerpt supports the claim."})
+        for _key in planned_keys
+    ]
+    responses.append('{"claims": []}')
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM(responses),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.DONE
+    support = json.loads((stage24 / "citation_support.json").read_text())
+    support["instances"][0]["evidence_excerpts"][0]["excerpt_text"] += " tampered"
+    with pytest.raises(CitationSupportContractError, match="hash mismatch"):
+        parse_citation_support_closure(json.dumps(support))
+
+
+def test_stage24_rejects_support_critic_equal_to_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    unsafe_config = replace(
+        config,
+        paper_revision=replace(
+            config.paper_revision, critic_model=config.llm.primary_model
+        ),
+    )
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24, run_dir, unsafe_config, AdapterBundle(), llm=_SequenceLLM([])  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.FAILED
+    assert "must differ" in (result.error or "")
+    assert not (stage24 / "citation_support.json").exists()
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["suspicious", "hallucinated", "skipped"],
+)
+def test_stage24_existence_status_overrides_supported_critic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    report_path = run_dir / "stage-23" / "verification_report.json"
+    report = json.loads(report_path.read_text())
+    report["results"][0]["status"] = status
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    responses = [
+        json.dumps({"verdict": "supported", "reason": "The excerpt supports the claim."})
+        for _key in planned_keys
+    ]
+    responses.append('{"claims": []}')
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM(responses),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.FAILED
+    support = json.loads((stage24 / "citation_support.json").read_text())
+    assert support["instances"][0]["existence_status"] == status
+    assert support["instances"][0]["assessment"]["verdict"] == "unsupported"
+
+
+def test_stage24_rejects_stage22_stage23_paper_divergence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    (run_dir / "stage-23" / "paper_final_verified.md").write_text(
+        "## Introduction\n\nTampered paper.\n", encoding="utf-8"
+    )
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24, run_dir, config, AdapterBundle(), llm=_SequenceLLM([])  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.FAILED
+    assert "byte-identical" in (result.error or "")
+    assert not (stage24 / "citation_support.json").exists()
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "duplicate"])
+def test_stage24_rejects_verification_result_key_closure_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    report_path = run_dir / "stage-23" / "verification_report.json"
+    report = json.loads(report_path.read_text())
+    if mutation == "missing":
+        report["results"].pop()
+    elif mutation == "extra":
+        report["results"].append(
+            {
+                "cite_key": "extra2024",
+                "title": "Extra",
+                "status": "verified",
+                "confidence": 1.0,
+                "method": "title_search",
+                "details": "",
+            }
+        )
+    else:
+        report["results"].append(dict(report["results"][0]))
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24, run_dir, config, AdapterBundle(), llm=_SequenceLLM([])  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.FAILED
+    assert (
+        "verification result key closure" in (result.error or "")
+        or "duplicate verification cite_key" in (result.error or "")
     )
 
 

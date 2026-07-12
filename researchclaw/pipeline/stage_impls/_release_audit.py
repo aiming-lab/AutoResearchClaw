@@ -29,6 +29,10 @@ from researchclaw.prompts import PromptManager
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.pipeline._helpers import StageResult, _safe_json_loads, _utcnow_iso
 from researchclaw.pipeline import release_artifacts as ra
+from researchclaw.literature.citation_support import (
+    CitationSupportContractError,
+    build_citation_support_closure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +53,11 @@ Rules:
 - Only include claims that could in principle be checked against experiment artifacts or sources.
 - Copy sentences verbatim. Do not paraphrase. Maximum 60 claims."""
 
-_CITATION_MAP_SYSTEM = """You map citation instances to the claims they support. \
-Output STRICT JSON only: {"mappings": [{"instance_id": "...", "role": "claim_support|background", \
-"supported_claim_id": "<claim id or null>", "support_excerpt": "<the sentence the citation supports>"}]}
-Rules:
-- role=claim_support when the citation backs a specific factual claim; include the claim id and the exact sentence.
-- role=background for scene-setting/related-work citations.
-- Citation existence is NOT citation support. When unsure, use background."""
+_CITATION_SUPPORT_SYSTEM = """You are an isolated citation-support critic. \
+Judge whether the retained source excerpt supports the exact local manuscript claim. \
+Return STRICT JSON only: {"verdict":"supported|unsupported","reason":"one sentence"}. \
+Do not use outside knowledge. Existence or topical similarity is not support. \
+When the excerpt is insufficient, return unsupported."""
 
 _RESOLUTION_SYSTEM = """You judge whether a paper addresses critique findings. \
 Output STRICT JSON only: {"resolutions": [{"finding_id": "...", "resolution": "fixed|rebutted|unresolved", \
@@ -85,18 +87,96 @@ def _execute_truth_audit(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
-    paper_path = ra.canonical_paper_path(run_dir)
-    if paper_path is None:
+    owned_outputs = (
+        "claims.json",
+        "citations.json",
+        "citation_support.json",
+        "critique_resolution.json",
+        "truth_audit.json",
+    )
+    try:
+        for name in owned_outputs:
+            path = stage_dir / name
+            if path.is_symlink() or path.exists():
+                path.unlink()
+    except OSError as exc:
         return StageResult(
             stage=Stage.TRUTH_AUDIT,
             status=StageStatus.FAILED,
             artifacts=(),
-            error="Truth audit: no canonical paper artifact found.",
+            error=f"Truth audit: could not clean stale outputs: {exc}",
             decision="retry",
         )
-    paper_text = paper_path.read_text(encoding="utf-8")
+    paper_path = run_dir / "stage-23" / "paper_final_verified.md"
+    try:
+        if paper_path.is_symlink() or not paper_path.is_file():
+            raise OSError("canonical stage-23 paper is missing or unsafe")
+        paper_text = paper_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return StageResult(
+            stage=Stage.TRUTH_AUDIT,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Truth audit: cannot read canonical paper: {exc}",
+            decision="retry",
+        )
     paper_hash = ra.paper_sha256(paper_text)
     evidence_index = ra.collect_evidence_index(run_dir)
+
+    critic_model = str(
+        getattr(getattr(config, "paper_revision", None), "critic_model", "") or ""
+    )
+    writer_model = str(
+        getattr(getattr(config, "llm", None), "primary_model", "") or ""
+    )
+    if critic_model and critic_model == writer_model:
+        return StageResult(
+            stage=Stage.TRUTH_AUDIT,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error="Truth audit support critic must differ from the writer model.",
+            decision="retry",
+        )
+
+    def _assess_support(payload: dict[str, Any]) -> dict[str, str]:
+        if llm is None or not critic_model:
+            return {
+                "verdict": "unsupported",
+                "reason": "No isolated support critic was available.",
+            }
+        raw = _chat_json(
+            llm,
+            _CITATION_SUPPORT_SYSTEM,
+            json.dumps(payload, ensure_ascii=False),
+            model=critic_model,
+        )
+        if not isinstance(raw, dict) or set(raw) != {"verdict", "reason"}:
+            raise CitationSupportContractError("support critic response fields mismatch")
+        verdict = raw.get("verdict")
+        reason = raw.get("reason")
+        if verdict not in {"supported", "unsupported"}:
+            raise CitationSupportContractError("invalid support critic verdict")
+        if not isinstance(reason, str) or not reason.strip():
+            raise CitationSupportContractError("support critic reason is missing")
+        return {"verdict": verdict, "reason": reason.strip()}
+
+    try:
+        support_closure = build_citation_support_closure(
+            run_dir,
+            config,
+            paper_text=paper_text,
+            assessor=_assess_support,
+            critic_model=critic_model or "unavailable",
+        )
+    except (CitationSupportContractError, OSError, UnicodeDecodeError, ValueError) as exc:
+        return StageResult(
+            stage=Stage.TRUTH_AUDIT,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Truth audit citation support closure failed: {exc}",
+            decision="retry",
+        )
+    ra.write_json_atomic(stage_dir / "citation_support.json", support_closure)
 
     # ---- 1. Claim extraction -------------------------------------------
     claims: list[dict[str, Any]] = []
@@ -148,6 +228,22 @@ def _execute_truth_audit(
         claims = _fallback_extract_claims(paper_text)
         if claims:
             extraction_method = "deterministic_fallback"
+
+    support_by_claim_id = {
+        row["claim_id"]: row for row in support_closure["instances"]
+    }
+    for row in support_closure["instances"]:
+        claims.append(
+            {
+                "id": row["claim_id"],
+                "text": row["claim_text"],
+                "type": "citation",
+                "values": [],
+                "cited_keys": [row["cite_key"]],
+                "evidence": [],
+                "status": "pending",
+            }
+        )
 
     if llm is not None and not claims:
         instances = ra.extract_citation_instances(paper_text)
@@ -231,12 +327,14 @@ def _execute_truth_audit(
             artifacts=(
                 "claims.json",
                 "citations.json",
+                "citation_support.json",
                 "critique_resolution.json",
                 "truth_audit.json",
             ),
             evidence_refs=(
                 "stage-24/claims.json",
                 "stage-24/citations.json",
+                "stage-24/citation_support.json",
                 "stage-24/critique_resolution.json",
                 "stage-24/truth_audit.json",
             ),
@@ -250,22 +348,12 @@ def _execute_truth_audit(
     # alone (parametric assertion) is NOT support.
     _verif_rel = "stage-23/verification_report.json"
     _verif_path = run_dir / _verif_rel
-    _verified_keys: set[str] = set()
-    _verif_sha: str | None = None
-    if _verif_path.is_file():
-        _verif_sha = ra.sha256_file(_verif_path)
-        _vdata = ra.read_json(_verif_path) or {}
-        _results = _vdata.get("results") if isinstance(_vdata, dict) else None
-        if isinstance(_results, list):
-            for _r in _results:
-                if isinstance(_r, dict) and str(_r.get("status", "")).lower() in (
-                    "verified",
-                    "ok",
-                    "suspicious",
-                ):
-                    _k = str(_r.get("cite_key") or _r.get("key") or "").strip()
-                    if _k:
-                        _verified_keys.add(_k)
+    _verif_sha = ra.sha256_file(_verif_path) if _verif_path.is_file() else None
+    _verified_keys = {
+        row["cite_key"]
+        for row in support_closure["instances"]
+        if row["existence_status"] == "verified"
+    }
 
     # ---- 2. Provenance closure: match values to run-internal evidence --
     unsupported = 0
@@ -300,11 +388,12 @@ def _execute_truth_audit(
                     "supported" if matched_all and claim["evidence"] else "unsupported"
                 )
         elif claim["type"] == "citation":
-            # Supported only if every cited key is verified AND we can pin the
-            # verification report as run-internal evidence.
+            support = support_by_claim_id.get(claim["id"])
             cited = [k for k in claim["cited_keys"] if k]
             if (
-                cited
+                support is not None
+                and support["assessment"]["verdict"] == "supported"
+                and cited
                 and _verif_sha
                 and all(k in _verified_keys for k in cited)
             ):
@@ -342,76 +431,34 @@ def _execute_truth_audit(
     ra.write_json_atomic(stage_dir / "claims.json", claims_payload)
 
     # ---- 3. Citation instances + support mapping -----------------------
-    instances = ra.extract_citation_instances(paper_text)
-    if llm is not None and instances and claims:
-        claim_digest_for_llm = json.dumps(
-            [{"id": c["id"], "text": c["text"][:200]} for c in claims],
-            ensure_ascii=False,
-        )
-        inst_for_llm = json.dumps(
-            [
-                {
-                    "instance_id": i["instance_id"],
-                    "cite_key": i["cite_key"],
-                    "context": i["context"][:400],
-                }
-                for i in instances[:120]
-            ],
-            ensure_ascii=False,
-        )
-        raw = _chat_json(
-            llm,
-            _CITATION_MAP_SYSTEM,
-            f"CLAIMS:\n{claim_digest_for_llm}\n\nCITATION INSTANCES:\n{inst_for_llm}",
-        )
-        mapping_by_id: dict[str, dict[str, Any]] = {}
-        if isinstance(raw, dict) and isinstance(raw.get("mappings"), list):
-            for m in raw["mappings"]:
-                if isinstance(m, dict) and m.get("instance_id"):
-                    mapping_by_id[str(m["instance_id"])] = m
-        valid_claim_ids = {c["id"] for c in claims}
-        for inst in instances:
-            m = mapping_by_id.get(inst["instance_id"], {})
-            role = str(m.get("role", "unmapped"))
-            if role not in ra.CITATION_ROLES:
-                role = "unmapped"
-            claim_id = m.get("supported_claim_id")
-            if role == "claim_support" and claim_id not in valid_claim_ids:
-                role = "unmapped"
-            inst["role"] = role
-            inst["supported_claim_id"] = claim_id if role == "claim_support" else None
-            inst["support_excerpt"] = (
-                str(m.get("support_excerpt", ""))[:500] if role == "claim_support" else ""
-            )
-    else:
-        for inst in instances:
-            inst["role"] = "unmapped"
-            inst["supported_claim_id"] = None
-            inst["support_excerpt"] = ""
-
-    verification = ra.read_json(run_dir / "stage-23" / "verification_report.json") or {}
+    support_instances = support_closure["instances"]
     citations_payload = {
         "schema_version": ra.SCHEMA_VERSION,
         "paper_path": str(paper_path.relative_to(run_dir)),
-        "existence_report": "stage-23/verification_report.json"
-        if verification
-        else None,
+        "existence_report": "stage-23/verification_report.json",
+        "support_report": "stage-24/citation_support.json",
         "instances": [
             {
-                "instance_id": i["instance_id"],
-                "cite_key": i["cite_key"],
-                "role": i["role"],
-                "supported_claim_id": i["supported_claim_id"],
-                "support_excerpt": i["support_excerpt"],
-                "context": i["context"][:400],
+                "instance_id": row["instance_id"],
+                "cite_key": row["cite_key"],
+                "role": "claim_support"
+                if row["assessment"]["verdict"] == "supported"
+                else "unmapped",
+                "supported_claim_id": row["claim_id"]
+                if row["assessment"]["verdict"] == "supported"
+                else None,
+                "support_excerpt": row["claim_text"]
+                if row["assessment"]["verdict"] == "supported"
+                else "",
+                "context": row["claim_text"][:400],
             }
-            for i in instances
+            for row in support_instances
         ],
         "counts": {
-            "total": len(instances),
-            "claim_support": sum(1 for i in instances if i["role"] == "claim_support"),
-            "background": sum(1 for i in instances if i["role"] == "background"),
-            "unmapped": sum(1 for i in instances if i["role"] == "unmapped"),
+            "total": len(support_instances),
+            "claim_support": support_closure["counts"]["supported"],
+            "background": 0,
+            "unmapped": support_closure["counts"]["unsupported"],
         },
         "generated": _utcnow_iso(),
     }
@@ -484,6 +531,15 @@ def _execute_truth_audit(
             "paper_path": str(paper_path.relative_to(run_dir)),
             "paper_sha256": paper_hash,
             "claims_digest": digest,
+            "citation_support_path": "stage-24/citation_support.json",
+            "citation_support_sha256": ra.sha256_file(
+                stage_dir / "citation_support.json"
+            ),
+            "citation_support_valid": support_closure["valid"],
+            "dataset_origin": support_closure["dataset_origin"],
+            "dataset_claim_violations": support_closure[
+                "dataset_claim_violations"
+            ],
             "extraction_method": extraction_method,
             "llm_available": llm is not None,
             "counts": claims_payload["counts"],
@@ -494,11 +550,24 @@ def _execute_truth_audit(
     artifacts = (
         "claims.json",
         "citations.json",
+        "citation_support.json",
         "critique_resolution.json",
         "truth_audit.json",
     )
-    # Demo-pipeline leniency: the stage completes even with an empty ledger
-    # (no LLM), but release_check fails closed on empty/unsupported claims.
+    if not support_closure["valid"]:
+        return StageResult(
+            stage=Stage.TRUTH_AUDIT,
+            status=StageStatus.FAILED,
+            artifacts=artifacts,
+            evidence_refs=tuple(f"stage-24/{a}" for a in artifacts),
+            error=(
+                "Truth audit citation support or dataset-origin closure failed: "
+                f"unsupported={support_closure['counts']['unsupported']}, "
+                "dataset_claim_violations="
+                f"{support_closure['counts']['dataset_claim_violations']}"
+            ),
+            decision="retry",
+        )
     return StageResult(
         stage=Stage.TRUTH_AUDIT,
         status=StageStatus.DONE,

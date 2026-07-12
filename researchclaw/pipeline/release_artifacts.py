@@ -306,12 +306,37 @@ def extract_citation_instances(text: str) -> list[dict[str, Any]]:
         hi = min(len(stripped), pos + 240)
         return normalize_paper_text(stripped[lo:hi])
 
+    def _claim_text(pos: int) -> str:
+        left = max(
+            stripped.rfind(".", 0, pos),
+            stripped.rfind("!", 0, pos),
+            stripped.rfind("?", 0, pos),
+            stripped.rfind("\n", 0, pos),
+        )
+        right_candidates = [
+            boundary
+            for boundary in (
+                stripped.find(".", pos),
+                stripped.find("!", pos),
+                stripped.find("?", pos),
+                stripped.find("\n", pos),
+            )
+            if boundary >= 0
+        ]
+        right = min(right_candidates) + 1 if right_candidates else len(stripped)
+        return normalize_paper_text(stripped[left + 1:right])
+
     for m in re.finditer(r"\\cite[a-zA-Z*]*(?:\[[^\]]*\])*\{([^}]+)\}", stripped):
         for key in m.group(1).split(","):
             key = key.strip()
             if key:
                 instances.append(
-                    {"cite_key": key, "offset": m.start(), "context": _context(m.start())}
+                    {
+                        "cite_key": key,
+                        "offset": m.start(),
+                        "claim_text": _claim_text(m.start()),
+                        "context": _context(m.start()),
+                    }
                 )
     for m in re.finditer(r"\[([^\[\]]{4,300})\]", stripped):
         parts = [p.strip() for p in re.split(r"[,;]", m.group(1))]
@@ -319,7 +344,12 @@ def extract_citation_instances(text: str) -> list[dict[str, Any]]:
             for key in parts:
                 if key:
                     instances.append(
-                        {"cite_key": key, "offset": m.start(), "context": _context(m.start())}
+                        {
+                            "cite_key": key,
+                            "offset": m.start(),
+                            "claim_text": _claim_text(m.start()),
+                            "context": _context(m.start()),
+                        }
                     )
     for i, inst in enumerate(instances):
         inst["instance_id"] = f"cit-{i:04d}"

@@ -241,6 +241,7 @@ CONTRACTS: dict[Stage, StageContract] = {
         output_files=(
             "claims.json",
             "citations.json",
+            "citation_support.json",
             "critique_resolution.json",
             "truth_audit.json",
         ),

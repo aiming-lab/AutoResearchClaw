@@ -2372,7 +2372,8 @@ class TestResultAnalysisDebate:
         assert data["claims"][0]["text"] == "literal ,} in a string"
 
     def test_truth_audit_falls_back_when_llm_returns_zero_claims(
-        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
@@ -2385,6 +2386,21 @@ class TestResultAnalysisDebate:
         stage_dir = run_dir / "stage-24"
         stage_dir.mkdir(parents=True)
         llm = FakeLLMClient('{"claims": []}')
+        monkeypatch.setattr(
+            "researchclaw.pipeline.stage_impls._release_audit.build_citation_support_closure",
+            lambda *_args, **_kwargs: {
+                "instances": [],
+                "valid": True,
+                "dataset_origin": "synthetic",
+                "dataset_claim_violations": [],
+                "counts": {
+                    "total": 0,
+                    "supported": 0,
+                    "unsupported": 0,
+                    "dataset_claim_violations": 0,
+                },
+            },
+        )
 
         result = rc_executor._execute_truth_audit(
             stage_dir, run_dir, rc_config, adapters, llm=llm
@@ -2404,7 +2420,8 @@ class TestResultAnalysisDebate:
         assert truth["counts"]["total"] == 1
 
     def test_truth_audit_fails_closed_when_llm_and_fallback_find_no_claims(
-        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         run_dir = tmp_path / "run"
         run_dir.mkdir()
@@ -2417,6 +2434,21 @@ class TestResultAnalysisDebate:
         stage_dir = run_dir / "stage-24"
         stage_dir.mkdir(parents=True)
         llm = FakeLLMClient("not json")
+        monkeypatch.setattr(
+            "researchclaw.pipeline.stage_impls._release_audit.build_citation_support_closure",
+            lambda *_args, **_kwargs: {
+                "instances": [],
+                "valid": True,
+                "dataset_origin": "synthetic",
+                "dataset_claim_violations": [],
+                "counts": {
+                    "total": 0,
+                    "supported": 0,
+                    "unsupported": 0,
+                    "dataset_claim_violations": 0,
+                },
+            },
+        )
 
         result = rc_executor._execute_truth_audit(
             stage_dir, run_dir, rc_config, adapters, llm=llm

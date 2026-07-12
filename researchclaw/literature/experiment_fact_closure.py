@@ -52,6 +52,24 @@ _LOCAL_HARDWARE_CONTRADICTIONS = (
 )
 
 
+def find_dataset_claim_violations(
+    paper_text: str, dataset_origin: str
+) -> tuple[str, ...]:
+    """Return deterministic dataset-origin contradictions in manuscript text."""
+
+    patterns = {
+        "synthetic": _SYNTHETIC_CONTRADICTIONS,
+        "public": _PUBLIC_CONTRADICTIONS,
+        "local_hardware": _LOCAL_HARDWARE_CONTRADICTIONS,
+    }.get(dataset_origin)
+    if patterns is None:
+        raise ExperimentFactClosureError("invalid dataset_origin")
+    violations: list[str] = []
+    for pattern in patterns:
+        violations.extend(match.group(0) for match in pattern.finditer(paper_text))
+    return tuple(sorted(set(violations)))
+
+
 def build_experiment_fact_closure_report(
     run_dir: Path, *, paper_text: str
 ) -> dict[str, Any]:
@@ -102,14 +120,9 @@ def build_experiment_fact_closure_report(
             for expected in grounded
         )
     ]
-    dataset_violations: list[str] = []
-    patterns = {
-        "synthetic": _SYNTHETIC_CONTRADICTIONS,
-        "public": _PUBLIC_CONTRADICTIONS,
-        "local_hardware": _LOCAL_HARDWARE_CONTRADICTIONS,
-    }[contract.dataset_origin]
-    for pattern in patterns:
-        dataset_violations.extend(match.group(0) for match in pattern.finditer(paper_text))
+    dataset_violations = list(
+        find_dataset_claim_violations(paper_text, contract.dataset_origin)
+    )
     relative_contract = contract_path.relative_to(run_dir).as_posix()
     payload = {
         "schema_version": EXPERIMENT_FACT_CLOSURE_SCHEMA_VERSION,
