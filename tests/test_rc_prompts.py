@@ -31,7 +31,8 @@ def test_prompt_banks_have_no_numeric_citation_range_policy() -> None:
     texts = _prompt_strings(hep.STAGES) + _prompt_strings(ml.STAGES)
     texts += _prompt_strings(shared._DEFAULT_BLOCKS)
     pattern = re.compile(
-        r"\b\d+\s*-\s*\d+\b[^.\n]{0,80}\b(?:citations|references)\b",
+        r"\b\d+\s*-\s*\d+\b[^.\n]{0,80}\b(?:citations|references)\b"
+        r"|\b(?:citations|references)\b[^.\n]{0,80}\b\d+\s*-\s*\d+\b",
         re.IGNORECASE,
     )
     matches = [match.group(0) for text in texts for match in pattern.finditer(text)]

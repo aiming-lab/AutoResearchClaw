@@ -42,6 +42,28 @@ def _stub_effective_citation_policy_for_legacy_unit_tests(
     monkeypatch.setattr(
         _review_publish, "load_effective_citation_policy", lambda *_args: policy
     )
+    monkeypatch.setattr(_paper_writing, "load_final_citation_plan", lambda *_args: {})
+    monkeypatch.setattr(
+        _paper_writing,
+        "build_citation_writer_instruction",
+        lambda *_args: "\nFINAL CITATION PLAN: legacy unit-test fixture\n",
+    )
+    monkeypatch.setattr(
+        _paper_writing,
+        "build_experiment_fact_closure_report",
+        lambda *_args, **_kwargs: {"valid": True},
+    )
+    monkeypatch.setattr(
+        _paper_writing,
+        "build_citation_closure_report",
+        lambda *_args, **_kwargs: {"valid": True},
+    )
+    monkeypatch.setattr(
+        _paper_writing, "validate_experiment_fact_closure_report", lambda *_args: {}
+    )
+    monkeypatch.setattr(
+        _paper_writing, "validate_citation_closure_report", lambda *_args: {}
+    )
 
 
 class FakeLLMClient:

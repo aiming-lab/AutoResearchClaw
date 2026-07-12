@@ -25,6 +25,16 @@ from researchclaw.literature.citation_policy import (
     CitationPolicyContractError,
     load_effective_citation_policy,
 )
+from researchclaw.literature.citation_plan import (
+    CitationPlanContractError,
+    load_canonical_bibliography,
+    validate_final_paper_citations,
+    validate_citation_closure_report,
+)
+from researchclaw.literature.experiment_fact_closure import (
+    ExperimentFactClosureError,
+    validate_experiment_fact_closure_report,
+)
 from researchclaw.pipeline._domain import _detect_domain  # noqa: F401
 from researchclaw.pipeline._helpers import (
     StageResult,
@@ -48,6 +58,7 @@ from researchclaw.pipeline.sectional_revision import (
     SectionalRevisionContractError,
     extract_review_ledger,
 )
+from researchclaw.pipeline.sectional_validation import extract_citation_keys
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.prompts import PromptManager
 
@@ -228,12 +239,18 @@ def _execute_peer_review(
         (stage_dir / owned_name).unlink(missing_ok=True)
     try:
         effective_citation_policy = load_effective_citation_policy(run_dir, config)
-    except CitationPolicyContractError as exc:
+        validate_experiment_fact_closure_report(run_dir)
+        validate_citation_closure_report(run_dir, config)
+    except (
+        CitationPolicyContractError,
+        CitationPlanContractError,
+        ExperimentFactClosureError,
+    ) as exc:
         return StageResult(
             stage=Stage.PEER_REVIEW,
             status=StageStatus.FAILED,
             artifacts=(),
-            error=f"Effective citation policy is invalid: {exc}",
+            error=f"Effective citation policy is invalid or Stage 17 evidence closure failed: {exc}",
             decision="retry",
         )
     draft = _read_prior_artifact(run_dir, "paper_draft.md") or ""
@@ -2167,7 +2184,20 @@ def _execute_export_publish(
     # and copy final references.bib to export stage
     _ay_map: dict[str, str] = {}  # BUG-102: author-year → cite_key map
     final_paper_latex = final_paper  # default when no bib_text available
-    bib_text = _read_prior_artifact(run_dir, "references.bib")
+    try:
+        bib_text = load_canonical_bibliography(run_dir)
+    except CitationPlanContractError as exc:
+        has_citation_markers = bool(extract_citation_keys(final_paper))
+        if not has_citation_markers:
+            bib_text = ""
+        else:
+            return StageResult(
+                stage=Stage.EXPORT_PUBLISH,
+                status=StageStatus.FAILED,
+                artifacts=("paper_final.md",),
+                error=f"Canonical bibliography is invalid: {exc}",
+                decision="retry",
+            )
     if bib_text:
         # Replace [cite_key] patterns in the final paper with \cite{cite_key}
         # Collect all valid cite_keys from the bib file
@@ -2310,63 +2340,34 @@ def _execute_export_publish(
         if valid_keys and cited_keys_in_paper:
             invalid_keys = cited_keys_in_paper - valid_keys
             if invalid_keys:
-                logger.warning(
-                    "Stage 22: Found %d citation keys in paper not in references.bib: %s",
-                    len(invalid_keys),
-                    ", ".join(sorted(invalid_keys)[:20]),
+                (stage_dir / "invalid_citations.json").write_text(
+                    json.dumps(sorted(invalid_keys), indent=2), encoding="utf-8"
                 )
-                # BUG-176: Try to resolve missing citations before removing them.
-                # Parse cite_key → search query, look up via academic APIs,
-                # and add found entries to references.bib.
-                resolved_keys: set[str] = set()
-                new_bib_entries: list[str] = []
-                if len(invalid_keys) <= 30:  # Sanity: don't flood APIs
-                    resolved_keys, new_bib_entries = _resolve_missing_citations(
-                        invalid_keys, bib_text
-                    )
-                    if resolved_keys:
-                        valid_keys.update(resolved_keys)
-                        bib_text += "\n" + "\n\n".join(new_bib_entries) + "\n"
-                        logger.info(
-                            "Stage 22: Resolved %d/%d missing citations via API lookup",
-                            len(resolved_keys), len(invalid_keys),
-                        )
+                return StageResult(
+                    stage=Stage.EXPORT_PUBLISH,
+                    status=StageStatus.FAILED,
+                    artifacts=("paper_final.md", "invalid_citations.json"),
+                    error=(
+                        "Final paper contains keys outside the immutable Stage 4 "
+                        "bibliography: " + ", ".join(sorted(invalid_keys))
+                    ),
+                    decision="retry",
+                )
 
-                still_invalid = invalid_keys - resolved_keys
-                if still_invalid:
-                    # IMP-29: Remove remaining unresolvable citations from
-                    # BOTH single-key and multi-key brackets.
-                    import re as _re_imp29
-                    for bad_key in still_invalid:
-                        # Remove single-key brackets
-                        final_paper = final_paper.replace(f"[{bad_key}]", "")
-                        # Remove from multi-key brackets: [good, BAD, good] → [good, good]
-                        def _remove_from_multi(m: _re.Match) -> str:
-                            inner = m.group(1)
-                            parts = [p.strip() for p in _re.split(r"[,;]\s*", inner)]
-                            filtered = [p for p in parts if p != bad_key]
-                            if not filtered:
-                                return ""
-                            return "[" + ", ".join(filtered) + "]"
-                        final_paper = _re_imp29.sub(
-                            r"\[([^\]]*\b" + _re.escape(bad_key) + r"\b[^\]]*)\]",
-                            _remove_from_multi,
-                            final_paper,
-                        )
-                    # Clean up whitespace artifacts from removed citations
-                    final_paper = _re_imp29.sub(r"  +", " ", final_paper)
-                    final_paper = _re_imp29.sub(r" ([.,;:)])", r"\1", final_paper)
-                (stage_dir / "paper_final.md").write_text(final_paper, encoding="utf-8")
-                if still_invalid:
-                    (stage_dir / "invalid_citations.json").write_text(
-                        json.dumps(sorted(still_invalid), indent=2), encoding="utf-8"
-                    )
-                    artifacts.append("invalid_citations.json")
-                if resolved_keys:
-                    (stage_dir / "resolved_citations.json").write_text(
-                        json.dumps(sorted(resolved_keys), indent=2), encoding="utf-8"
-                    )
-                    artifacts.append("resolved_citations.json")
+        if cited_keys_in_paper or (run_dir / "stage-16" / "citation_plan.json").is_file():
+            try:
+                validate_final_paper_citations(run_dir, config, final_paper)
+            except CitationPlanContractError as exc:
+                (stage_dir / "invalid_citations.json").write_text(
+                    json.dumps(sorted(cited_keys_in_paper), indent=2), encoding="utf-8"
+                )
+                return StageResult(
+                    stage=Stage.EXPORT_PUBLISH,
+                    status=StageStatus.FAILED,
+                    artifacts=("paper_final.md", "invalid_citations.json"),
+                    error=f"Evidence-bound final citation closure failed: {exc}",
+                    decision="retry",
+                )
 
         final_paper_latex = final_paper  # default: no citation conversion
         if valid_keys:
@@ -3170,8 +3171,32 @@ def _execute_citation_verify(
         verify_citations,
     )
 
-    bib_text = _read_prior_artifact(run_dir, "references.bib") or ""
     paper_text = _read_prior_artifact(run_dir, "paper_final.md") or ""
+    cited_keys = extract_citation_keys(paper_text)
+    has_plan = (run_dir / "stage-16" / "citation_plan.json").is_file()
+    try:
+        bib_text = load_canonical_bibliography(run_dir)
+    except CitationPlanContractError as exc:
+        if cited_keys or has_plan:
+            return StageResult(
+                stage=Stage.CITATION_VERIFY,
+                status=StageStatus.FAILED,
+                artifacts=(),
+                error=f"Canonical bibliography is invalid: {exc}",
+                decision="retry",
+            )
+        bib_text = ""
+    if cited_keys or has_plan:
+        try:
+            validate_final_paper_citations(run_dir, config, paper_text)
+        except CitationPlanContractError as exc:
+            return StageResult(
+                stage=Stage.CITATION_VERIFY,
+                status=StageStatus.FAILED,
+                artifacts=(),
+                error=f"Evidence-bound final citation closure failed: {exc}",
+                decision="retry",
+            )
 
     if not bib_text.strip():
         # v2 fail-closed: if the paper cites keys but there is no bib,

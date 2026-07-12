@@ -20,7 +20,21 @@ from researchclaw.literature.citation_policy import (
     build_effective_citation_policy,
     load_effective_citation_policy,
 )
+from researchclaw.literature.citation_plan import (
+    CitationPlanContractError,
+    build_citation_closure_report,
+    build_citation_plan,
+    build_citation_writer_instruction,
+    load_final_citation_plan,
+    validate_citation_closure_report,
+    validate_citation_plan,
+)
 from researchclaw.literature.evidence_cards import canonical_json_text
+from researchclaw.literature.experiment_fact_closure import (
+    ExperimentFactClosureError,
+    build_experiment_fact_closure_report,
+    validate_experiment_fact_closure_report,
+)
 from researchclaw.pipeline._domain import _detect_domain, _is_ml_domain
 from researchclaw.pipeline._helpers import (
     StageResult,
@@ -86,9 +100,13 @@ def _execute_paper_outline(
     prompts: PromptManager | None = None,
 ) -> StageResult:
     policy_path = stage_dir / "citation_policy_effective.json"
+    preliminary_plan_path = stage_dir / "citation_plan.preliminary.json"
+    final_plan_path = stage_dir / "citation_plan.json"
     outline_path = stage_dir / "outline.md"
     try:
         policy_path.unlink(missing_ok=True)
+        preliminary_plan_path.unlink(missing_ok=True)
+        final_plan_path.unlink(missing_ok=True)
         outline_path.unlink(missing_ok=True)
         effective_policy = build_effective_citation_policy(run_dir, config)
         policy_path.write_text(
@@ -178,14 +196,48 @@ def _execute_paper_outline(
             outline = _default_paper_outline(config.research.topic)
     else:
         outline = _default_paper_outline(config.research.topic)
+    try:
+        preliminary = build_citation_plan(
+            run_dir, config, plan_status="preliminary"
+        )
+        preliminary_text = canonical_json_text(preliminary)
+        preliminary_plan_path.write_text(preliminary_text, encoding="utf-8")
+        validate_citation_plan(
+            run_dir, config, preliminary_text, plan_status="preliminary"
+        )
+        final_plan = build_citation_plan(run_dir, config, plan_status="final")
+        final_plan_text = canonical_json_text(final_plan)
+        final_plan_path.write_text(final_plan_text, encoding="utf-8")
+        validate_citation_plan(
+            run_dir, config, final_plan_text, plan_status="final"
+        )
+    except (CitationPlanContractError, OSError, UnicodeDecodeError) as exc:
+        preliminary_plan_path.unlink(missing_ok=True)
+        final_plan_path.unlink(missing_ok=True)
+        outline_path.unlink(missing_ok=True)
+        return StageResult(
+            stage=Stage.PAPER_OUTLINE,
+            status=StageStatus.FAILED,
+            artifacts=("citation_policy_effective.json",),
+            error=f"Citation plan could not be closed: {exc}",
+            decision="retry",
+            evidence_refs=("stage-16/citation_policy_effective.json",),
+        )
     outline_path.write_text(outline, encoding="utf-8")
     return StageResult(
         stage=Stage.PAPER_OUTLINE,
         status=StageStatus.DONE,
-        artifacts=("outline.md", "citation_policy_effective.json"),
+        artifacts=(
+            "outline.md",
+            "citation_policy_effective.json",
+            "citation_plan.preliminary.json",
+            "citation_plan.json",
+        ),
         evidence_refs=(
             "stage-16/outline.md",
             "stage-16/citation_policy_effective.json",
+            "stage-16/citation_plan.preliminary.json",
+            "stage-16/citation_plan.json",
         ),
     )
 
@@ -1508,6 +1560,8 @@ def _execute_paper_draft(
     for owned_name in (
         "paper_draft.md",
         "paper_structure_report.json",
+        "citation_closure_report.json",
+        "experiment_fact_closure_report.json",
         "draft_quality.json",
         "references_preverified.bib",
     ):
@@ -2021,6 +2075,18 @@ def _execute_paper_draft(
                 _domain_name,
             )
 
+    try:
+        load_final_citation_plan(run_dir, config)
+        citation_instruction = build_citation_writer_instruction(run_dir, config)
+    except CitationPlanContractError as exc:
+        return StageResult(
+            stage=Stage.PAPER_DRAFT,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Final citation plan is invalid: {exc}",
+            decision="retry",
+        )
+
     # R11-5: Experiment quality minimum threshold before paper writing
     # Parse analysis.md for quality rating and condition completeness
     analysis_text = _read_best_analysis(run_dir)
@@ -2281,87 +2347,9 @@ def _execute_paper_draft(
     if _hp_table:
         exp_metrics_instruction += _hp_table
 
-    # F2.6: Build citation list from references.bib / candidates with cite_keys
-    citation_instruction = ""
-    bib_text = _read_prior_artifact(run_dir, "references.bib")
-
-    # P3: Pre-verify citations before paper draft — remove hallucinated refs
-    if bib_text and bib_text.strip():
-        from researchclaw.literature.verify import (
-            filter_verified_bibtex,
-            verify_citations as _verify_cit,
-        )
-        try:
-            _pre_report = _verify_cit(bib_text, inter_verify_delay=0.5)
-            _kept = _pre_report.verified + _pre_report.suspicious
-            _removed = _pre_report.hallucinated
-            if _removed > 0:
-                bib_text = filter_verified_bibtex(
-                    bib_text, _pre_report, include_suspicious=True
-                )
-                (stage_dir / "references_preverified.bib").write_text(
-                    bib_text, encoding="utf-8"
-                )
-                logger.info(
-                    "P3: Pre-verification kept %d/%d citations (removed %d hallucinated)",
-                    _kept, _pre_report.total, _removed,
-                )
-        except Exception as exc:
-            logger.warning("P3: Pre-verification failed, using original bib: %s", exc)
-
-    candidates_text = _read_prior_artifact(run_dir, "candidates.jsonl")
-    if candidates_text:
-        cite_lines: list[str] = []
-        for row_text in candidates_text.strip().splitlines():
-            row = _safe_json_loads(row_text, {})
-            if isinstance(row, dict) and row.get("cite_key"):
-                authors_info = ""
-                if isinstance(row.get("authors"), list) and row["authors"]:
-                    first_author = row["authors"][0]
-                    if isinstance(first_author, dict):
-                        # BUG-38: name may be non-str (tuple/list) — force str
-                        _name = first_author.get("name", "")
-                        authors_info = _name if isinstance(_name, str) else str(_name)
-                    elif isinstance(first_author, str):
-                        authors_info = first_author
-                    if len(row["authors"]) > 1:
-                        authors_info += " et al."
-                title = row.get("title", "")
-                cite_lines.append(
-                    f"- [{row['cite_key']}] \u2192 TITLE: \"{title}\" "
-                    f"| {authors_info} "
-                    f"({row.get('venue', '')}, {row.get('year', '')}, "
-                    f"cited {row.get('citation_count', 0)} times) "
-                    f"| ONLY cite this key when discussing: {title}"
-                )
-        if cite_lines:
-            citation_instruction = (
-                "\n\nAVAILABLE REFERENCES (use [cite_key] to cite in the text):\n"
-                + "\n".join(cite_lines)
-                + "\n\nCRITICAL CITATION RULES:\n"
-                "- In the body text, cite using [cite_key] format, e.g. [smith2024transformer].\n"
-                "- Do NOT write a References section \u2014 it will be auto-generated from the bibliography file.\n"
-                "- Do NOT invent any references or arXiv IDs not in the above list.\n"
-                "- You may cite a subset, but NEVER fabricate citations or change arXiv IDs.\n"
-                "- SEMANTIC MATCHING: Before citing a reference, verify that its TITLE matches\n"
-                "  the concept you are discussing. Do NOT use an unrelated cite_key just\n"
-                "  because it sounds similar.\n"
-                "- If no reference in the list matches the concept you want to cite,\n"
-                "  write 'prior work has shown...' WITHOUT a citation, rather than using\n"
-                "  a mismatched reference.\n"
-                "- Each [cite_key] MUST correspond to the paper whose title is shown\n"
-                "  next to that key in the list above. Cross-check before citing.\n"
-                "\nCITATION QUANTITY & QUALITY CONSTRAINTS:\n"
-                f"- Use at least {effective_citation_policy['effective_min_unique_sources']} "
-                f"and target {citation_target} unique eligible references. Do not "
-                "exceed the available evidence by inventing keys.\n"
-                "- Every citation MUST be directly relevant to the paper's topic.\n"
-                "- DO NOT cite papers from unrelated domains (wireless communication, "
-                "manufacturing, UAV, etc.).\n"
-                "- Prefer well-known, highly-cited papers over obscure ones.\n"
-                "- If unsure whether a paper exists or is relevant, DO NOT cite it.\n"
-            )
-
+    # E5: citation_instruction was built from the sealed final plan and exact
+    # retained excerpts. The free Stage 4 catalog and filtered bibliography
+    # are intentionally outside the writer's authority surface.
     # Literature-first mode instruction for survey/review topics
     if _is_lit_first:
         exp_metrics_instruction += (
@@ -2520,6 +2508,47 @@ Generated: {_utcnow_iso()}
             ),
         )
 
+    try:
+        experiment_report = build_experiment_fact_closure_report(
+            run_dir, paper_text=final_draft
+        )
+        experiment_report_text = canonical_json_text(experiment_report)
+        (stage_dir / "experiment_fact_closure_report.json").write_text(
+            experiment_report_text, encoding="utf-8"
+        )
+        citation_report = build_citation_closure_report(
+            run_dir,
+            config,
+            paper_text=final_draft,
+            structure_report_text=(stage_dir / "paper_structure_report.json").read_text(
+                encoding="utf-8"
+            ),
+            experiment_fact_report_text=experiment_report_text,
+        )
+        (stage_dir / "citation_closure_report.json").write_text(
+            canonical_json_text(citation_report), encoding="utf-8"
+        )
+        validate_experiment_fact_closure_report(run_dir)
+        validate_citation_closure_report(run_dir, config)
+    except (
+        CitationPlanContractError,
+        ExperimentFactClosureError,
+        OSError,
+        UnicodeDecodeError,
+    ) as exc:
+        return StageResult(
+            stage=Stage.PAPER_DRAFT,
+            status=StageStatus.FAILED,
+            artifacts=(
+                "paper_draft.md",
+                "paper_structure_report.json",
+                "experiment_fact_closure_report.json",
+                "citation_closure_report.json",
+            ),
+            error=f"Paper draft closure failed: {exc}",
+            decision="retry",
+        )
+
     # --- HITL: Paper Co-Writer data persistence ---
     try:
         from researchclaw.hitl.workshops.paper import PaperCoWriter
@@ -2544,9 +2573,16 @@ Generated: {_utcnow_iso()}
     return StageResult(
         stage=Stage.PAPER_DRAFT,
         status=StageStatus.DONE,
-        artifacts=("paper_draft.md", "paper_structure_report.json"),
+        artifacts=(
+            "paper_draft.md",
+            "paper_structure_report.json",
+            "experiment_fact_closure_report.json",
+            "citation_closure_report.json",
+        ),
         evidence_refs=(
             "stage-17/paper_draft.md",
             "stage-17/paper_structure_report.json",
+            "stage-17/experiment_fact_closure_report.json",
+            "stage-17/citation_closure_report.json",
         ),
     )

@@ -583,6 +583,7 @@ Rules:
   "unknown_keys": [],
   "unplanned_keys": [],
   "missing_planned_keys": [],
+  "misplaced_planned_keys": [],
   "structure_report_path": "stage-17/paper_structure_report.json",
   "structure_report_sha256": "...",
   "structure_valid": true,
@@ -601,6 +602,9 @@ the deterministic numeric/dataset-claim checks. E5 owns that report schema and
 release replay recomputes both results from their canonical sources.
 
 v1 has no citation auto-repair. Unknown or unplanned keys fail Stage 17.
+Planned keys must also occur in the exact planned top-level section; a key
+that appears elsewhere in the paper is reported as `misplaced_planned_keys`
+and does not satisfy the plan.
 
 A later bounded-regeneration version may write
 `stage-17/citation_regeneration_log.json`, but only after the final citation
@@ -856,6 +860,11 @@ The current Stage 17 full-bibliography preverification path is retired in E5.
 It is not redirected to produce a filtered authoritative bibliography. E7
 replaces it with bounded verification of actual manuscript keys. Stage 17,
 Stage 22, and Stage 23 continue to bind the immutable Stage 4 bibliography.
+Stage 22 and Stage 23 additionally replay the Stage 6 allowlist and final
+Stage 16 plan against the manuscript they actually consume. A key that exists
+in the full Stage 4 bibliography but is absent from the evidence-bound
+allowlist or final plan is rejected. Direct `--from-stage` entry does not skip
+this replay.
 
 After all LLM writing and HITL guidance but before persistence, deterministic
 validation requires:
@@ -865,6 +874,15 @@ validation requires:
 3. every required planned citation is accounted for;
 4. manuscript structure remains valid;
 5. experiment and dataset-origin facts remain closed over canonical artifacts.
+
+Experiment-fact closure uses the promoted root experiment summary when one
+exists, otherwise direct `stage-14/experiment_summary.json`, otherwise flat
+JSON results under direct `stage-12/runs/`. Version-glob or similarly named
+shadow stage directories are not metric authorities. Percent scaling is
+allowed only when the manuscript token explicitly carries `%`; arbitrary
+value-to-source `x100` matching is forbidden. Decimal, scientific,
+percentage, and unit-bearing integer metrics are checked in Abstract,
+Results, Experiment/Evaluation/Ablation, Discussion, and Conclusion sections.
 
 v1 fails immediately on unknown or unplanned keys. It has no aliasing,
 auto-BibTeX, or semantic repair.
@@ -1205,6 +1223,9 @@ shadow-bibliography consumer from becoming a second authority.
 
 - preliminary/final abstract-only plans;
 - strict claim/key/excerpt closure;
+- deterministic v1 planning: one bounded background claim per selected key,
+  using the first retained excerpt verbatim as the wording ceiling; the LLM
+  does not choose keys, excerpt IDs, paths, or support status;
 - no full-text acquisition;
 - controlled synthetic evidence-pack fixture.
 

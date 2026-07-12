@@ -30,6 +30,12 @@ def _stub_effective_citation_policy(monkeypatch: pytest.MonkeyPatch) -> None:
             "effective_target_unique_sources": 15,
         },
     )
+    monkeypatch.setattr(
+        _review_publish, "validate_experiment_fact_closure_report", lambda *_args: {}
+    )
+    monkeypatch.setattr(
+        _review_publish, "validate_citation_closure_report", lambda *_args: {}
+    )
 
 
 class _PromptManagerStub:

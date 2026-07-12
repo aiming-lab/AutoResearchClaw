@@ -12,6 +12,7 @@ import yaml
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.experiment_runtime.contract import derive_contract, dump_contract
 from researchclaw.literature.citation_policy import (
     CitationPolicyContractError,
     load_effective_citation_policy,
@@ -22,6 +23,13 @@ from researchclaw.literature.citation_policy import (
     write_active_config_binding,
 )
 from researchclaw.literature.citation_identity import seal_citation_collection
+from researchclaw.literature.citation_plan import (
+    CitationPlanContractError,
+    build_citation_closure_report,
+    build_citation_writer_instruction,
+    load_final_citation_plan,
+    parse_citation_plan,
+)
 from researchclaw.literature.evidence_cards import (
     EvidenceCardContractError,
     build_cards_manifest,
@@ -32,6 +40,10 @@ from researchclaw.literature.evidence_cards import (
     render_evidence_card_markdown,
     validate_cards_artifacts,
 )
+from researchclaw.literature.experiment_fact_closure import (
+    build_experiment_fact_closure_report,
+    parse_experiment_fact_closure_report,
+)
 from researchclaw.literature.screening import sha256_text
 from researchclaw.pipeline.stage_impls._literature import (
     _execute_knowledge_extract,
@@ -40,6 +52,8 @@ from researchclaw.pipeline.stage_impls._literature import (
 from researchclaw.pipeline.stage_impls._paper_writing import _execute_paper_outline
 from researchclaw.pipeline.stage_impls._paper_writing import _execute_paper_draft
 from researchclaw.pipeline.stage_impls._review_publish import (
+    _execute_citation_verify,
+    _execute_export_publish,
     _execute_peer_review,
     _execute_quality_gate,
 )
@@ -565,6 +579,16 @@ def test_stage16_effective_policy_binds_run_local_config(tmp_path: Path) -> None
     assert policy["effective_min_unique_sources"] == 1
     assert policy["effective_target_unique_sources"] == 1
     assert policy["config_source_path"] == "config.yaml"
+    final_plan = load_final_citation_plan(run_dir, config)
+    assert final_plan["plan_status"] == "final"
+    assert [
+        claim["planned_citations"][0]["cite_key"]
+        for claim in final_plan["claims"]
+    ] == [shortlist[0]["cite_key"]]
+    instruction = build_citation_writer_instruction(run_dir, config)
+    assert shortlist[0]["cite_key"] in instruction
+    assert shortlist[0]["abstract"] in instruction
+    assert "AVAILABLE REFERENCES" not in instruction
 
     history_path = run_dir / "config_snapshot_history.jsonl"
     history_text = history_path.read_text(encoding="utf-8")
@@ -621,6 +645,357 @@ def test_citation_policy_loaders_reject_duplicate_keys_and_boolean_counts() -> N
     }
     with pytest.raises(CitationPolicyContractError, match="nonnegative integer"):
         parse_effective_citation_policy(canonical_json_text(payload))
+
+
+def test_citation_plan_loader_rejects_unknown_fields_and_tampering(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    shortlist = _prepare_stage5(run_dir, [_candidate(1)], config)
+    stage6 = run_dir / "stage-06"
+    stage6.mkdir()
+    assert _execute_knowledge_extract(
+        stage6,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM([_card_response(shortlist)]),  # type: ignore[arg-type]
+    ).status is StageStatus.DONE
+    stage16 = run_dir / "stage-16"
+    stage16.mkdir()
+    assert _execute_paper_outline(
+        stage16, run_dir, config, AdapterBundle(), llm=None
+    ).status is StageStatus.DONE
+    plan_path = stage16 / "citation_plan.json"
+    payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    payload["claims"][0]["planned_citations"][0]["cite_key"] = "fake2024key"
+    plan_path.write_text(canonical_json_text(payload), encoding="utf-8")
+    with pytest.raises(CitationPlanContractError, match="replay mismatch"):
+        load_final_citation_plan(run_dir, config)
+    payload["unexpected"] = True
+    with pytest.raises(CitationPlanContractError, match="fields mismatch"):
+        parse_citation_plan(canonical_json_text(payload))
+
+
+def test_citation_closure_rejects_key_outside_assigned_section(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    shortlist = _prepare_stage5(run_dir, [_candidate(1)], config)
+    stage6 = run_dir / "stage-06"
+    stage6.mkdir()
+    assert _execute_knowledge_extract(
+        stage6,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM([_card_response(shortlist)]),  # type: ignore[arg-type]
+    ).status is StageStatus.DONE
+    stage16 = run_dir / "stage-16"
+    stage16.mkdir()
+    assert _execute_paper_outline(
+        stage16, run_dir, config, AdapterBundle(), llm=None
+    ).status is StageStatus.DONE
+    key = shortlist[0]["cite_key"]
+    paper = f"## Introduction\n\nBackground.\n\n## Results\n\nResult [{key}].\n"
+    stage9 = run_dir / "stage-09"
+    stage9.mkdir()
+    dump_contract(derive_contract(config, None), stage9 / "experiment_contract.yaml")
+    metric_path = run_dir / "stage-12" / "runs" / "results.json"
+    metric_path.parent.mkdir(parents=True)
+    metric_path.write_text(
+        json.dumps({"metrics": {"detection_f1": 0.95}}), encoding="utf-8"
+    )
+    structure = canonical_json_text(
+        {
+            "schema_version": 1,
+            "valid": True,
+            "source_sha256": sha256_text(paper),
+            "section_count": 2,
+            "issues": [],
+        }
+    )
+    experiment = canonical_json_text(
+        build_experiment_fact_closure_report(run_dir, paper_text=paper)
+    )
+    report = build_citation_closure_report(
+        run_dir,
+        config,
+        paper_text=paper,
+        structure_report_text=structure,
+        experiment_fact_report_text=experiment,
+    )
+    assert report["misplaced_planned_keys"] == [key]
+    assert report["valid"] is False
+
+
+def test_experiment_fact_closure_binds_metrics_and_synthetic_origin(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    stage9 = run_dir / "stage-09"
+    stage9.mkdir()
+    dump_contract(derive_contract(config, None), stage9 / "experiment_contract.yaml")
+    run_path = run_dir / "stage-12" / "runs" / "run-001.json"
+    run_path.parent.mkdir(parents=True)
+    run_path.write_text(
+        json.dumps({"metrics": {"detection_rate": 0.95}}), encoding="utf-8"
+    )
+    paper = (
+        "## Introduction\n\nPrior work reported 0.42 in another setting.\n\n"
+        "## Results\n\nThe measured detection rate was 95%.\n"
+    )
+    report = build_experiment_fact_closure_report(run_dir, paper_text=paper)
+    assert report["valid"] is True
+    assert report["manuscript_numeric_values"] == [0.95]
+    assert report["unknown_numeric_values"] == []
+
+    contradicted = paper.replace(
+        "The measured", "Using real-hardware measurements, the measured"
+    )
+    report = build_experiment_fact_closure_report(run_dir, paper_text=contradicted)
+    assert report["valid"] is False
+    assert report["dataset_claim_violations"]
+
+
+def test_experiment_fact_closure_rejects_unknown_metric_and_duplicate_json() -> None:
+    payload = {
+        "schema_version": 1,
+        "paper_path": "stage-17/paper_draft.md",
+        "paper_sha256": "a" * 64,
+        "experiment_contract_path": "stage-09/experiment_contract.yaml",
+        "experiment_contract_sha256": "b" * 64,
+        "dataset_origin": "synthetic",
+        "metric_sources": [{"path": "stage-12/runs/run.json", "sha256": "c" * 64}],
+        "grounded_numeric_values": [0.95],
+        "manuscript_numeric_values": [0.97],
+        "unknown_numeric_values": [0.97],
+        "dataset_claim_violations": [],
+        "valid": False,
+    }
+    assert parse_experiment_fact_closure_report(canonical_json_text(payload))["valid"] is False
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        parse_experiment_fact_closure_report('{"schema_version":1,"schema_version":1}')
+
+
+def test_experiment_fact_closure_detects_integer_and_non_results_metrics(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    stage9 = run_dir / "stage-09"
+    stage9.mkdir()
+    dump_contract(derive_contract(config, None), stage9 / "experiment_contract.yaml")
+    metric_path = run_dir / "stage-12" / "runs" / "results.json"
+    metric_path.parent.mkdir(parents=True)
+    metric_path.write_text(
+        json.dumps({"metrics": {"fps": 90, "latency_cycles": 64, "f1": 0.5}}),
+        encoding="utf-8",
+    )
+    paper = (
+        "## Abstract\n\nThe system achieves 92 FPS and 0.7 F1.\n\n"
+        "## Results\n\nLatency was 128 cycles.\n\n"
+        "## Discussion\n\nThe gain remained 3x.\n"
+    )
+    report = build_experiment_fact_closure_report(run_dir, paper_text=paper)
+    assert report["valid"] is False
+    assert report["unknown_numeric_values"] == [92.0, 0.7, 128.0, 3.0]
+
+
+def test_experiment_fact_closure_percent_normalization_is_token_explicit(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    stage9 = run_dir / "stage-09"
+    stage9.mkdir()
+    dump_contract(derive_contract(config, None), stage9 / "experiment_contract.yaml")
+    metric_path = run_dir / "stage-12" / "runs" / "results.json"
+    metric_path.parent.mkdir(parents=True)
+    metric_path.write_text(json.dumps({"metrics": {"rate": 0.5}}), encoding="utf-8")
+    percent = build_experiment_fact_closure_report(
+        run_dir, paper_text="## Results\n\nThe rate was 50%.\n"
+    )
+    assert percent["valid"] is True
+    unmarked = build_experiment_fact_closure_report(
+        run_dir, paper_text="## Results\n\nThe rate was 50.0.\n"
+    )
+    assert unmarked["unknown_numeric_values"] == [50.0]
+
+
+def test_experiment_fact_closure_ignores_shadow_metric_stage_and_flags_hardware_claim(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    stage9 = run_dir / "stage-09"
+    stage9.mkdir()
+    dump_contract(derive_contract(config, None), stage9 / "experiment_contract.yaml")
+    direct = run_dir / "stage-12" / "runs" / "results.json"
+    direct.parent.mkdir(parents=True)
+    direct.write_text(json.dumps({"metrics": {"rate": 0.5}}), encoding="utf-8")
+    shadow = run_dir / "stage-12b" / "runs" / "fake.json"
+    shadow.parent.mkdir(parents=True)
+    shadow.write_text(json.dumps({"metrics": {"rate": 0.97}}), encoding="utf-8")
+    paper = (
+        "## Abstract\n\nWe captured on our FPGA prototype board.\n\n"
+        "## Results\n\nThe rate was 0.97.\n"
+    )
+    report = build_experiment_fact_closure_report(run_dir, paper_text=paper)
+    assert report["unknown_numeric_values"] == [0.97]
+    assert report["dataset_claim_violations"]
+
+
+def test_stage17_uses_final_plan_only_and_writes_replayable_closure(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    shortlist = _prepare_stage5(run_dir, [_candidate(1)], config)
+    stage6 = run_dir / "stage-06"
+    stage6.mkdir()
+    assert _execute_knowledge_extract(
+        stage6,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM([_card_response(shortlist)]),  # type: ignore[arg-type]
+    ).status is StageStatus.DONE
+    stage9 = run_dir / "stage-09"
+    stage9.mkdir()
+    dump_contract(derive_contract(config, None), stage9 / "experiment_contract.yaml")
+    run_path = run_dir / "stage-12" / "runs" / "results.json"
+    run_path.parent.mkdir(parents=True)
+    run_path.write_text(
+        json.dumps(
+            {
+                "claim_scope": "pipeline_validation",
+                "dataset_origin": "synthetic",
+                "evaluator_owner": "scaffold",
+                "metrics": {"detection_f1": 0.95},
+            }
+        ),
+        encoding="utf-8",
+    )
+    stage16 = run_dir / "stage-16"
+    stage16.mkdir()
+    assert _execute_paper_outline(
+        stage16, run_dir, config, AdapterBundle(), llm=None
+    ).status is StageStatus.DONE
+    key = shortlist[0]["cite_key"]
+    llm = _SequenceLLM(
+        [
+            (
+                "## Title\n\nBounded Study\n\n## Abstract\n\nAbstract.\n\n"
+                f"## Introduction\n\nEvidence-backed context [{key}].\n\n"
+                "## Related Work\n\nRelated work."
+            ),
+            "## Method\n\nMethod.\n\n## Experiments\n\nExperiment setup.",
+            "## Results\n\nDetection F1 was 95%.\n\n## Conclusion\n\nConclusion.",
+        ]
+    )
+    stage17 = run_dir / "stage-17"
+    stage17.mkdir()
+    result = _execute_paper_draft(
+        stage17,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=llm,  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.DONE, result.error
+    prompts = "\n".join(llm.calls)
+    assert "FINAL CITATION PLAN" in prompts
+    assert "AVAILABLE REFERENCES" not in prompts
+    assert "Hardware Detection Study" not in prompts
+    assert not (stage17 / "references_preverified.bib").exists()
+    closure = json.loads((stage17 / "citation_closure_report.json").read_text())
+    assert closure["valid"] is True
+    assert closure["experiment_fact_closure_valid"] is True
+    closure["paper_sha256"] = "0" * 64
+    (stage17 / "citation_closure_report.json").write_text(
+        canonical_json_text(closure), encoding="utf-8"
+    )
+    stage18 = run_dir / "stage-18"
+    stage18.mkdir()
+    review = _execute_peer_review(
+        stage18, run_dir, config, AdapterBundle(), llm=None
+    )
+    assert review.status is StageStatus.FAILED
+    assert "closure" in (review.error or "").lower()
+
+
+def test_stage22_and_stage23_reject_bibliography_key_outside_allowlist(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    shortlist = _prepare_stage5(run_dir, [_candidate(i) for i in range(1, 6)], config)
+    stage6 = run_dir / "stage-06"
+    stage6.mkdir()
+    llm = _SequenceLLM(
+        [_card_response(shortlist[:4]), "{}", "{}"]
+    )
+    assert _execute_knowledge_extract(
+        stage6, run_dir, config, AdapterBundle(), llm=llm  # type: ignore[arg-type]
+    ).status is StageStatus.DONE
+    stage16 = run_dir / "stage-16"
+    stage16.mkdir()
+    assert _execute_paper_outline(
+        stage16, run_dir, config, AdapterBundle(), llm=None
+    ).status is StageStatus.DONE
+    planned = load_final_citation_plan(run_dir, config)
+    planned_keys = [
+        citation["cite_key"]
+        for claim in planned["claims"]
+        for citation in claim["planned_citations"]
+    ]
+    ineligible_key = shortlist[4]["cite_key"]
+    final_text = "## Introduction\n\n" + " ".join(
+        f"Evidence [{key}]." for key in planned_keys + [ineligible_key]
+    )
+    stage19 = run_dir / "stage-19"
+    stage19.mkdir()
+    (stage19 / "paper_revised.md").write_text(final_text, encoding="utf-8")
+    stage22 = run_dir / "stage-22"
+    stage22.mkdir()
+    exported = _execute_export_publish(
+        stage22, run_dir, config, AdapterBundle(), llm=None
+    )
+    assert exported.status is StageStatus.FAILED
+    assert "Evidence-bound" in (exported.error or "")
+
+    (stage22 / "paper_final.md").write_text(final_text, encoding="utf-8")
+    stage23 = run_dir / "stage-23"
+    stage23.mkdir()
+    verified = _execute_citation_verify(
+        stage23, run_dir, config, AdapterBundle(), llm=None
+    )
+    assert verified.status is StageStatus.FAILED
+    assert "Evidence-bound" in (verified.error or "")
+
+
+def test_stage22_rejects_multi_key_markers_when_canonical_bib_is_missing(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    stage19 = run_dir / "stage-19"
+    stage19.mkdir(parents=True)
+    (stage19 / "paper_revised.md").write_text(
+        "## Introduction\n\nPrior work [alpha2020, beta2021].\n",
+        encoding="utf-8",
+    )
+    stage22 = run_dir / "stage-22"
+    stage22.mkdir()
+    result = _execute_export_publish(
+        stage22, run_dir, config, AdapterBundle(), llm=None
+    )
+    assert result.status is StageStatus.FAILED
+    assert "Canonical bibliography" in (result.error or "")
 
 
 def test_resumed_config_without_active_pointer_fails_closed(tmp_path: Path) -> None:
