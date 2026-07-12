@@ -73,6 +73,214 @@ SECTION OUTPUT CONTRACT (OVERRIDES ANY CONFLICTING FORMAT INSTRUCTIONS):
 - Do not emit a title/preamble outside the requested `##` sections.
 """
 
+_SECTION_GENERATION_SCHEMA_VERSION = 1
+_SECTION_OWNERSHIP_CONTRACT_VERSION = 1
+_RESERVED_MAJOR_SECTION_NAMES = frozenset(
+    {
+        "abstract",
+        "introduction",
+        "related work",
+        "method",
+        "experiments",
+        "results",
+        "discussion",
+        "limitations",
+        "conclusion",
+        "conclusions",
+        "model / theoretical framework",
+        "phenomenology / computational setup",
+    }
+)
+
+
+class PaperSectionContractError(ValueError):
+    """Raised when a Stage 17 LLM part violates section ownership."""
+
+    def __init__(self, part_name: str, violations: tuple[str, ...], text: str):
+        self.part_name = part_name
+        self.violations = violations
+        self.text = text
+        super().__init__(f"{part_name} section contract failed: {', '.join(violations)}")
+
+
+def _normalize_major_heading(title: str) -> str:
+    return " ".join(title.strip().casefold().split())
+
+
+def _validate_paper_part_sections(
+    text: str,
+    *,
+    expected_major_sections: tuple[str, ...],
+    title_slot: bool,
+) -> tuple[str, ...]:
+    """Validate one LLM part with the canonical CommonMark parser."""
+    try:
+        document = parse_manuscript(text, strict=False)
+    except ManuscriptStructureError as exc:
+        return tuple(sorted({issue.code for issue in exc.issues}))
+
+    violations = {issue.code for issue in document.structure_issues}
+    if document.preamble.strip():
+        violations.add("section_part_preamble_forbidden")
+    if any(section.level not in {2, 3} for section in document.sections):
+        violations.add("section_part_heading_level_invalid")
+
+    major = tuple(
+        _normalize_major_heading(section.title)
+        for section in document.sections
+        if section.level == 2
+    )
+    expected = tuple(_normalize_major_heading(title) for title in expected_major_sections)
+    if title_slot:
+        if len(major) != len(expected) + 1 or major[1:] != expected:
+            violations.add("section_part_major_sequence_mismatch")
+        elif not major[0] or major[0] in _RESERVED_MAJOR_SECTION_NAMES:
+            violations.add("section_part_title_invalid")
+    elif major != expected:
+        violations.add("section_part_major_sequence_mismatch")
+    return tuple(sorted(violations))
+
+
+def _persist_section_generation_report(
+    stage_dir: Path | None, entries: list[dict[str, Any]]
+) -> None:
+    if stage_dir is None:
+        return
+    report = {
+        "schema_version": _SECTION_GENERATION_SCHEMA_VERSION,
+        "ownership_contract_version": _SECTION_OWNERSHIP_CONTRACT_VERSION,
+        "parts": entries,
+    }
+    (stage_dir / "section_generation_report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_or_regenerate_paper_part(
+    *,
+    llm: LLMClient,
+    system: str,
+    user_prompt: str,
+    initial_text: str,
+    part_name: str,
+    expected_major_sections: tuple[str, ...],
+    title_slot: bool,
+    max_tokens: int,
+    report_entries: list[dict[str, Any]],
+    stage_dir: Path | None,
+) -> str:
+    text = initial_text.strip()
+    attempts: list[dict[str, Any]] = []
+    for semantic_attempt in (1, 2):
+        violations = _validate_paper_part_sections(
+            text,
+            expected_major_sections=expected_major_sections,
+            title_slot=title_slot,
+        )
+        attempts.append(
+            {
+                "attempt": semantic_attempt,
+                "response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "valid": not violations,
+                "violations": list(violations),
+            }
+        )
+        if not violations:
+            report_entries.append(
+                {
+                    "part": part_name,
+                    "title_slot": title_slot,
+                    "expected_major_sections": list(expected_major_sections),
+                    "attempts": attempts,
+                }
+            )
+            _persist_section_generation_report(stage_dir, report_entries)
+            return text
+        if semantic_attempt == 2:
+            report_entries.append(
+                {
+                    "part": part_name,
+                    "title_slot": title_slot,
+                    "expected_major_sections": list(expected_major_sections),
+                    "attempts": attempts,
+                }
+            )
+            _persist_section_generation_report(stage_dir, report_entries)
+            raise PaperSectionContractError(part_name, violations, text)
+
+        repair_prompt = (
+            user_prompt
+            + "\n\nTHE PREVIOUS RESPONSE VIOLATED THE SECTION OWNERSHIP CONTRACT:\n"
+            + "\n".join(f"- {violation}" for violation in violations)
+            + "\nRegenerate this complete part once. Output only the owned sections."
+        )
+        try:
+            regenerated = _chat_with_prompt(
+                llm,
+                system,
+                repair_prompt,
+                max_tokens=max_tokens,
+                retries=1,
+            )
+            text = regenerated.content.strip()
+        except Exception as exc:  # noqa: BLE001
+            text = ""
+            attempts.append(
+                {
+                    "attempt": 2,
+                    "response_sha256": hashlib.sha256(b"").hexdigest(),
+                    "valid": False,
+                    "violations": [f"section_part_transport_error:{type(exc).__name__}"],
+                }
+            )
+            report_entries.append(
+                {
+                    "part": part_name,
+                    "title_slot": title_slot,
+                    "expected_major_sections": list(expected_major_sections),
+                    "attempts": attempts,
+                }
+            )
+            _persist_section_generation_report(stage_dir, report_entries)
+            raise PaperSectionContractError(
+                part_name,
+                ("section_part_transport_error",),
+                text,
+            ) from exc
+
+
+def _raise_initial_part_transport_failure(
+    *,
+    part_name: str,
+    expected_major_sections: tuple[str, ...],
+    title_slot: bool,
+    exc: Exception,
+    report_entries: list[dict[str, Any]],
+    stage_dir: Path | None,
+) -> None:
+    report_entries.append(
+        {
+            "part": part_name,
+            "title_slot": title_slot,
+            "expected_major_sections": list(expected_major_sections),
+            "attempts": [
+                {
+                    "attempt": 1,
+                    "response_sha256": hashlib.sha256(b"").hexdigest(),
+                    "valid": False,
+                    "violations": [
+                        f"section_part_transport_error:{type(exc).__name__}"
+                    ],
+                }
+            ],
+        }
+    )
+    _persist_section_generation_report(stage_dir, report_entries)
+    raise PaperSectionContractError(
+        part_name, ("section_part_transport_error",), ""
+    ) from exc
+
 
 def _topic_is_literature_first(config: RCConfig) -> bool:
     """Return True when the topic is a survey/review or the project uses docs-first mode.
@@ -513,6 +721,7 @@ def _write_paper_sections(
     venue_label: str = "NeurIPS/ICML",
     venue_guidance: str = "",
     is_hep: bool = False,
+    stage_dir: Path | None = None,
 ) -> str:
     """Write a conference-grade paper in 3 sequential LLM calls.
 
@@ -546,6 +755,7 @@ def _write_paper_sections(
     ).system
 
     sections: list[str] = []
+    section_generation_entries: list[dict[str, Any]] = []
 
     # --- R4-3: Title guidelines and abstract structure ---
     try:
@@ -643,15 +853,32 @@ def _write_paper_sections(
     try:
         resp1 = _chat_with_prompt(llm, system, call1_user, max_tokens=_paper_max_tokens, retries=1)
         part1 = resp1.content.strip()
-    except Exception:  # noqa: BLE001
-        logger.error("Stage 17: Part 1 LLM call failed after retry — using placeholder")
-        part1 = (
-            "## Title\n[PLACEHOLDER — LLM call failed]\n\n"
-            "## Abstract\n[This section could not be generated due to an LLM error. "
-            "Please regenerate this stage.]\n\n"
-            "## Introduction\n[PLACEHOLDER]\n\n"
-            "## Related Work\n[PLACEHOLDER]"
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Stage 17: Part 1 LLM call failed after transport retry")
+        _raise_initial_part_transport_failure(
+            part_name="part-1",
+            expected_major_sections=("Abstract", "Introduction")
+            if is_hep
+            else ("Abstract", "Introduction", "Related Work"),
+            title_slot=True,
+            exc=exc,
+            report_entries=section_generation_entries,
+            stage_dir=stage_dir,
         )
+    part1 = _validate_or_regenerate_paper_part(
+        llm=llm,
+        system=system,
+        user_prompt=call1_user,
+        initial_text=part1,
+        part_name="part-1",
+        expected_major_sections=("Abstract", "Introduction")
+        if is_hep
+        else ("Abstract", "Introduction", "Related Work"),
+        title_slot=True,
+        max_tokens=_paper_max_tokens,
+        report_entries=section_generation_entries,
+        stage_dir=stage_dir,
+    )
     sections.append(part1)
     logger.info("Stage 17: Part 1 (Title+Abstract+Intro+Related Work) — %d chars", len(part1))
 
@@ -716,12 +943,36 @@ def _write_paper_sections(
     try:
         resp2 = _chat_with_prompt(llm, system, call2_user, max_tokens=_paper_max_tokens, retries=1)
         part2 = resp2.content.strip()
-    except Exception:  # noqa: BLE001
-        logger.error("Stage 17: Part 2 LLM call failed after retry — using placeholder")
-        part2 = (
-            "## Method\n[PLACEHOLDER — LLM call failed. Please regenerate this stage.]\n\n"
-            "## Experiments\n[PLACEHOLDER]"
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Stage 17: Part 2 LLM call failed after transport retry")
+        _raise_initial_part_transport_failure(
+            part_name="part-2",
+            expected_major_sections=(
+                ("Model / Theoretical Framework", "Phenomenology / Computational Setup")
+                if is_hep
+                else ("Method", "Experiments")
+            ),
+            title_slot=False,
+            exc=exc,
+            report_entries=section_generation_entries,
+            stage_dir=stage_dir,
         )
+    part2 = _validate_or_regenerate_paper_part(
+        llm=llm,
+        system=system,
+        user_prompt=call2_user,
+        initial_text=part2,
+        part_name="part-2",
+        expected_major_sections=(
+            ("Model / Theoretical Framework", "Phenomenology / Computational Setup")
+            if is_hep
+            else ("Method", "Experiments")
+        ),
+        title_slot=False,
+        max_tokens=_paper_max_tokens,
+        report_entries=section_generation_entries,
+        stage_dir=stage_dir,
+    )
     sections.append(part2)
     logger.info("Stage 17: Part 2 (Method+Experiments) — %d chars", len(part2))
 
@@ -810,14 +1061,32 @@ def _write_paper_sections(
     try:
         resp3 = _chat_with_prompt(llm, system, call3_user, max_tokens=_paper_max_tokens, retries=1)
         part3 = resp3.content.strip()
-    except Exception:  # noqa: BLE001
-        logger.error("Stage 17: Part 3 LLM call failed after retry — using placeholder")
-        part3 = (
-            "## Results\n[PLACEHOLDER — LLM call failed. Please regenerate this stage.]\n\n"
-            "## Discussion\n[PLACEHOLDER]\n\n"
-            "## Limitations\n[PLACEHOLDER]\n\n"
-            "## Conclusion\n[PLACEHOLDER]"
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Stage 17: Part 3 LLM call failed after transport retry")
+        _raise_initial_part_transport_failure(
+            part_name="part-3",
+            expected_major_sections=("Results", "Discussion", "Conclusions")
+            if is_hep
+            else ("Results", "Discussion", "Limitations", "Conclusion"),
+            title_slot=False,
+            exc=exc,
+            report_entries=section_generation_entries,
+            stage_dir=stage_dir,
         )
+    part3 = _validate_or_regenerate_paper_part(
+        llm=llm,
+        system=system,
+        user_prompt=call3_user,
+        initial_text=part3,
+        part_name="part-3",
+        expected_major_sections=("Results", "Discussion", "Conclusions")
+        if is_hep
+        else ("Results", "Discussion", "Limitations", "Conclusion"),
+        title_slot=False,
+        max_tokens=_paper_max_tokens,
+        report_entries=section_generation_entries,
+        stage_dir=stage_dir,
+    )
     sections.append(part3)
     logger.info("Stage 17: Part 3 (Results+Discussion+Limitations+Conclusion) — %d chars", len(part3))
 
@@ -1559,7 +1828,9 @@ def _execute_paper_draft(
 ) -> StageResult:
     for owned_name in (
         "paper_draft.md",
+        "paper_draft_invalid.md",
         "paper_structure_report.json",
+        "section_generation_report.json",
         "citation_closure_report.json",
         "experiment_fact_closure_report.json",
         "draft_quality.json",
@@ -2376,20 +2647,43 @@ def _execute_paper_draft(
         _paper_venue_guidance = ""
 
         # --- Section-by-section writing (3 calls) for conference-grade depth ---
-        draft = _write_paper_sections(
-            llm=llm,
-            pm=_pm,
-            run_dir=run_dir,
-            preamble=preamble,
-            topic_constraint=topic_constraint,
-            exp_metrics_instruction=exp_metrics_instruction,
-            citation_instruction=citation_instruction,
-            outline=outline,
-            model_name=config.llm.primary_model,
-            venue_label=_paper_venue_label,
-            venue_guidance=_paper_venue_guidance,
-            is_hep=_paper_is_hep,
-        )
+        try:
+            draft = _write_paper_sections(
+                llm=llm,
+                pm=_pm,
+                run_dir=run_dir,
+                preamble=preamble,
+                topic_constraint=topic_constraint,
+                exp_metrics_instruction=exp_metrics_instruction,
+                citation_instruction=citation_instruction,
+                outline=outline,
+                model_name=config.llm.primary_model,
+                venue_label=_paper_venue_label,
+                venue_guidance=_paper_venue_guidance,
+                is_hep=_paper_is_hep,
+                stage_dir=stage_dir,
+            )
+        except PaperSectionContractError as exc:
+            (stage_dir / "paper_draft_invalid.md").write_text(
+                exc.text, encoding="utf-8"
+            )
+            _validate_stage17_manuscript_structure(exc.text, stage_dir=stage_dir)
+            return StageResult(
+                stage=Stage.PAPER_DRAFT,
+                status=StageStatus.FAILED,
+                artifacts=(
+                    "paper_draft_invalid.md",
+                    "paper_structure_report.json",
+                    "section_generation_report.json",
+                ),
+                error=str(exc),
+                evidence_refs=(
+                    "stage-17/paper_draft_invalid.md",
+                    "stage-17/paper_structure_report.json",
+                    "stage-17/section_generation_report.json",
+                ),
+                decision="retry",
+            )
 
         # R7: Strip LLM-generated References section — it often fabricates arXiv IDs.
         import re as _re_r7
@@ -2446,8 +2740,7 @@ Template references.
 
 Generated: {_utcnow_iso()}
 """
-    (stage_dir / "paper_draft.md").write_text(draft, encoding="utf-8")
-
+        _persist_section_generation_report(stage_dir, [])
     # Validate draft quality (section balance + bullet density)
     _validate_draft_quality(
         draft, stage_dir=stage_dir, citation_target=citation_target
@@ -2459,27 +2752,24 @@ Generated: {_utcnow_iso()}
         try:
             guidance = guidance_file.read_text(encoding="utf-8").strip()
             if guidance and llm is not None:
-                draft_path = stage_dir / "paper_draft.md"
-                if draft_path.exists():
-                    current_draft = draft_path.read_text(encoding="utf-8")
-                    logger.info("Applying HITL guidance to paper draft")
-                    resp = llm.chat(
-                        [{"role": "user", "content": (
-                            f"The human researcher provided this guidance for the paper:\n\n"
-                            f"{guidance}\n\n"
-                            f"Apply these suggestions to improve the following draft. "
-                            f"Preserve all existing content and citations. "
-                            f"Only make changes that align with the guidance.\n\n"
-                            f"## Current Draft\n{current_draft[:8000]}"
-                        )}],
-                        max_tokens=8192,
-                    )
-                    draft_path.write_text(resp.content, encoding="utf-8")
+                logger.info("Applying HITL guidance to paper draft")
+                resp = llm.chat(
+                    [{"role": "user", "content": (
+                        f"The human researcher provided this guidance for the paper:\n\n"
+                        f"{guidance}\n\n"
+                        f"Apply these suggestions to improve the following draft. "
+                        f"Preserve all existing content and citations. "
+                        f"Only make changes that align with the guidance.\n\n"
+                        f"## Current Draft\n{draft[:8000]}"
+                    )}],
+                    max_tokens=8192,
+                )
+                draft = resp.content
         except Exception:
             logger.debug("HITL guidance application to draft failed (non-blocking)")
 
     draft_path = stage_dir / "paper_draft.md"
-    final_draft = draft_path.read_text(encoding="utf-8")
+    final_draft = draft
     structure_report = _validate_stage17_manuscript_structure(
         final_draft,
         stage_dir=stage_dir,
@@ -2494,17 +2784,26 @@ Generated: {_utcnow_iso()}
             "Stage 17: manuscript structure is ambiguous: %s",
             ", ".join(issue_codes),
         )
+        (stage_dir / "paper_draft_invalid.md").write_text(
+            final_draft, encoding="utf-8"
+        )
+        draft_path.unlink(missing_ok=True)
         return StageResult(
             stage=Stage.PAPER_DRAFT,
             status=StageStatus.FAILED,
-            artifacts=("paper_draft.md", "paper_structure_report.json"),
+            artifacts=(
+                "paper_draft_invalid.md",
+                "paper_structure_report.json",
+                "section_generation_report.json",
+            ),
             error=(
                 "Paper draft failed strict structure validation: "
                 + ", ".join(issue_codes)
             ),
             evidence_refs=(
-                "stage-17/paper_draft.md",
+                "stage-17/paper_draft_invalid.md",
                 "stage-17/paper_structure_report.json",
+                "stage-17/section_generation_report.json",
             ),
         )
 
@@ -2528,6 +2827,7 @@ Generated: {_utcnow_iso()}
         (stage_dir / "citation_closure_report.json").write_text(
             canonical_json_text(citation_report), encoding="utf-8"
         )
+        draft_path.write_text(final_draft, encoding="utf-8")
         validate_experiment_fact_closure_report(run_dir)
         validate_citation_closure_report(run_dir, config)
     except (
@@ -2536,14 +2836,22 @@ Generated: {_utcnow_iso()}
         OSError,
         UnicodeDecodeError,
     ) as exc:
+        (stage_dir / "paper_draft_invalid.md").write_text(
+            final_draft, encoding="utf-8"
+        )
+        for failed_name in (
+            "paper_draft.md",
+            "experiment_fact_closure_report.json",
+            "citation_closure_report.json",
+        ):
+            (stage_dir / failed_name).unlink(missing_ok=True)
         return StageResult(
             stage=Stage.PAPER_DRAFT,
             status=StageStatus.FAILED,
             artifacts=(
-                "paper_draft.md",
+                "paper_draft_invalid.md",
                 "paper_structure_report.json",
-                "experiment_fact_closure_report.json",
-                "citation_closure_report.json",
+                "section_generation_report.json",
             ),
             error=f"Paper draft closure failed: {exc}",
             decision="retry",
@@ -2576,12 +2884,14 @@ Generated: {_utcnow_iso()}
         artifacts=(
             "paper_draft.md",
             "paper_structure_report.json",
+            "section_generation_report.json",
             "experiment_fact_closure_report.json",
             "citation_closure_report.json",
         ),
         evidence_refs=(
             "stage-17/paper_draft.md",
             "stage-17/paper_structure_report.json",
+            "stage-17/section_generation_report.json",
             "stage-17/experiment_fact_closure_report.json",
             "stage-17/citation_closure_report.json",
         ),

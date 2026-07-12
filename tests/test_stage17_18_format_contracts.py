@@ -10,6 +10,8 @@ import pytest
 
 from researchclaw.pipeline.stage_impls import _review_publish
 from researchclaw.pipeline.stage_impls._paper_writing import (
+    PaperSectionContractError,
+    _validate_paper_part_sections,
     _validate_stage17_manuscript_structure,
     _write_paper_sections,
 )
@@ -106,9 +108,11 @@ def test_stage17_structure_report_accepts_unique_heading_paths(tmp_path: Path) -
 def test_all_three_stage17_calls_receive_the_section_output_contract() -> None:
     llm = _SequentialLLM(
         [
-            "## Title\n\nExample\n\n## Abstract\n\nAbstract.",
+            "## Title\n\nExample\n\n## Abstract\n\nAbstract.\n\n"
+            "## Introduction\n\nIntroduction.\n\n## Related Work\n\nPrior work.",
             "## Method\n\nMethod.\n\n## Experiments\n\nExperiments.",
-            "## Results\n\nResults.\n\n## Conclusion\n\nConclusion.",
+            "## Results\n\nResults.\n\n## Discussion\n\nDiscussion.\n\n"
+            "## Limitations\n\nLimitations.\n\n## Conclusion\n\nConclusion.",
         ]
     )
 
@@ -127,6 +131,157 @@ def test_all_three_stage17_calls_receive_the_section_output_contract() -> None:
         prompt = "\n".join(message["content"] for message in call)
         assert "SECTION OUTPUT CONTRACT" in prompt
         assert "Output only the sections requested in this call" in prompt
+
+
+def test_stage17_part_contract_rejects_extra_major_section() -> None:
+    text = (
+        "## A Paper Title\n\nTitle body.\n\n## Abstract\n\nAbstract.\n\n"
+        "## Introduction\n\nIntro.\n\n## Related Work\n\nPrior.\n\n"
+        "## Method\n\nNot owned by part 1.\n"
+    )
+    violations = _validate_paper_part_sections(
+        text,
+        expected_major_sections=("Abstract", "Introduction", "Related Work"),
+        title_slot=True,
+    )
+    assert violations == ("section_part_major_sequence_mismatch",)
+
+
+def test_stage17_part_contract_rejects_reserved_title_slot() -> None:
+    text = (
+        "## Abstract\n\nNot a title.\n\n## Abstract\n\nA.\n\n"
+        "## Introduction\n\nI.\n\n## Related Work\n\nR.\n"
+    )
+    assert "section_part_title_invalid" in _validate_paper_part_sections(
+        text,
+        expected_major_sections=("Abstract", "Introduction", "Related Work"),
+        title_slot=True,
+    )
+
+
+def test_stage17_part_contract_rejects_out_of_order_sections() -> None:
+    text = "## Experiments\n\nE.\n\n## Method\n\nM.\n"
+    assert _validate_paper_part_sections(
+        text,
+        expected_major_sections=("Method", "Experiments"),
+        title_slot=False,
+    ) == ("section_part_major_sequence_mismatch",)
+
+
+def test_stage17_part_contract_uses_commonmark_for_fenced_heading() -> None:
+    text = (
+        "## Method\n\n```markdown\n## Discussion\n```\n\n"
+        "## Experiments\n\nSetup.\n"
+    )
+    assert _validate_paper_part_sections(
+        text,
+        expected_major_sections=("Method", "Experiments"),
+        title_slot=False,
+    ) == ()
+
+
+def test_stage17_hep_conclusions_contract_is_distinct() -> None:
+    text = "## Results\n\nR.\n\n## Discussion\n\nD.\n\n## Conclusions\n\nC.\n"
+    assert _validate_paper_part_sections(
+        text,
+        expected_major_sections=("Results", "Discussion", "Conclusions"),
+        title_slot=False,
+    ) == ()
+    assert "section_part_major_sequence_mismatch" in _validate_paper_part_sections(
+        text,
+        expected_major_sections=("Results", "Discussion", "Limitations", "Conclusion"),
+        title_slot=False,
+    )
+
+
+def test_stage17_part_contract_regenerates_once_and_records_attempts(
+    tmp_path: Path,
+) -> None:
+    llm = _SequentialLLM(
+        [
+            "## Method\n\nWrong part.",
+            "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
+            "## Method\n\nM.\n\n## Experiments\n\nE.",
+            "## Results\n\nR.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+        ]
+    )
+    draft = _write_paper_sections(
+        llm=cast(Any, llm),
+        pm=cast(Any, _PromptManagerStub()),
+        preamble="",
+        topic_constraint="",
+        exp_metrics_instruction="",
+        citation_instruction="",
+        outline="",
+        stage_dir=tmp_path,
+    )
+    assert "## Conclusion" in draft
+    assert len(llm.calls) == 4
+    report = json.loads(
+        (tmp_path / "section_generation_report.json").read_text(encoding="utf-8")
+    )
+    assert len(report["parts"][0]["attempts"]) == 2
+    assert report["parts"][0]["attempts"][0]["valid"] is False
+    assert report["parts"][0]["attempts"][1]["valid"] is True
+
+
+def test_stage17_part_contract_fails_after_one_regeneration(
+    tmp_path: Path,
+) -> None:
+    llm = _SequentialLLM(
+        ["## Method\n\nWrong part.", "## Experiments\n\nStill wrong."]
+    )
+    with pytest.raises(PaperSectionContractError, match="part-1"):
+        _write_paper_sections(
+            llm=cast(Any, llm),
+            pm=cast(Any, _PromptManagerStub()),
+            preamble="",
+            topic_constraint="",
+            exp_metrics_instruction="",
+            citation_instruction="",
+            outline="",
+            stage_dir=tmp_path,
+        )
+    assert len(llm.calls) == 2
+    report = json.loads(
+        (tmp_path / "section_generation_report.json").read_text(encoding="utf-8")
+    )
+    assert len(report["parts"]) == 1
+    assert report["parts"][0]["attempts"][-1]["valid"] is False
+
+
+def test_stage17_initial_transport_failure_stops_before_later_parts(
+    tmp_path: Path,
+) -> None:
+    class FailingLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, _messages: object, **_kwargs: object) -> SimpleNamespace:
+            self.calls += 1
+            raise RuntimeError("transport unavailable")
+
+    llm = FailingLLM()
+    with pytest.raises(PaperSectionContractError, match="part-1"):
+        _write_paper_sections(
+            llm=cast(Any, llm),
+            pm=cast(Any, _PromptManagerStub()),
+            preamble="",
+            topic_constraint="",
+            exp_metrics_instruction="",
+            citation_instruction="",
+            outline="",
+            stage_dir=tmp_path,
+        )
+    assert llm.calls == 2
+    report = json.loads(
+        (tmp_path / "section_generation_report.json").read_text(encoding="utf-8")
+    )
+    assert len(report["parts"]) == 1
+    assert report["parts"][0]["part"] == "part-1"
+    assert report["parts"][0]["attempts"][0]["violations"] == [
+        "section_part_transport_error:RuntimeError"
+    ]
 
 
 def test_stage18_prompt_contract_is_last_and_valid_output_passes(tmp_path: Path) -> None:

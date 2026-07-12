@@ -2855,7 +2855,7 @@ class TestWritePaperSections:
     def test_produces_three_part_draft(self) -> None:
         call_count = {"n": 0}
         parts = [
-            "# Test Title\n\n## Abstract\nTest abstract.\n\n## Introduction\nTest intro.\n\n## Related Work\nTest related.",
+            "## Test Title\n\n## Abstract\nTest abstract.\n\n## Introduction\nTest intro.\n\n## Related Work\nTest related.",
             "## Method\nTest method.\n\n## Experiments\nTest experiments.",
             "## Results\nTest results.\n\n## Discussion\nTest discussion.\n\n## Limitations\nTest limits.\n\n## Conclusion\nTest conclusion.",
         ]
@@ -2895,13 +2895,20 @@ class TestWritePaperSections:
         class TrackingLLM:
             def __init__(self):
                 self.user_prompts: list[str] = []
+                self.responses = iter(
+                    (
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
+                        "## Method\n\nM.\n\n## Experiments\n\nE.",
+                        "## Results\n\nR.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                    )
+                )
 
             def chat(self, messages, **kwargs):
                 for m in messages:
                     if m.get("role") == "user":
                         self.user_prompts.append(m["content"])
                 from researchclaw.llm.client import LLMResponse
-                return LLMResponse(content="## Section\nContent here.", model="fake")
+                return LLMResponse(content=next(self.responses), model="fake")
 
         llm = TrackingLLM()
         from researchclaw.prompts import PromptManager
@@ -2924,13 +2931,20 @@ class TestWritePaperSections:
         class ContextTrackingLLM:
             def __init__(self):
                 self.user_prompts: list[str] = []
+                self.responses = iter(
+                    (
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
+                        "## Method\n\nM.\n\n## Experiments\n\nE.",
+                        "## Results\n\nR.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                    )
+                )
 
             def chat(self, messages, **kwargs):
                 for m in messages:
                     if m.get("role") == "user":
                         self.user_prompts.append(m["content"])
                 from researchclaw.llm.client import LLMResponse
-                return LLMResponse(content="## Section\nContent here.", model="fake")
+                return LLMResponse(content=next(self.responses), model="fake")
 
         llm = ContextTrackingLLM()
         from researchclaw.prompts import PromptManager
@@ -3330,6 +3344,10 @@ class TestDataIntegrityBlock:
         stage_dir.mkdir(parents=True, exist_ok=True)
         stale_report = stage_dir / "paper_structure_report.json"
         stale_report.write_text('{"valid": true}', encoding="utf-8")
+        stale_invalid = stage_dir / "paper_draft_invalid.md"
+        stale_invalid.write_text("stale invalid", encoding="utf-8")
+        stale_generation = stage_dir / "section_generation_report.json"
+        stale_generation.write_text("{}", encoding="utf-8")
 
         llm = FakeLLMClient("should not be called")
         result = rc_executor._execute_paper_draft(
@@ -3343,6 +3361,8 @@ class TestDataIntegrityBlock:
         meta = json.loads((stage_dir / "paper_meta.json").read_text(encoding="utf-8"))
         assert meta["outcome"] == "blocked_simulated_data"
         assert not stale_report.exists()
+        assert not stale_invalid.exists()
+        assert not stale_generation.exists()
         assert meta.get("is_literature_first_topic") is False
         # LLM should NOT have been called
         assert len(llm.calls) == 0
@@ -3438,9 +3458,11 @@ class TestDataIntegrityBlock:
                 super().__init__()
                 self.responses = iter(
                     (
-                        "## Title\n\nPaper Title\n\n## Abstract\n\nAbstract text.",
+                        "## Title\n\nPaper Title\n\n## Abstract\n\nAbstract text.\n\n"
+                        "## Introduction\n\nIntroduction.\n\n## Related Work\n\nPrior work.",
                         "## Method\n\nMethod text.\n\n## Experiments\n\nSetup text.",
-                        "## Results\n\nResults text.\n\n## Conclusion\n\nConclusion text.",
+                        "## Results\n\nResults text.\n\n## Discussion\n\nDiscussion.\n\n"
+                        "## Limitations\n\nLimitations.\n\n## Conclusion\n\nConclusion text.",
                     )
                 )
 
@@ -3485,13 +3507,140 @@ class TestDataIntegrityBlock:
         )
 
         assert result.status == StageStatus.FAILED
-        report = json.loads(
-            (stage_dir / "paper_structure_report.json").read_text(encoding="utf-8")
+        generation = json.loads(
+            (stage_dir / "section_generation_report.json").read_text(encoding="utf-8")
         )
-        assert report["valid"] is False
+        assert generation["parts"][0]["attempts"][-1]["valid"] is False
+        assert "section_part_major_sequence_mismatch" in generation["parts"][0][
+            "attempts"
+        ][-1]["violations"]
+        assert not (stage_dir / "paper_draft.md").exists()
+        assert (stage_dir / "paper_draft_invalid.md").exists()
+
+    def test_paper_draft_hitl_structure_failure_keeps_only_invalid_draft(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+    ) -> None:
+        _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "claim_scope": "pipeline_validation",
+                    "dataset_origin": "synthetic",
+                    "evaluator_owner": "scaffold",
+                    "metrics": {"detection_f1": 0.4753327669},
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-17"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "hitl_guidance.md").write_text("Improve clarity.", encoding="utf-8")
+
+        class HitlSequenceLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.responses = iter(
+                    (
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
+                        "## Method\n\nM.\n\n## Experiments\n\nE.",
+                        "## Results\n\nR.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Abstract\n\nDuplicate.",
+                    )
+                )
+
+            def chat(self, messages: list[dict[str, str]], **kwargs: object):
+                self.response_text = next(self.responses)
+                return super().chat(messages, **kwargs)
+
+        result = rc_executor._execute_paper_draft(
+            stage_dir,
+            run_dir,
+            rc_config,
+            adapters,
+            llm=HitlSequenceLLM(),
+        )
+
+        assert result.status == StageStatus.FAILED
+        assert not (stage_dir / "paper_draft.md").exists()
+        assert (stage_dir / "paper_draft_invalid.md").exists()
+        report = json.loads((stage_dir / "paper_structure_report.json").read_text())
         assert "duplicate_heading_path" in {
             issue["code"] for issue in report["issues"]
         }
+
+    def test_paper_draft_closure_failure_removes_canonical_artifacts(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from researchclaw.literature.experiment_fact_closure import (
+            ExperimentFactClosureError,
+        )
+        from researchclaw.pipeline.stage_impls import _paper_writing
+
+        _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "claim_scope": "pipeline_validation",
+                    "dataset_origin": "synthetic",
+                    "evaluator_owner": "scaffold",
+                    "metrics": {"detection_f1": 0.4753327669},
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-17"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        class ValidSequenceLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.responses = iter(
+                    (
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
+                        "## Method\n\nM.\n\n## Experiments\n\nE.",
+                        "## Results\n\nR.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                    )
+                )
+
+            def chat(self, messages: list[dict[str, str]], **kwargs: object):
+                self.response_text = next(self.responses)
+                return super().chat(messages, **kwargs)
+
+        monkeypatch.setattr(
+            _paper_writing,
+            "build_experiment_fact_closure_report",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                ExperimentFactClosureError("forced closure failure")
+            ),
+        )
+        result = rc_executor._execute_paper_draft(
+            stage_dir,
+            run_dir,
+            rc_config,
+            adapters,
+            llm=ValidSequenceLLM(),
+        )
+
+        assert result.status == StageStatus.FAILED
+        assert "closure failed" in (result.error or "")
+        assert (stage_dir / "paper_draft_invalid.md").exists()
+        for name in (
+            "paper_draft.md",
+            "experiment_fact_closure_report.json",
+            "citation_closure_report.json",
+        ):
+            assert not (stage_dir / name).exists()
 
 
 # ── R4-3: Conference-Grade Title Guidelines Tests ────────────────────

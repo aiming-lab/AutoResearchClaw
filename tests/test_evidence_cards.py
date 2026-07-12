@@ -1122,7 +1122,10 @@ def test_stage17_uses_final_plan_only_and_writes_replayable_closure(
                 "## Related Work\n\nRelated work."
             ),
             "## Method\n\nMethod.\n\n## Experiments\n\nExperiment setup.",
-            "## Results\n\nDetection F1 was 95%.\n\n## Conclusion\n\nConclusion.",
+            "## Results\n\nDetection F1 was 95%.\n\n"
+            "## Discussion\n\nDiscussion.\n\n"
+            "## Limitations\n\nLimitations.\n\n"
+            "## Conclusion\n\nConclusion.",
         ]
     )
     stage17 = run_dir / "stage-17"
