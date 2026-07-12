@@ -1190,9 +1190,17 @@ def validate_config(
         if not isinstance(skip_stages, list):
             errors.append("runtime.skip_stages must be a list")
         else:
+            from researchclaw.pipeline.stages import SKIP_FORBIDDEN_STAGES
+
+            skip_forbidden = {int(stage) for stage in SKIP_FORBIDDEN_STAGES}
             for stage in skip_stages:
                 if not isinstance(stage, int) or not 1 <= stage <= 23:
                     errors.append(f"Invalid runtime.skip_stages entry: {stage}")
+                elif stage in skip_forbidden:
+                    errors.append(
+                        f"runtime.skip_stages cannot skip evidence-authority "
+                        f"stage: {stage}"
+                    )
 
     inject_artifacts = _get_by_path(data, "runtime.inject_artifacts")
     if inject_artifacts is not None and not isinstance(inject_artifacts, dict):

@@ -379,6 +379,22 @@ def test_rcconfig_from_dict_parses_partial_run_and_q1_gate_controls(
     assert config.security.q1_spine_max_rollbacks == 2
 
 
+@pytest.mark.parametrize("stage", [4, 5])
+def test_validate_config_rejects_skipping_evidence_authority_stages(
+    tmp_path: Path, stage: int
+) -> None:
+    data = _valid_config_data()
+    data["runtime"]["skip_stages"] = [stage]
+
+    result = validate_config(data, project_root=tmp_path, check_paths=False)
+
+    assert result.ok is False
+    assert (
+        f"runtime.skip_stages cannot skip evidence-authority stage: {stage}"
+        in result.errors
+    )
+
+
 def test_rcconfig_from_dict_missing_fields_raises_value_error(tmp_path: Path):
     data = _valid_config_data()
     del data["runtime"]

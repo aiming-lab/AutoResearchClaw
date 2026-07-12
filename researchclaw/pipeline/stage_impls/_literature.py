@@ -15,7 +15,22 @@ from researchclaw.config import RCConfig
 from researchclaw.llm.client import LLMClient
 from researchclaw.literature.citation_identity import (
     CitationIdentityError,
+    clean_title_text,
+    parse_cite_key_registry,
     seal_citation_collection,
+    validate_registry_artifacts,
+)
+from researchclaw.literature.screening import (
+    MAX_SCREEN_CANDIDATES,
+    MIN_RELEVANCE_SCORE,
+    SCREEN_BATCH_SIZE,
+    ScreeningContractError,
+    ScreeningDecision,
+    build_screening_report,
+    normalize_quality_threshold,
+    parse_screening_candidates,
+    parse_screening_response,
+    sha256_text,
 )
 from researchclaw.pipeline._helpers import (
     StageResult,
@@ -636,7 +651,6 @@ def _execute_literature_collect(
 
 
 _MAX_ABSTRACT_LEN = 800  # Truncate long abstracts to reduce token usage
-_MAX_CANDIDATES_CHARS = 30_000  # Cap total candidates text sent to LLM
 
 
 def _candidate_screen_score(row: dict[str, Any], topic_keywords: list[str]) -> float:
@@ -720,185 +734,393 @@ def _execute_literature_screen(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
-    candidates_text = _read_prior_artifact(run_dir, "candidates.jsonl") or ""
+    try:
+        for artifact_name in (
+            "shortlist.jsonl",
+            "screening_partial.jsonl",
+            "screening_report.json",
+            "screen_meta.json",
+        ):
+            (stage_dir / artifact_name).unlink(missing_ok=True)
+    except OSError as exc:
+        return StageResult(
+            stage=Stage.LITERATURE_SCREEN,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Failed to clear stale Stage 5 artifacts: {exc}",
+            decision="retry",
+        )
 
-    # --- P1-1: keyword relevance pre-filter ---
-    # Before LLM screening, drop papers whose title+abstract share no keywords
-    # with the research topic.  This catches cross-domain noise cheaply.
+    try:
+        stage4_dir = run_dir / "stage-04"
+        canonical_paths = {
+            "candidates": stage4_dir / "candidates.jsonl",
+            "registry": stage4_dir / "cite_key_registry.json",
+            "bibliography": stage4_dir / "references.bib",
+        }
+        for label, path in canonical_paths.items():
+            if path.is_symlink() or not path.is_file():
+                raise OSError(f"canonical Stage 4 {label} is missing or not a file")
+        candidates_text = canonical_paths["candidates"].read_text(encoding="utf-8")
+        registry_text = canonical_paths["registry"].read_text(encoding="utf-8")
+        bibliography_text = canonical_paths["bibliography"].read_text(
+            encoding="utf-8"
+        )
+        registry = parse_cite_key_registry(registry_text)
+        validate_registry_artifacts(registry, candidates_text, bibliography_text)
+        candidate_rows = list(parse_screening_candidates(candidates_text))
+    except (
+        CitationIdentityError,
+        OSError,
+        ScreeningContractError,
+        UnicodeDecodeError,
+    ) as exc:
+        return StageResult(
+            stage=Stage.LITERATURE_SCREEN,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Stage 4 sealed citation collection is invalid: {exc}",
+            decision="retry",
+        )
+    try:
+        minimum_quality_score = normalize_quality_threshold(
+            config.research.quality_threshold
+        )
+    except ScreeningContractError as exc:
+        return StageResult(
+            stage=Stage.LITERATURE_SCREEN,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Invalid Stage 5 screening policy: {exc}",
+            decision="retry",
+        )
+
+    # Deterministic prefilter and rank. Rows excluded by this policy are final
+    # Stage 5 rejections, not unscreened candidates and not candidates for
+    # minimum-count backfill.
     topic_keywords = _extract_topic_keywords(
         config.research.topic, config.research.domains
     )
-    filtered_rows: list[dict[str, Any]] = []
-    dropped_count = 0
-    for raw_line in candidates_text.strip().splitlines():
-        row = _safe_json_loads(raw_line, {})
-        if not isinstance(row, dict):
-            continue
+    ranked_rows: list[dict[str, Any]] = []
+    prefilter_rejected_ids: list[str] = []
+    for source_row in candidate_rows:
+        row = dict(source_row)
+        source_identity = str(row["source_identity"])
         title = str(row.get("title", "")).lower()
         abstract = str(row.get("abstract", "")).lower()
         text_blob = f"{title} {abstract}"
         overlap = sum(1 for kw in topic_keywords if kw in text_blob)
-        # T2.2: Relaxed from ≥2 to ≥1 keyword hit — previous threshold was
-        # too aggressive (94% rejection rate).  Single-keyword matches are
-        # still screened by the LLM in the next step.
         if overlap >= 1:
             row["keyword_overlap"] = overlap
-            filtered_rows.append(row)
+            row["screen_rank_score"] = round(
+                _candidate_screen_score(row, topic_keywords), 3
+            )
+            ranked_rows.append(row)
         else:
-            dropped_count += 1
-    # If pre-filter dropped everything, fall back to original (safety valve)
-    if not filtered_rows:
-        filtered_rows = _parse_jsonl_rows(candidates_text)
-    # Truncate abstracts and strip authors to reduce token usage
-    for row in filtered_rows:
-        abstract = row.get("abstract", "")
-        if isinstance(abstract, str) and len(abstract) > _MAX_ABSTRACT_LEN:
-            row["abstract"] = abstract[:_MAX_ABSTRACT_LEN] + "..."
-        # Strip authors list — not needed for screening and inflates tokens
-        row.pop("authors", None)
-        row["screen_rank_score"] = round(
-            _candidate_screen_score(row, topic_keywords), 3
-        )
-    filtered_rows.sort(
+            prefilter_rejected_ids.append(source_identity)
+    ranked_rows.sort(
         key=lambda r: (
             float(r.get("screen_rank_score", 0.0) or 0.0),
             int(r.get("keyword_overlap", 0) or 0),
             int(r.get("citation_count", 0) or 0),
+            str(r.get("source_identity", "")),
         ),
         reverse=True,
     )
-
-    # Rebuild candidates_text from filtered rows
-    candidates_text = "\n".join(
-        json.dumps(r, ensure_ascii=False) for r in filtered_rows
+    admitted_rows = ranked_rows[:MAX_SCREEN_CANDIDATES]
+    prefilter_rejected_ids.extend(
+        str(row["source_identity"]) for row in ranked_rows[MAX_SCREEN_CANDIDATES:]
     )
-    # Cap total candidates text size to avoid blowing token budget
-    if len(candidates_text) > _MAX_CANDIDATES_CHARS:
-        # Truncate at newline boundary to avoid cutting mid-JSON-line
-        candidates_text = candidates_text[:_MAX_CANDIDATES_CHARS].rsplit("\n", 1)[0]
-        logger.info(
-            "Candidates text truncated to %d chars for screening",
-            len(candidates_text),
-        )
     logger.info(
-        "Domain pre-filter: kept %d, dropped %d (keywords: %s)",
-        len(filtered_rows),
-        dropped_count,
+        "Stage 5 deterministic prefilter: admitted %d/%d candidates "
+        "(batch_size=%d, keywords=%s)",
+        len(admitted_rows),
+        len(candidate_rows),
+        SCREEN_BATCH_SIZE,
         topic_keywords[:8],
     )
 
-    shortlist: list[dict[str, Any]] = []
-    model_rejected_all = False
-    parse_failed = False
-    if llm is not None:
-        _pm = prompts or PromptManager()
-        _overlay = _get_evolution_overlay(run_dir, "literature_screen")
-        sp = _pm.for_stage(
-            "literature_screen",
-            evolution_overlay=_overlay,
-            topic=config.research.topic,
-            domains=", ".join(config.research.domains)
-            if config.research.domains
-            else "general",
-            quality_threshold=config.research.quality_threshold,
-            candidates_text=candidates_text,
+    claim_scope = config.experiment.claim_scope
+    allows_degraded_screening = claim_scope == "pipeline_validation"
+    selected_rows: list[dict[str, Any]] = []
+    screened_ids: list[str] = []
+    unscreened_ids: list[str] = []
+    failed_batches: list[dict[str, str]] = []
+    batches = [
+        admitted_rows[index:index + SCREEN_BATCH_SIZE]
+        for index in range(0, len(admitted_rows), SCREEN_BATCH_SIZE)
+    ]
+    if llm is None and admitted_rows:
+        unscreened_ids.extend(str(row["source_identity"]) for row in admitted_rows)
+        failed_batches.extend(
+            {
+                "batch_id": f"screen-batch-{index:03d}",
+                "error": "LLM client unavailable",
+            }
+            for index in range(1, len(batches) + 1)
         )
-        resp = _chat_with_prompt(
-            llm,
-            sp.system,
-            sp.user,
-            json_mode=sp.json_mode,
-            max_tokens=sp.max_tokens,
+    elif llm is not None:
+        for batch_index, batch_rows in enumerate(batches, start=1):
+            batch_id = f"screen-batch-{batch_index:03d}"
+            expected_ids = [str(row["source_identity"]) for row in batch_rows]
+            try:
+                decisions = _screen_candidate_batch(
+                    llm=llm,
+                    prompts=prompts,
+                    run_dir=run_dir,
+                    config=config,
+                    batch_id=batch_id,
+                    rows=batch_rows,
+                    minimum_quality_score=minimum_quality_score,
+                )
+            except (RuntimeError, ScreeningContractError) as exc:
+                failed_batches.append(
+                    {"batch_id": batch_id, "error": str(exc)[:1000]}
+                )
+                unscreened_ids.extend(expected_ids)
+                if not allows_degraded_screening:
+                    for remaining in batches[batch_index:]:
+                        unscreened_ids.extend(
+                            str(row["source_identity"]) for row in remaining
+                        )
+                    break
+                continue
+
+            screened_ids.extend(expected_ids)
+            row_by_id = {str(row["source_identity"]): row for row in batch_rows}
+            for decision in decisions:
+                if not decision.keep:
+                    continue
+                selected = dict(row_by_id[decision.source_identity])
+                selected["screening_policy_version"] = 1
+                selected["relevance_score"] = decision.relevance_score
+                selected["quality_score"] = decision.quality_score
+                selected["keep_reason"] = decision.reason
+                selected_rows.append(selected)
+
+    shortlist, semantic_duplicate_ids = _deduplicate_screened_candidates(
+        selected_rows, admitted_rows
+    )
+    shortlist_text = "".join(
+        json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+        for row in shortlist
+    )
+    degradation_codes: list[str] = []
+    if failed_batches:
+        degradation_codes.extend(["screen_batch_failed", "screening_incomplete"])
+    failure_error: str | None = None
+    if not shortlist:
+        failure_error = (
+            "Strict screening produced no valid shortlist. Refine Stage 3 "
+            "queries; Stage 5 does not backfill rejected or malformed rows."
         )
-        payload = _safe_json_loads(resp.content, {})
-        raw = payload.get("shortlist") if isinstance(payload, dict) else None
-        if isinstance(raw, list):
-            if len(raw) == 0:
-                # Distinguish a valid strict-screen empty result from a
-                # malformed list whose entries are not dicts.
-                model_rejected_all = True
-            else:
-                shortlist = [row for row in raw if isinstance(row, dict)]
-                if not shortlist:
-                    parse_failed = True
-        else:
-            parse_failed = True
-    # T2.2: Ensure minimum shortlist size of 15 for adequate related work
-    _MIN_SHORTLIST = 15
-    if model_rejected_all:
-        # Strict screen returned an empty shortlist — do not backfill with
-        # rejected papers. Pause the pipeline so the user can decide whether
-        # to refine the search or accept the rejection.
-        (stage_dir / "screen_meta.json").write_text(
-            json.dumps(
-                {
-                    "outcome": "model_rejected_all",
-                    "candidates_screened": len(filtered_rows),
-                    "shortlist_size": 0,
-                    "note": (
-                        "Strict screen returned empty shortlist. Pipeline paused; "
-                        "consider rerunning SEARCH_STRATEGY with refined queries "
-                        "before resuming."
-                    ),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+    elif not allows_degraded_screening and failed_batches:
+        failure_error = (
+            f"{claim_scope} screening is incomplete; failed batches are fatal"
         )
-        logger.warning(
-            "Stage 5: model rejected all %d candidates — pausing pipeline",
-            len(filtered_rows),
-        )
+
+    output_name = "screening_partial.jsonl" if failure_error else "shortlist.jsonl"
+    output_path = f"stage-05/{output_name}"
+    report = build_screening_report(
+        candidates_sha256=sha256_text(candidates_text),
+        registry_sha256=sha256_text(registry_text),
+        references_sha256=sha256_text(bibliography_text),
+        screening_output_path=output_path,
+        screening_output_sha256=sha256_text(shortlist_text),
+        minimum_quality_score=minimum_quality_score,
+        claim_scope=claim_scope,
+        candidate_ids=[str(row["source_identity"]) for row in candidate_rows],
+        prefilter_rejected_ids=prefilter_rejected_ids,
+        screened_ids=screened_ids,
+        selected_ids=[str(row["source_identity"]) for row in shortlist],
+        semantic_duplicate_ids=semantic_duplicate_ids,
+        unscreened_ids=unscreened_ids,
+        batch_count=len(batches),
+        failed_batches=failed_batches,
+        degraded=bool(degradation_codes),
+        degradation_codes=degradation_codes,
+    )
+    (stage_dir / "screening_report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    # Publish the canonical shortlist last. If report persistence fails, the
+    # stage fails without leaving a success-named artifact that resume can use.
+    (stage_dir / output_name).write_text(shortlist_text, encoding="utf-8")
+
+    artifacts = (output_name, "screening_report.json")
+    evidence_refs = tuple(f"stage-05/{name}" for name in artifacts)
+    if failure_error:
         return StageResult(
             stage=Stage.LITERATURE_SCREEN,
-            status=StageStatus.PAUSED,
-            artifacts=("screen_meta.json",),
-            error="Model returned empty shortlist after strict screening",
-            evidence_refs=("stage-05/screen_meta.json",),
-            decision="rejected_all",
+            status=StageStatus.FAILED,
+            artifacts=artifacts,
+            evidence_refs=evidence_refs,
+            error=failure_error,
+            decision="retry",
         )
-    if not shortlist:
-        rows = (
-            filtered_rows[:_MIN_SHORTLIST]
-            if filtered_rows
-            else _parse_jsonl_rows(candidates_text)[:_MIN_SHORTLIST]
-        )
-        for idx, item in enumerate(rows):
-            item["relevance_score"] = round(0.75 - idx * 0.02, 3)
-            item["quality_score"] = round(0.72 - idx * 0.015, 3)
-            item["keep_reason"] = (
-                "Template fallback (parse failure)"
-                if parse_failed
-                else "Template screened entry"
-            )
-            shortlist.append(item)
-    elif len(shortlist) < _MIN_SHORTLIST:
-        # T2.2: LLM returned too few — supplement from filtered candidates
-        existing_titles = {
-            str(s.get("title", "")).lower().strip() for s in shortlist
-        }
-        for row in filtered_rows:
-            if len(shortlist) >= _MIN_SHORTLIST:
-                break
-            title_lower = str(row.get("title", "")).lower().strip()
-            if title_lower and title_lower not in existing_titles:
-                row.setdefault("relevance_score", 0.5)
-                row.setdefault("quality_score", 0.5)
-                row.setdefault("keep_reason", "Supplemented to meet minimum shortlist")
-                shortlist.append(row)
-                existing_titles.add(title_lower)
-        logger.info(
-            "Stage 5: Supplemented shortlist to %d papers (minimum: %d)",
-            len(shortlist), _MIN_SHORTLIST,
-        )
-    out = stage_dir / "shortlist.jsonl"
-    _write_jsonl(out, shortlist)
     return StageResult(
         stage=Stage.LITERATURE_SCREEN,
         status=StageStatus.DONE,
-        artifacts=("shortlist.jsonl",),
-        evidence_refs=("stage-05/shortlist.jsonl",),
+        artifacts=artifacts,
+        evidence_refs=evidence_refs,
+        decision="degraded" if failed_batches else None,
     )
+
+
+def _screen_candidate_batch(
+    *,
+    llm: LLMClient,
+    prompts: PromptManager | None,
+    run_dir: Path,
+    config: RCConfig,
+    batch_id: str,
+    rows: list[dict[str, Any]],
+    minimum_quality_score: float,
+) -> tuple[ScreeningDecision, ...]:
+    prompt_rows = []
+    for row in rows:
+        abstract = str(row.get("abstract", ""))
+        prompt_rows.append(
+            {
+                "source_identity": row["source_identity"],
+                "title": row.get("title", ""),
+                "abstract": (
+                    abstract[:_MAX_ABSTRACT_LEN] + "..."
+                    if len(abstract) > _MAX_ABSTRACT_LEN
+                    else abstract
+                ),
+                "year": row.get("year", 0),
+                "venue": row.get("venue", ""),
+                "citation_count": row.get("citation_count", 0),
+                "source": row.get("source", ""),
+                "doi": row.get("doi", ""),
+                "arxiv_id": row.get("arxiv_id", ""),
+                "screen_rank_score": row.get("screen_rank_score", 0.0),
+                "keyword_overlap": row.get("keyword_overlap", 0),
+            }
+        )
+    batch_text = "\n".join(
+        json.dumps(row, ensure_ascii=False, sort_keys=True) for row in prompt_rows
+    )
+    expected_ids = [str(row["source_identity"]) for row in rows]
+    contract = (
+        "\n\nSTAGE 5 BATCH OUTPUT CONTRACT (OVERRIDES ANY EARLIER RETURN SCHEMA):\n"
+        f"- batch_id must be exactly {batch_id}.\n"
+        "- Return exactly one decision for every source_identity below.\n"
+        "- Do not return or modify candidate metadata.\n"
+        "- decision is exactly keep or reject. Scores are numbers in [0,1].\n"
+        f"- keep requires relevance_score >= {MIN_RELEVANCE_SCORE:.2f} and "
+        f"quality_score >= {minimum_quality_score:.2f}; reject otherwise.\n"
+        "- reason is a nonempty screening explanation.\n"
+        "- Return ONLY this JSON object shape:\n"
+        '{"schema_version":1,"batch_id":"...","decisions":['
+        '{"source_identity":"...","decision":"keep|reject",'
+        '"relevance_score":0.0,"quality_score":0.0,"reason":"..."}]}\n'
+        f"EXPECTED SOURCE IDENTITIES: {json.dumps(expected_ids)}\n"
+    )
+    manager = prompts or PromptManager()
+    overlay = _get_evolution_overlay(run_dir, "literature_screen")
+    stage_prompt = manager.for_stage(
+        "literature_screen",
+        evolution_overlay=overlay,
+        topic=config.research.topic,
+        domains=", ".join(config.research.domains)
+        if config.research.domains
+        else "general",
+        quality_threshold=f"{minimum_quality_score:.2f} on a 0-1 scale",
+        candidates_text=batch_text,
+    )
+    user_prompt = stage_prompt.user + contract
+    response = _chat_with_prompt(
+        llm,
+        stage_prompt.system,
+        user_prompt,
+        json_mode=True,
+        max_tokens=stage_prompt.max_tokens,
+    )
+    try:
+        return parse_screening_response(
+            response.content,
+            expected_batch_id=batch_id,
+            expected_source_ids=expected_ids,
+            minimum_quality_score=minimum_quality_score,
+        )
+    except ScreeningContractError as initial_error:
+        repair_prompt = (
+            user_prompt
+            + "\n\nTHE PREVIOUS RESPONSE VIOLATED THE CONTRACT:\n"
+            + str(initial_error)
+            + "\nRegenerate the complete batch once. Do not omit any ID."
+        )
+        repaired = _chat_with_prompt(
+            llm,
+            stage_prompt.system,
+            repair_prompt,
+            json_mode=True,
+            max_tokens=stage_prompt.max_tokens,
+            retries=0,
+        )
+        try:
+            return parse_screening_response(
+                repaired.content,
+                expected_batch_id=batch_id,
+                expected_source_ids=expected_ids,
+                minimum_quality_score=minimum_quality_score,
+            )
+        except ScreeningContractError as repair_error:
+            raise ScreeningContractError(
+                f"initial_error={initial_error}; repair_error={repair_error}"
+            ) from repair_error
+
+
+def _deduplicate_screened_candidates(
+    selected_rows: list[dict[str, Any]],
+    admitted_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    rank = {
+        str(row["source_identity"]): index for index, row in enumerate(admitted_rows)
+    }
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in selected_rows:
+        groups.setdefault(_semantic_screen_key(row), []).append(row)
+
+    winners: list[dict[str, Any]] = []
+    duplicates: list[str] = []
+    for rows in groups.values():
+        winner = max(
+            rows,
+            key=lambda row: (
+                float(row.get("relevance_score", 0.0)),
+                float(row.get("quality_score", 0.0)),
+                int(row.get("citation_count", 0) or 0),
+                str(row.get("source_identity", "")),
+            ),
+        )
+        winners.append(winner)
+        duplicates.extend(
+            str(row["source_identity"]) for row in rows if row is not winner
+        )
+    winners.sort(key=lambda row: rank[str(row["source_identity"])])
+    return winners, sorted(duplicates)
+
+
+def _semantic_screen_key(row: dict[str, Any]) -> str:
+    title = clean_title_text(row.get("title", "")).casefold()
+    raw_authors = row.get("authors", [])
+    first_author = ""
+    if isinstance(raw_authors, list) and raw_authors:
+        first = raw_authors[0]
+        if isinstance(first, dict):
+            first_author = str(first.get("name", ""))
+        elif isinstance(first, str):
+            first_author = first
+    author_key = re.sub(r"\W+", "", first_author.casefold())
+    try:
+        year = int(row.get("year", 0) or 0)
+    except (TypeError, ValueError):
+        year = 0
+    return f"{title}\n{author_key}\n{year}"
 
 
 def _execute_knowledge_extract(

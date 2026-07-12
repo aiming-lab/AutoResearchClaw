@@ -848,6 +848,31 @@ def test_execute_stage_missing_required_input_returns_failed(
     assert "Missing input: goal.md" in (result.error or "")
 
 
+def test_stage6_resume_rejects_stage5_partial_without_canonical_shortlist(
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    stage5 = run_dir / "stage-05"
+    stage5.mkdir(parents=True)
+    (stage5 / "screening_partial.jsonl").write_text(
+        '{"source_identity":"doi:partial"}\n', encoding="utf-8"
+    )
+    (stage5 / "screening_report.json").write_text("{}\n", encoding="utf-8")
+
+    result = rc_executor.execute_stage(
+        Stage.KNOWLEDGE_EXTRACT,
+        run_dir=run_dir,
+        run_id="run-stage6-after-partial",
+        config=rc_config,
+        adapters=adapters,
+        auto_approve_gates=True,
+    )
+
+    assert result.status == StageStatus.FAILED
+    assert "Missing input: shortlist.jsonl" in (result.error or "")
+
+
 def test_execute_stage_gate_behavior_auto_approve_true_keeps_done(
     monkeypatch: pytest.MonkeyPatch,
     run_dir: Path,
@@ -855,6 +880,8 @@ def test_execute_stage_gate_behavior_auto_approve_true_keeps_done(
     adapters: AdapterBundle,
 ) -> None:
     _write_prior_artifact(run_dir, 4, "candidates.jsonl", '{"title": "paper"}')
+    _write_prior_artifact(run_dir, 4, "references.bib", "@article{paper,}\n")
+    _write_prior_artifact(run_dir, 4, "cite_key_registry.json", "{}\n")
 
     def good_executor(
         stage_dir: Path,
@@ -869,10 +896,13 @@ def test_execute_stage_gate_behavior_auto_approve_true_keeps_done(
         (stage_dir / "shortlist.jsonl").write_text(
             '{"title": "paper"}\n', encoding="utf-8"
         )
+        (stage_dir / "screening_report.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
         return rc_executor.StageResult(
             stage=Stage.LITERATURE_SCREEN,
             status=StageStatus.DONE,
-            artifacts=("shortlist.jsonl",),
+            artifacts=("shortlist.jsonl", "screening_report.json"),
         )
 
     monkeypatch.setitem(
@@ -900,6 +930,8 @@ def test_execute_stage_gate_behavior_auto_approve_false_blocks(
     adapters: AdapterBundle,
 ) -> None:
     _write_prior_artifact(run_dir, 4, "candidates.jsonl", '{"title": "paper"}')
+    _write_prior_artifact(run_dir, 4, "references.bib", "@article{paper,}\n")
+    _write_prior_artifact(run_dir, 4, "cite_key_registry.json", "{}\n")
 
     def good_executor(
         stage_dir: Path,
@@ -914,10 +946,13 @@ def test_execute_stage_gate_behavior_auto_approve_false_blocks(
         (stage_dir / "shortlist.jsonl").write_text(
             '{"title": "paper"}\n', encoding="utf-8"
         )
+        (stage_dir / "screening_report.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
         return rc_executor.StageResult(
             stage=Stage.LITERATURE_SCREEN,
             status=StageStatus.DONE,
-            artifacts=("shortlist.jsonl",),
+            artifacts=("shortlist.jsonl", "screening_report.json"),
         )
 
     monkeypatch.setitem(

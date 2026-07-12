@@ -61,8 +61,8 @@ CONTRACTS: dict[Stage, StageContract] = {
     ),
     Stage.LITERATURE_SCREEN: StageContract(
         stage=Stage.LITERATURE_SCREEN,
-        input_files=("candidates.jsonl",),
-        output_files=("shortlist.jsonl",),
+        input_files=("candidates.jsonl", "references.bib", "cite_key_registry.json"),
+        output_files=("shortlist.jsonl", "screening_report.json"),
         dod="Relevance + quality dual screening completed and approved",
         error_code="E05_GATE_REJECT",
         max_retries=0,

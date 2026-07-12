@@ -314,11 +314,25 @@ identity.
   "screening_policy_version": 1,
   "candidates_path": "stage-04/candidates.jsonl",
   "candidates_sha256": "...",
+  "registry_path": "stage-04/cite_key_registry.json",
+  "registry_sha256": "...",
+  "references_path": "stage-04/references.bib",
+  "references_sha256": "...",
+  "screening_output_path": "stage-05/shortlist.jsonl",
+  "screening_output_sha256": "...",
+  "candidate_count": 200,
+  "batch_size": 25,
+  "max_screen_candidates": 150,
+  "minimum_relevance_score": 0.5,
+  "minimum_quality_score": 0.6,
+  "claim_scope": "pipeline_validation",
+  "prefilter_rejected_candidate_ids": ["..."],
   "selected_candidate_ids": ["..."],
   "screened_candidate_ids": ["..."],
+  "semantic_duplicate_candidate_ids": ["..."],
   "unscreened_candidate_ids": ["..."],
-  "batch_count": 8,
-  "failed_batch_ids": [],
+  "batch_count": 6,
+  "failed_batches": [],
   "screening_complete": true,
   "degraded": false,
   "degradation_codes": []
@@ -327,7 +341,21 @@ identity.
 
 The shortlist contains only model decisions that passed strict parsing and
 candidate-ID closure. It never contains fabricated scores or rows inserted to
-reach a numeric minimum.
+reach a numeric minimum. The prefilter, screened, and unscreened identity sets
+form a complete, non-overlapping partition of Stage 4 candidates. Candidates
+outside the deterministic top-150 admission bound are prefilter rejections,
+not unscreened rows. `selected_candidate_ids` must exactly match the recorded
+screening output; the report binds both Stage 4 candidates and that output by
+SHA-256.
+Before screening, Stage 5 revalidates candidates and the canonical bibliography
+against the sealed Stage 4 registry. The report binds all three Stage 4 identity
+artifacts, so an edited candidate row or shadow bibliography cannot enter E1.
+
+`shortlist.jsonl` is success-only. Every Stage 5 failure writes decisions, if
+any, to `screening_partial.jsonl` and sets `screening_output_path` accordingly;
+it never leaves a canonical shortlist that a later `--from-stage` run can
+consume. Stage 4 and Stage 5 are evidence-authority stages and cannot appear in
+`runtime.skip_stages`.
 
 ### 7.3 Stage 6 evidence card
 
@@ -702,7 +730,13 @@ Stage 5 must not ask one model response to screen the complete candidate
 collection. Screening uses versioned, deterministic pre-ranking, bounded
 batches, candidate IDs, strict response schemas, and at most one response
 repair per batch. Batch size and maximum screened-candidate count are policy
-constants recorded in `screening_report.json`.
+constants recorded in `screening_report.json`. Policy v1 uses batches of 25
+and admits at most 150 candidates after deterministic keyword prefiltering and
+ranking. Lower-ranked candidates are rejected by the versioned deterministic
+policy and cannot be used for minimum-count supplementation. Policy v1 requires
+`relevance_score >= 0.5`; the configured 0-10 research quality threshold is
+normalized to 0-1. A `keep`/`reject` decision that contradicts either score
+threshold is a schema failure, not an accepted model judgment.
 
 The deterministic merge checks:
 
@@ -711,13 +745,22 @@ The deterministic merge checks:
 - no ID appears in two batches;
 - scores and reasons use the strict schema;
 - selected IDs preserve the configured deterministic final ordering.
+- DOI and arXiv identities with the same normalized title, first author, and
+  year are treated as potential semantic duplicates; only the highest-ranked
+  screened decision survives, without changing either Stage 4 identity.
 
 There is no minimum-size supplementation from rejected or unparsed candidates.
 
-For `research_release`, any failed selected batch or incomplete screening is a
-stage failure. For `pipeline_validation`, successfully screened rows may remain
-as diagnostics, but only their valid decisions can flow downstream. Zero valid
-selected rows ultimately fails the evidence minimum.
+For `research_release` and `exploratory`, any failed selected batch or
+incomplete screening is a stage failure. Only `pipeline_validation` may retain
+successfully screened rows as degraded diagnostics, and only their valid
+decisions can flow downstream. Zero valid selected rows still fails Stage 5.
+
+Before E9, `screening_report.json` is diagnostic provenance rather than release
+authority. E9 must recompute the deterministic prefilter, ordering, top-150
+admission, and batch partition from canonical Stage 4 artifacts plus the
+run-local config snapshot. No `research_release` candidate run may be started
+until that replay gate and its claim-scope cross-check are implemented.
 
 v1 does not automatically roll back to Stage 3. Failure output contains
 structured search-expansion recommendations. A later state-machine change may

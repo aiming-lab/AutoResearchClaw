@@ -26,6 +26,7 @@ from researchclaw.pipeline.stages import (
     DECISION_ROLLBACK,
     MAX_DECISION_PIVOTS,
     NONCRITICAL_STAGES,
+    SKIP_FORBIDDEN_STAGES,
     STAGE_SEQUENCE,
     Stage,
     StageStatus,
@@ -555,6 +556,14 @@ def execute_pipeline(
     started = False
     total_stages = len(STAGE_SEQUENCE)
     skip_stage_nums = frozenset(config.runtime.skip_stages)
+    forbidden_skips = sorted(
+        skip_stage_nums & {int(stage) for stage in SKIP_FORBIDDEN_STAGES}
+    )
+    if forbidden_skips:
+        raise ValueError(
+            "runtime.skip_stages cannot skip evidence-authority stages: "
+            + ", ".join(str(stage) for stage in forbidden_skips)
+        )
 
     if not (run_dir / "injected_artifacts.json").exists():
         injected = _apply_injected_artifacts(run_dir, config)

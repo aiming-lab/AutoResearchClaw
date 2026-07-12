@@ -297,6 +297,32 @@ def test_execute_pipeline_injects_artifacts_and_skips_configured_stages(
     assert (run_dir / "stage-09" / "exp_plan.yaml").exists()
 
 
+@pytest.mark.parametrize("stage_num", [4, 5])
+def test_execute_pipeline_rejects_programmatic_evidence_stage_skip(
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    stage_num: int,
+) -> None:
+    cfg = dataclasses.replace(
+        rc_config,
+        runtime=dataclasses.replace(rc_config.runtime, skip_stages=(stage_num,)),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=f"cannot skip evidence-authority stages: {stage_num}",
+    ):
+        rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-forbidden-skip",
+            config=cfg,
+            adapters=adapters,
+        )
+
+    assert not (run_dir / f"stage-{stage_num:02d}").exists()
+
+
 def test_execute_pipeline_records_and_writes_trajectory_signal(
     monkeypatch: pytest.MonkeyPatch,
     run_dir: Path,
