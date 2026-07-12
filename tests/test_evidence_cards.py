@@ -13,6 +13,7 @@ import yaml
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.domains.detector import set_forced_profile
 from researchclaw.experiment_runtime.contract import derive_contract, dump_contract
 from researchclaw.experiment_runtime.contract import find_stage09_contract, load_contract
 from researchclaw.literature.citation_policy import (
@@ -75,6 +76,7 @@ from researchclaw.pipeline.citation_release_audit import (
     CitationAuditError,
     audit_citation_evidence,
 )
+from researchclaw.pipeline._domain import _prompt_bank_domain_from_config
 from researchclaw.pipeline.stage_impls._synthesis import _execute_synthesis
 from researchclaw.pipeline.stages import StageStatus
 
@@ -206,12 +208,17 @@ def _prepare_stage5(
 
 
 def _real_config_snapshot(
-    run_dir: Path, *, claim_scope: str = "pipeline_validation"
+    run_dir: Path,
+    *,
+    claim_scope: str = "pipeline_validation",
+    profile: str | None = None,
 ) -> RCConfig:
     run_dir.mkdir(parents=True, exist_ok=True)
     source = Path("config.deepseek.sectional-dry-run.yaml")
     raw = yaml.safe_load(source.read_text(encoding="utf-8"))
     raw["experiment"]["claim_scope"] = claim_scope
+    if profile is not None:
+        raw["project"]["profile"] = profile
     snapshot = run_dir / "config.yaml"
     snapshot.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     config = RCConfig.from_dict(raw, project_root=run_dir, check_paths=False)
@@ -224,8 +231,11 @@ def _prepare_stage23_fixture(
     *,
     claim_scope: str = "pipeline_validation",
     fail_last_card: bool = False,
+    profile: str | None = None,
 ) -> tuple[RCConfig, str, tuple[str, ...]]:
-    config = _real_config_snapshot(run_dir, claim_scope=claim_scope)
+    config = _real_config_snapshot(
+        run_dir, claim_scope=claim_scope, profile=profile
+    )
     stage9 = run_dir / "stage-09"
     stage9.mkdir()
     dump_contract(
@@ -266,7 +276,8 @@ def _prepare_stage23_fixture(
         for claim in plan["claims"]
         for citation in claim["planned_citations"]
     )
-    paper_text = "## Introduction\n\n" + " ".join(
+    planned_section = str(plan["claims"][0]["section_path"][0])
+    paper_text = f"## {planned_section}\n\n" + " ".join(
         f"Evidence [{key}]." for key in planned_keys
     )
     stage22 = run_dir / "stage-22"
@@ -321,9 +332,14 @@ def _run_stage23_verified(
 
 
 def _prepare_e9_run(
-    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+    run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    profile: str | None = None,
 ) -> tuple[RCConfig, tuple[str, ...]]:
-    config, paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    config, paper_text, planned_keys = _prepare_stage23_fixture(
+        run_dir, profile=profile
+    )
     metric_path = run_dir / "stage-12" / "runs" / "results.json"
     metric_path.parent.mkdir(parents=True)
     metric_path.write_text(
@@ -1147,13 +1163,20 @@ def test_stage17_uses_final_plan_only_and_writes_replayable_closure(
     assert _execute_paper_outline(
         stage16, run_dir, config, AdapterBundle(), llm=None
     ).status is StageStatus.DONE
+    plan = load_final_citation_plan(run_dir, config)
+    assert {tuple(claim["section_path"]) for claim in plan["claims"]} == {
+        ("Related Work",)
+    }
+    assert "section: Related Work" in build_citation_writer_instruction(
+        run_dir, config
+    )
     key = shortlist[0]["cite_key"]
     llm = _SequenceLLM(
         [
             (
                 "## Title\n\nBounded Study\n\n## Abstract\n\nAbstract.\n\n"
-                f"## Introduction\n\nEvidence-backed context [{key}].\n\n"
-                "## Related Work\n\nRelated work."
+                "## Introduction\n\nIntroduction.\n\n"
+                f"## Related Work\n\n### Theme\n\nEvidence-backed context [{key}]."
             ),
             "## Method\n\nMethod.\n\n## Experiments\n\nExperiment setup.",
             "## Results\n\nDetection F1 was 95%.\n\n"
@@ -1208,6 +1231,67 @@ def test_stage17_uses_final_plan_only_and_writes_replayable_closure(
     )
     assert review.status is StageStatus.FAILED
     assert "closure" in (review.error or "").lower()
+
+
+def test_citation_plan_v2_assigns_hep_background_to_introduction(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir, profile="hep_ph")
+    shortlist = _prepare_stage5(run_dir, [_candidate(1)], config)
+    stage6 = run_dir / "stage-06"
+    stage6.mkdir()
+    assert _execute_knowledge_extract(
+        stage6,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM([_card_response(shortlist)]),  # type: ignore[arg-type]
+    ).status is StageStatus.DONE
+    stage16 = run_dir / "stage-16"
+    stage16.mkdir()
+    assert _execute_paper_outline(
+        stage16, run_dir, config, AdapterBundle(), llm=None
+    ).status is StageStatus.DONE
+    plan = load_final_citation_plan(run_dir, config)
+    assert {tuple(claim["section_path"]) for claim in plan["claims"]} == {
+        ("Introduction",)
+    }
+    assert _prompt_bank_domain_from_config(config) == "hep_ph"
+    assert "section: Introduction" in build_citation_writer_instruction(
+        run_dir, config
+    )
+
+
+def test_prompt_bank_derivation_ignores_process_forced_profile(tmp_path: Path) -> None:
+    config = _real_config_snapshot(tmp_path / "run", profile="")
+    set_forced_profile("hep_ph")
+    try:
+        assert _prompt_bank_domain_from_config(config) == "ml"
+    finally:
+        set_forced_profile("")
+
+
+def test_citation_plan_v2_rejects_legacy_and_noncanonical_sections(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper, _keys = _prepare_stage23_fixture(run_dir)
+    plan_path = run_dir / "stage-16" / "citation_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+
+    legacy = {**plan, "plan_version": 1}
+    with pytest.raises(CitationPlanContractError, match="plan version"):
+        parse_citation_plan(canonical_json_text(legacy))
+
+    for invalid_path in (
+        ["Introduction", "Related Work"],
+        ["Discussion"],
+    ):
+        tampered = json.loads(json.dumps(plan))
+        tampered["claims"][0]["section_path"] = invalid_path
+        with pytest.raises(CitationPlanContractError, match="section_path"):
+            parse_citation_plan(canonical_json_text(tampered))
 
 
 def test_stage20_22_and_23_reject_bibliography_key_outside_allowlist(
@@ -1848,6 +1932,81 @@ def test_e9_replays_complete_citation_evidence_chain(
         contract_path=contract_path,
         contract=load_contract(contract_path),
     )
+
+
+def test_e9_replays_profiled_hep_citation_plan_v2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _planned_keys = _prepare_e9_run(
+        run_dir, monkeypatch, profile="hep_ph"
+    )
+    plan = load_final_citation_plan(run_dir, config)
+    assert {tuple(claim["section_path"]) for claim in plan["claims"]} == {
+        ("Introduction",)
+    }
+    contract_path = find_stage09_contract(run_dir)
+    assert contract_path is not None
+    audit_citation_evidence(
+        run_dir,
+        contract_path=contract_path,
+        contract=load_contract(contract_path),
+    )
+
+
+def test_citation_closure_does_not_merge_discussion_h3_into_related_work(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config, _paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    metric_path = run_dir / "stage-12" / "runs" / "results.json"
+    metric_path.parent.mkdir(parents=True)
+    metric_path.write_text(
+        json.dumps({"metrics": {"detection_f1": 0.95}}), encoding="utf-8"
+    )
+    key = planned_keys[0]
+    paper = f"## Related Work\n\nNo citation.\n\n## Discussion\n\n### Theme\n\nEvidence [{key}].\n"
+    structure_text = canonical_json_text(
+        {
+            "schema_version": 1,
+            "valid": True,
+            "source_sha256": sha256_text(paper),
+            "section_count": 3,
+            "issues": [],
+        }
+    )
+    experiment_text = canonical_json_text(
+        build_experiment_fact_closure_report(run_dir, paper_text=paper)
+    )
+    closure = build_citation_closure_report(
+        run_dir,
+        config,
+        paper_text=paper,
+        structure_report_text=structure_text,
+        experiment_fact_report_text=experiment_text,
+    )
+    assert key in closure["misplaced_planned_keys"]
+
+
+def test_e9_rejects_citation_plan_v2_section_tampering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    _config_value, _planned_keys = _prepare_e9_run(run_dir, monkeypatch)
+    plan_path = run_dir / "stage-16" / "citation_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert plan["claims"][0]["section_path"] == ["Related Work"]
+    plan["claims"][0]["section_path"] = ["Introduction"]
+    plan_path.write_text(canonical_json_text(plan), encoding="utf-8")
+    contract_path = find_stage09_contract(run_dir)
+    assert contract_path is not None
+    with pytest.raises(CitationAuditError) as exc_info:
+        audit_citation_evidence(
+            run_dir,
+            contract_path=contract_path,
+            contract=load_contract(contract_path),
+        )
+    assert exc_info.value.code == "citation_plan_replay_failed"
 
 
 def test_e9_rejects_support_artifact_single_point_tampering(

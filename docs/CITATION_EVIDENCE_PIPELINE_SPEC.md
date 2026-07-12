@@ -541,7 +541,7 @@ Each planned claim contains:
 ```json
 {
   "claim_id": "planned-claim-001",
-  "section_path": ["Introduction"],
+  "section_path": ["Related Work"],
   "claim_text": "...",
   "claim_type": "background",
   "planned_citations": [
@@ -556,11 +556,19 @@ Each planned claim contains:
 
 Rules:
 
+- citation plan version 2 derives one authoritative background section from
+  the persisted config using the same prompt-bank selector as the executor:
+  ML, biology, and general banks use `Related Work`, while HEP uses
+  `Introduction` because its ownership contract has no separate review section;
+- process-global forced-profile state is excluded from this derivation so E9
+  replay depends only on the run-local config snapshot;
+- `###` subsections inherit their top-level CommonMark path for placement
+  closure, and each claim still has exactly one authoritative top-level section;
 - every key belongs to the citation allowlist;
 - every excerpt ID belongs to that key's authoritative card;
 - `claim_text` is planning text, not permission for Stage 17 to invent a
   stronger statement;
-- v1 `support_status` is `abstract_sufficient` or `unsupported`;
+- v2 `support_status` is `abstract_sufficient` or `unsupported`;
 - a research-release v2 plan marks every scholarly-paper key as
   `fulltext_required` until verified canonical full text exists;
 - the final plan cannot contain `unsupported` or unmet `fulltext_required`

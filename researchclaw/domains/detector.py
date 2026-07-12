@@ -549,6 +549,25 @@ def detect_domain(
     return get_generic_profile()
 
 
+def detect_domain_unforced(
+    topic: str,
+    hypotheses: str = "",
+    literature: str = "",
+) -> DomainProfile:
+    """Detect from explicit text only, ignoring the process-global override.
+
+    This is the replay-safe entry point for decisions derived from persisted
+    configuration. Interactive callers that intentionally use
+    ``set_forced_profile`` should continue to call :func:`detect_domain`.
+    """
+    domain_id = _keyword_detect_tiered(topic, hypotheses, literature)
+    if domain_id:
+        profile = get_profile(domain_id)
+        if profile:
+            return profile
+    return get_generic_profile()
+
+
 async def detect_domain_async(
     topic: str,
     hypotheses: str = "",

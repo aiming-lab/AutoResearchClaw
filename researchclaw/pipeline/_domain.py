@@ -12,7 +12,11 @@ sites while routing every decision through the newer detector.
 
 from __future__ import annotations
 
-from researchclaw.domains.detector import DomainProfile, detect_domain as _detect_profile
+from researchclaw.domains.detector import (
+    DomainProfile,
+    detect_domain as _detect_profile,
+    detect_domain_unforced as _detect_profile_unforced,
+)
 
 _TOP_VENUES_BY_PARENT: dict[str, str] = {
     "ml": "NeurIPS, ICML, ICLR",
@@ -181,8 +185,15 @@ def _prompt_bank_domain_from_config(config: object) -> str:
     if not topic:
         return "ml"
 
+    domain_hints = ", ".join(
+        str(domain).strip().replace("-", " ").replace("_", " ")
+        for domain in domains
+        if str(domain).strip()
+    )
+    hypotheses = f"Configured domains: {domain_hints}." if domain_hints else ""
     try:
-        coarse_id, _display, _venues = _detect_domain(topic, domains)
+        profile = _detect_profile_unforced(topic, hypotheses=hypotheses)
+        coarse_id = _coarse_domain_id(profile)
     except Exception:  # noqa: BLE001
         return "ml"
     if coarse_id in _HEP_PROMPT_BANK_IDS:

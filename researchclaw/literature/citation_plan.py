@@ -1,4 +1,4 @@
-"""Strict deterministic v1 citation plans for Stage 16 and Stage 17."""
+"""Strict deterministic citation plans for Stage 16 and Stage 17."""
 
 from __future__ import annotations
 
@@ -33,14 +33,24 @@ from researchclaw.pipeline.manuscript_sections import (
     ManuscriptStructureError,
     parse_manuscript,
 )
+from researchclaw.pipeline._domain import _prompt_bank_domain_from_config
 
 
 CITATION_PLAN_SCHEMA_VERSION = 1
-CITATION_PLAN_VERSION = 1
+CITATION_PLAN_VERSION = 2
 
 
 class CitationPlanContractError(ValueError):
     """Raised when a citation plan is not closed over retained evidence."""
+
+
+def _citation_section_for_config(config: RCConfig) -> str:
+    """Return the sole background-evidence section owned by the prompt bank."""
+    return (
+        "Introduction"
+        if _prompt_bank_domain_from_config(config) == "hep_ph"
+        else "Related Work"
+    )
 
 
 def build_citation_plan(
@@ -70,6 +80,7 @@ def build_citation_plan(
     if len(selected_keys) < int(policy["effective_min_unique_sources"]):
         raise CitationPlanContractError("citation plan cannot meet effective minimum")
     claims: list[dict[str, Any]] = []
+    citation_section = _citation_section_for_config(config)
     for ordinal, cite_key in enumerate(selected_keys, start=1):
         card = cards_by_key.get(cite_key)
         if card is None or card["extraction_status"] != "success":
@@ -80,7 +91,7 @@ def build_citation_plan(
         claims.append(
             {
                 "claim_id": f"planned-claim-{ordinal:03d}",
-                "section_path": ["Introduction"],
+                "section_path": [citation_section],
                 "claim_text": excerpts[0]["excerpt_text"],
                 "claim_type": "background",
                 "planned_citations": [
@@ -159,14 +170,14 @@ def parse_citation_plan(text: str) -> dict[str, Any]:
         if claim_id != f"planned-claim-{ordinal:03d}" or claim_id in claim_ids:
             raise CitationPlanContractError("planned claim ID sequence mismatch")
         claim_ids.add(claim_id)
-        if claim["section_path"] != ["Introduction"]:
-            raise CitationPlanContractError("unsupported v1 section_path")
+        if claim["section_path"] not in (["Introduction"], ["Related Work"]):
+            raise CitationPlanContractError("unsupported v2 section_path")
         _required_string(claim, "claim_text")
         if claim["claim_type"] != "background":
-            raise CitationPlanContractError("unsupported v1 claim_type")
+            raise CitationPlanContractError("unsupported v2 claim_type")
         citations = claim["planned_citations"]
         if not isinstance(citations, list) or len(citations) != 1:
-            raise CitationPlanContractError("v1 claim requires one planned citation")
+            raise CitationPlanContractError("v2 claim requires one planned citation")
         citation = citations[0]
         if not isinstance(citation, dict):
             raise CitationPlanContractError("planned citation must be an object")
@@ -185,7 +196,7 @@ def parse_citation_plan(text: str) -> dict[str, Any]:
         ) or len(ids) != len(set(ids)):
             raise CitationPlanContractError("invalid evidence_excerpt_ids")
         if citation["support_status"] != "abstract_sufficient":
-            raise CitationPlanContractError("final v1 plan requires abstract_sufficient")
+            raise CitationPlanContractError("final v2 plan requires abstract_sufficient")
     return payload
 
 
@@ -242,7 +253,8 @@ def build_citation_writer_instruction(run_dir: Path, config: RCConfig) -> str:
         blocks.append(
             "\n".join(
                 (
-                    f"- CLAIM {claim['claim_id']} (section: Introduction)",
+                    f"- CLAIM {claim['claim_id']} "
+                    f"(section: {claim['section_path'][0]})",
                     f"  Allowed wording ceiling: {claim['claim_text']}",
                     f"  Required citation key: [{cite_key}]",
                     "  Retained abstract evidence:",
@@ -423,7 +435,8 @@ def build_citation_closure_report(
         if structure_valid:
             section_keys: dict[str, set[str]] = {}
             for section in document.sections:
-                section_keys.setdefault(section.title.casefold(), set()).update(
+                top_level = section.path[0].casefold()
+                section_keys.setdefault(top_level, set()).update(
                     extract_citation_keys(section.body)
                 )
             for claim in plan["claims"]:
