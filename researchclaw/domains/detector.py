@@ -381,6 +381,16 @@ def _keyword_detect(text: str) -> str | None:
     return None
 
 
+def _keyword_detect_tiered(
+    topic: str, hypotheses: str = "", literature: str = ""
+) -> str | None:
+    """Prefer the canonical topic over mutable downstream context."""
+    topic_match = _keyword_detect(topic)
+    if topic_match is not None:
+        return topic_match
+    return _keyword_detect(f"{hypotheses} {literature}")
+
+
 # ---------------------------------------------------------------------------
 # LLM-based detection
 # ---------------------------------------------------------------------------
@@ -508,7 +518,7 @@ def detect_domain(
         )
 
     # Level 1: Keyword matching
-    domain_id = _keyword_detect(combined_text)
+    domain_id = _keyword_detect_tiered(topic, hypotheses, literature)
     if domain_id:
         profile = get_profile(domain_id)
         if profile:
@@ -559,7 +569,7 @@ async def detect_domain_async(
             return profile
 
     # Level 1: Keyword matching
-    domain_id = _keyword_detect(combined_text)
+    domain_id = _keyword_detect_tiered(topic, hypotheses, literature)
     if domain_id:
         profile = get_profile(domain_id)
         if profile:
@@ -593,8 +603,7 @@ def detect_domain_id(topic: str, hypotheses: str = "", literature: str = "") -> 
     """
     if _FORCED_PROFILE_ID:
         return _FORCED_PROFILE_ID
-    combined = f"{topic} {hypotheses} {literature}"
-    return _keyword_detect(combined) or "generic"
+    return _keyword_detect_tiered(topic, hypotheses, literature) or "generic"
 
 
 def is_ml_domain(domain: DomainProfile) -> bool:

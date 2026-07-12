@@ -10,6 +10,7 @@ from researchclaw.experiment_runtime.contract import (
     ContractValidationError,
     derive_contract,
     dump_contract,
+    find_stage09_contract,
     load_contract,
     validate_contract_dict,
 )
@@ -110,6 +111,62 @@ def test_contract_sha256_is_deterministic(tmp_path: Path) -> None:
     p2 = tmp_path / "c2.yaml"
     assert dump_contract(contract, p1) == dump_contract(contract, p2)
     assert load_contract(p1).primary_metric["key"] == "detection_f1"
+
+
+def test_direct_paused_stage9_blocks_fallback_to_versioned_contract(
+    tmp_path: Path,
+) -> None:
+    versioned = tmp_path / "stage-09_v2"
+    versioned.mkdir()
+    (versioned / "experiment_contract.yaml").write_text(
+        "stale pre-pivot contract\n", encoding="utf-8"
+    )
+    direct = tmp_path / "stage-09"
+    direct.mkdir()
+    (direct / "plan_meta.json").write_text("{}\n", encoding="utf-8")
+
+    assert find_stage09_contract(tmp_path) is None
+
+
+def test_stage_health_marker_alone_blocks_versioned_contract_fallback(
+    tmp_path: Path,
+) -> None:
+    versioned = tmp_path / "stage-09_v2"
+    versioned.mkdir()
+    (versioned / "experiment_contract.yaml").write_text(
+        "stale pre-pivot contract\n", encoding="utf-8"
+    )
+    direct = tmp_path / "stage-09"
+    direct.mkdir()
+    (direct / "stage_health.json").write_text(
+        '{"status":"paused"}\n', encoding="utf-8"
+    )
+
+    assert find_stage09_contract(tmp_path) is None
+
+
+def test_direct_contract_wins_even_when_attempt_markers_exist(tmp_path: Path) -> None:
+    direct = tmp_path / "stage-09"
+    direct.mkdir()
+    contract = direct / "experiment_contract.yaml"
+    contract.write_text("new direct contract\n", encoding="utf-8")
+    (direct / "stage_health.json").write_text(
+        '{"status":"done"}\n', encoding="utf-8"
+    )
+
+    assert find_stage09_contract(tmp_path) == contract
+
+
+def test_highest_versioned_contract_remains_legacy_fallback(tmp_path: Path) -> None:
+    for version in (2, 10):
+        directory = tmp_path / f"stage-09_v{version}"
+        directory.mkdir()
+        (directory / "experiment_contract.yaml").write_text(
+            f"version {version}\n", encoding="utf-8"
+        )
+
+    selected = find_stage09_contract(tmp_path)
+    assert selected == tmp_path / "stage-09_v10" / "experiment_contract.yaml"
 
 
 def test_derive_contract_splits_smoke_and_run_budgets(tmp_path: Path) -> None:

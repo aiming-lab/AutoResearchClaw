@@ -85,6 +85,26 @@ def _execute_experiment_design(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
+    # Keep executor-owned decision.json/stage_health.json. Contract selection
+    # uses them to distinguish an authoritative incomplete direct attempt from
+    # a legacy run that may safely fall back to a versioned Stage 9 contract.
+    try:
+        for artifact_name in (
+            "exp_plan.yaml",
+            "experiment_contract.yaml",
+            "experiment_contract.sha256",
+            "plan_meta.json",
+            "domain_profile.json",
+        ):
+            (stage_dir / artifact_name).unlink(missing_ok=True)
+    except OSError as exc:
+        return StageResult(
+            stage=Stage.EXPERIMENT_DESIGN,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Failed to clear stale Stage 9 artifacts: {exc}",
+            decision="retry",
+        )
     hypotheses = _read_prior_artifact(run_dir, "hypotheses.md") or ""
     preamble = _build_context_preamble(
         config, run_dir, include_goal=True, include_hypotheses=True
@@ -295,6 +315,13 @@ def _execute_experiment_design(
                         logger.info("Stage 09: Strict YAML retry succeeded.")
                 except yaml.YAMLError:
                     pass
+
+    if (
+        isinstance(plan, dict)
+        and set(plan) == {"experiment_plan"}
+        and isinstance(plan["experiment_plan"], dict)
+    ):
+        plan = dict(plan["experiment_plan"])
 
     # BUG-12: Fallback 4 — extract method/baseline names from Stage 8 hypotheses
     if plan is None:

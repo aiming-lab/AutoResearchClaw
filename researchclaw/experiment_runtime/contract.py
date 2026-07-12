@@ -235,6 +235,11 @@ def find_stage09_contract(run_dir: Path) -> Path | None:
     direct = run_dir / "stage-09" / "experiment_contract.yaml"
     if direct.is_file():
         return direct
+    if any(
+        (direct.parent / marker).exists()
+        for marker in ("decision.json", "plan_meta.json", "stage_health.json")
+    ):
+        return None
     candidates: list[Path] = []
     for path in run_dir.glob("stage-09_v*/experiment_contract.yaml"):
         if path.is_file():

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from pathlib import Path
 
@@ -10,9 +12,11 @@ from researchclaw.domains.detector import (
     ExperimentParadigm,
     MetricType,
     detect_domain,
+    detect_domain_async,
     detect_domain_id,
     get_generic_profile,
     get_profile,
+    set_forced_profile,
     is_ml_domain,
     load_all_profiles,
     _keyword_detect,
@@ -182,6 +186,34 @@ class TestDetectDomain:
 
         domain_id = detect_domain_id("cooking recipes")
         assert domain_id == "generic"
+
+    def test_canonical_topic_precedes_mutable_hypothesis_context(self):
+        topic = "anomaly detection for hardware security and intrusion detection"
+        hypotheses = "Evaluate a simulation with molecular dynamics terminology."
+        profile = detect_domain(topic=topic, hypotheses=hypotheses)
+        assert profile.domain_id == "security_detection"
+        assert detect_domain_id(topic, hypotheses) == "security_detection"
+        async_profile = asyncio.run(
+            detect_domain_async(topic=topic, hypotheses=hypotheses)
+        )
+        assert async_profile.domain_id == "security_detection"
+
+    def test_hypotheses_supply_domain_only_when_topic_is_inconclusive(self):
+        profile = detect_domain(
+            topic="study an abstract system",
+            hypotheses="Use a finite difference method for the Poisson equation.",
+        )
+        assert profile.domain_id == "physics_pde"
+
+    def test_forced_profile_precedes_topic_keyword(self):
+        set_forced_profile("physics_pde")
+        try:
+            topic = "intrusion detection for hardware security"
+            assert detect_domain(topic).domain_id == "physics_pde"
+            assert asyncio.run(detect_domain_async(topic)).domain_id == "physics_pde"
+            assert detect_domain_id(topic) == "physics_pde"
+        finally:
+            set_forced_profile("")
 
 
 # ---------------------------------------------------------------------------

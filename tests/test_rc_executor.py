@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import yaml
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import PaperRevisionConfig, RCConfig
@@ -2028,6 +2029,96 @@ class TestExperimentDesignGuard:
         assert set(meta["missing_required_keys"]) == {
             "baselines", "proposed_methods", "ablations",
         }
+
+    def test_exact_experiment_plan_wrapper_is_unwrapped(
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        from researchclaw.experiment_runtime.contract import find_stage09_contract
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        stage_dir = run_dir / "stage-09"
+        stage_dir.mkdir()
+        (stage_dir / "exp_plan.yaml").write_text("stale: true\n", encoding="utf-8")
+        (stage_dir / "experiment_contract.yaml").write_text(
+            "stale pre-pivot contract\n", encoding="utf-8"
+        )
+        (stage_dir / "experiment_contract.sha256").write_text(
+            "0" * 64 + "\n", encoding="utf-8"
+        )
+        _write_prior_artifact(
+            run_dir, 8, "hypotheses.md", "# Hypotheses\n\nSecurity detection.\n"
+        )
+        wrapped = {
+            "experiment_plan": {
+                "objectives": ["Evaluate detection"],
+                "datasets": ["synthetic traces"],
+                "baselines": ["threshold detector"],
+                "proposed_methods": ["change point detector"],
+                "ablations": ["without normalization"],
+                "metrics": ["detection_f1"],
+                "risks": ["distribution shift"],
+                "compute_budget": ["300 seconds"],
+            }
+        }
+        fake_llm = FakeLLMClient(json.dumps(wrapped))
+
+        result = rc_executor._execute_experiment_design(
+            stage_dir, run_dir, rc_config, adapters, llm=fake_llm
+        )
+
+        assert result.status == StageStatus.DONE
+        plan = yaml.safe_load((stage_dir / "exp_plan.yaml").read_text())
+        assert plan["baselines"] == ["threshold detector"]
+        assert "experiment_plan" not in plan
+        assert "stale pre-pivot contract" not in (
+            stage_dir / "experiment_contract.yaml"
+        ).read_text(encoding="utf-8")
+        assert find_stage09_contract(run_dir) == (
+            stage_dir / "experiment_contract.yaml"
+        )
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"experiment_plan": "not a mapping"},
+            {"experiment_plan": {"objectives": ["only"]}},
+            {
+                "experiment_plan": {
+                    "baselines": ["baseline"],
+                    "proposed_methods": ["method"],
+                    "ablations": ["ablation"],
+                },
+                "extra": "sibling prevents unwrapping",
+            },
+        ],
+    )
+    def test_invalid_or_ambiguous_experiment_plan_wrapper_pauses(
+        self,
+        tmp_path: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        payload: dict,
+    ) -> None:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        stage_dir = run_dir / "stage-09"
+        stage_dir.mkdir()
+        _write_prior_artifact(
+            run_dir, 8, "hypotheses.md", "# Hypotheses\n\nNo method names.\n"
+        )
+
+        result = rc_executor._execute_experiment_design(
+            stage_dir,
+            run_dir,
+            rc_config,
+            adapters,
+            llm=FakeLLMClient(json.dumps(payload)),
+        )
+
+        assert result.status == StageStatus.PAUSED
+        assert result.decision == "schema_deficient"
+        assert not (stage_dir / "experiment_contract.yaml").exists()
 
 
 class TestResourcePlanningFallback:
