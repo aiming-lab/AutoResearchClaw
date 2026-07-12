@@ -53,6 +53,13 @@ _PLACEHOLDER_PAPER_MARKERS = (
 
 _CITATION_EVIDENCE_PATH = "stage-23/verification_report.json"
 
+DEGRADED_SIGNAL_CODES = frozenset(
+    {"degradation_signal", "stale_degradation_signal", "degraded_summary"}
+)
+DEGRADED_COMPATIBLE_CODES = DEGRADED_SIGNAL_CODES | frozenset(
+    {"quality_below_threshold"}
+)
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -89,6 +96,7 @@ class ReleaseChecker:
         self.check_degradation_signal(quality)
         self.check_quality_report(quality)
         self.check_experiment_contract()
+        self.check_citation_evidence_replay()
         self.check_sectional_revision(manifest)
         self.check_fabrication_flags(fabrication)
         self.check_paper_artifacts()
@@ -292,6 +300,43 @@ class ReleaseChecker:
                 "sectional_revision_artifact_invalid",
                 f"Sectional release replay failed unexpectedly: {type(exc).__name__}: {exc}",
                 "stage-19/section_revision_manifest.json",
+            )
+
+    def check_citation_evidence_replay(self) -> None:
+        loaded = self._load_experiment_contract()
+        if loaded is None:
+            self.error(
+                "citation_contract_binding_missing",
+                "Cannot replay citation evidence without a valid Stage 9 contract.",
+                "stage-24/citation_support.json",
+            )
+            return
+        contract_path, contract = loaded
+        try:
+            from researchclaw.pipeline.citation_release_audit import (
+                CitationAuditError,
+                audit_citation_evidence,
+            )
+        except ImportError as exc:
+            self.error(
+                "citation_release_auditor_unavailable",
+                f"Citation release auditor is unavailable: {exc}",
+                "stage-24/citation_support.json",
+            )
+            return
+        try:
+            audit_citation_evidence(
+                self.run_dir,
+                contract_path=contract_path,
+                contract=contract,
+            )
+        except CitationAuditError as exc:
+            self.error(exc.code, exc.message, exc.path)
+        except Exception as exc:  # noqa: BLE001
+            self.error(
+                "citation_evidence_replay_failed",
+                f"Citation evidence replay failed unexpectedly: {type(exc).__name__}: {exc}",
+                "stage-24/citation_support.json",
             )
 
     def check_fabrication_flags(self, fabrication: dict[str, Any] | None) -> None:
@@ -1126,17 +1171,9 @@ class ReleaseChecker:
         errors = [f for f in self.findings if f.severity == SEVERITY_ERROR]
         if not errors:
             return EXIT_PASS
-        degraded_signal_codes = {
-            "degradation_signal",
-            "stale_degradation_signal",
-            "degraded_summary",
-        }
-        degraded_compatible_codes = degraded_signal_codes | {
-            "quality_below_threshold",
-        }
         if (
-            any(f.code in degraded_signal_codes for f in errors)
-            and all(f.code in degraded_compatible_codes for f in errors)
+            any(f.code in DEGRADED_SIGNAL_CODES for f in errors)
+            and all(f.code in DEGRADED_COMPATIBLE_CODES for f in errors)
         ):
             return EXIT_DEGRADED
         return EXIT_FAIL

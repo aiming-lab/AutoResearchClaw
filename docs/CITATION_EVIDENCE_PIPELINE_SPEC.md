@@ -1323,6 +1323,32 @@ shadow-bibliography consumer from becoming a second authority.
 - snapshot-test the degraded-compatible error allowlist;
 - new errors always exit 1.
 
+E9 uses one package-owned disk auditor, `citation_release_audit.py`, rather
+than reimplementing policy inside `release_check.py`. Starting from the active
+run-local config and canonical Stage 9 contract, it replays the Stage 4 registry,
+Stage 5 deterministic prefilter/ranking/top-150 admission, evidence cards,
+allowlist, effective policy, final plan, Stage 17 experiment/citation closure,
+final-paper citation closure, Stage 23 result/count/completeness closure, and
+Stage 24 support closure. Active config claim scope and dataset origin are
+independently compared with the canonical Stage 9 contract. Stored semantic
+critic verdicts remain the unavoidable unsigned-run trust boundary, but every
+identity, path, hash, span, count, linkage, and validity field around them is
+reconstructed.
+
+The release checker converts the first typed replay error into an error finding;
+unexpected exceptions also become errors rather than tracebacks. Citation and
+evidence errors are structurally excluded from the closed degraded-compatible
+code set, so `allow_suspicious` and unrelated degradation signals cannot turn
+an E9 failure into exit 0 or exit 2.
+
+E9 is the single release-authoritative interpretation of the citation evidence
+chain. The older `check_citations`, `check_citation_support`, and
+`check_claims_provenance` checks remain as compatibility diagnostics and may
+add stricter findings, but they cannot waive, replace, or contradict a failed
+E9 replay. Future citation policy changes must update the package-owned replay
+and producer validators first; loosening a legacy diagnostic never changes
+release eligibility.
+
 ### F0. v2 full-text HITL
 
 - preliminary-plan acquisition request;

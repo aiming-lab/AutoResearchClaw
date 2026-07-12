@@ -14,6 +14,7 @@ import yaml
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.experiment_runtime.contract import derive_contract, dump_contract
+from researchclaw.experiment_runtime.contract import find_stage09_contract, load_contract
 from researchclaw.literature.citation_policy import (
     CitationPolicyContractError,
     load_effective_citation_policy,
@@ -70,6 +71,10 @@ from researchclaw.pipeline.stage_impls._review_publish import (
     _execute_quality_gate,
 )
 from researchclaw.pipeline.stage_impls._release_audit import _execute_truth_audit
+from researchclaw.pipeline.citation_release_audit import (
+    CitationAuditError,
+    audit_citation_evidence,
+)
 from researchclaw.pipeline.stage_impls._synthesis import _execute_synthesis
 from researchclaw.pipeline.stages import StageStatus
 
@@ -303,6 +308,75 @@ def _run_stage23_verified(
         llm=_SequenceLLM([json.dumps({key: 0.9 for key in planned_keys})]),  # type: ignore[arg-type]
     )
     assert result.status is StageStatus.DONE, result.error
+
+
+def _prepare_e9_run(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[RCConfig, tuple[str, ...]]:
+    config, paper_text, planned_keys = _prepare_stage23_fixture(run_dir)
+    metric_path = run_dir / "stage-12" / "runs" / "results.json"
+    metric_path.parent.mkdir(parents=True)
+    metric_path.write_text(
+        json.dumps({"metrics": {"detection_f1": 0.95}}), encoding="utf-8"
+    )
+    stage17 = run_dir / "stage-17"
+    stage17.mkdir()
+    (stage17 / "paper_draft.md").write_text(paper_text, encoding="utf-8")
+    structure_text = canonical_json_text(
+        {
+            "schema_version": 1,
+            "valid": True,
+            "source_sha256": sha256_text(paper_text),
+            "section_count": 1,
+            "issues": [],
+        }
+    )
+    (stage17 / "paper_structure_report.json").write_text(structure_text)
+    experiment_text = canonical_json_text(
+        build_experiment_fact_closure_report(run_dir, paper_text=paper_text)
+    )
+    (stage17 / "experiment_fact_closure_report.json").write_text(experiment_text)
+    closure = build_citation_closure_report(
+        run_dir,
+        config,
+        paper_text=paper_text,
+        structure_report_text=structure_text,
+        experiment_fact_report_text=experiment_text,
+    )
+    assert closure["valid"] is True
+    (stage17 / "citation_closure_report.json").write_text(
+        canonical_json_text(closure), encoding="utf-8"
+    )
+    _run_stage23_verified(run_dir, config, planned_keys, monkeypatch)
+    support_responses = [
+        json.dumps({"verdict": "supported", "reason": "The excerpt supports the claim."})
+        for _key in planned_keys
+    ]
+    support_responses.append(
+        json.dumps(
+            {
+                "claims": [
+                    {
+                        "text": "The experiment reports a bounded result.",
+                        "type": "result",
+                        "values": [],
+                        "cited_keys": [],
+                    }
+                ]
+            }
+        )
+    )
+    stage24 = run_dir / "stage-24"
+    stage24.mkdir()
+    result = _execute_truth_audit(
+        stage24,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM(support_responses),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.DONE, result.error
+    return config, planned_keys
 
 
 def test_card_batch_requires_exact_identity_closure() -> None:
@@ -1683,6 +1757,145 @@ def test_stage24_rejects_verification_result_key_closure_tampering(
         "verification result key closure" in (result.error or "")
         or "duplicate verification cite_key" in (result.error or "")
     )
+
+
+def test_e9_replays_complete_citation_evidence_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    _config_value, _planned_keys = _prepare_e9_run(run_dir, monkeypatch)
+    contract_path = find_stage09_contract(run_dir)
+    assert contract_path is not None
+    audit_citation_evidence(
+        run_dir,
+        contract_path=contract_path,
+        contract=load_contract(contract_path),
+    )
+
+
+def test_e9_rejects_support_artifact_single_point_tampering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    _config_value, _planned_keys = _prepare_e9_run(run_dir, monkeypatch)
+    support_path = run_dir / "stage-24" / "citation_support.json"
+    support = json.loads(support_path.read_text())
+    support["instances"][0]["claim_text"] += " tampered"
+    support_path.write_text(json.dumps(support), encoding="utf-8")
+    contract_path = find_stage09_contract(run_dir)
+    assert contract_path is not None
+    with pytest.raises(CitationAuditError) as exc_info:
+        audit_citation_evidence(
+            run_dir,
+            contract_path=contract_path,
+            contract=load_contract(contract_path),
+        )
+    assert exc_info.value.code == "citation_support_replay_failed"
+
+
+def test_e9_replays_stage5_prefilter_instead_of_trusting_report_partition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    _config_value, _planned_keys = _prepare_e9_run(run_dir, monkeypatch)
+    shortlist_path = run_dir / "stage-05" / "shortlist.jsonl"
+    shortlist_lines = shortlist_path.read_text().splitlines()
+    removed = json.loads(shortlist_lines.pop())
+    shortlist_text = "\n".join(shortlist_lines) + "\n"
+    shortlist_path.write_text(shortlist_text, encoding="utf-8")
+    report_path = run_dir / "stage-05" / "screening_report.json"
+    report = json.loads(report_path.read_text())
+    identity = removed["source_identity"]
+    report["screening_output_sha256"] = sha256_text(shortlist_text)
+    report["selected_candidate_ids"].remove(identity)
+    report["screened_candidate_ids"].remove(identity)
+    report["prefilter_rejected_candidate_ids"].append(identity)
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    contract_path = find_stage09_contract(run_dir)
+    assert contract_path is not None
+    with pytest.raises(CitationAuditError) as exc_info:
+        audit_citation_evidence(
+            run_dir,
+            contract_path=contract_path,
+            contract=load_contract(contract_path),
+        )
+    assert exc_info.value.code == "literature_screening_replay_failed"
+    assert "prefilter partition replay" in exc_info.value.message
+
+
+def test_e9_rejects_active_config_contract_scope_divergence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    _config_value, _planned_keys = _prepare_e9_run(run_dir, monkeypatch)
+    contract_path = find_stage09_contract(run_dir)
+    assert contract_path is not None
+    contract_text = contract_path.read_text().replace(
+        "claim_scope: pipeline_validation", "claim_scope: exploratory"
+    )
+    contract_path.write_text(contract_text, encoding="utf-8")
+    with pytest.raises(CitationAuditError) as exc_info:
+        audit_citation_evidence(
+            run_dir,
+            contract_path=contract_path,
+            contract=load_contract(contract_path),
+        )
+    assert exc_info.value.code == "citation_contract_scope_mismatch"
+
+
+def test_e9_rejects_verification_summary_self_report_tampering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    _config_value, _planned_keys = _prepare_e9_run(run_dir, monkeypatch)
+    report_path = run_dir / "stage-23" / "verification_report.json"
+    report = json.loads(report_path.read_text())
+    report["summary"]["verified"] -= 1
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    contract_path = find_stage09_contract(run_dir)
+    assert contract_path is not None
+    with pytest.raises(CitationAuditError) as exc_info:
+        audit_citation_evidence(
+            run_dir,
+            contract_path=contract_path,
+            contract=load_contract(contract_path),
+        )
+    assert exc_info.value.code == "citation_verification_replay_failed"
+
+
+@pytest.mark.parametrize("artifact", ["claims", "citations", "truth"])
+def test_e9_rejects_stage24_cross_artifact_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+) -> None:
+    run_dir = tmp_path / "run"
+    _config_value, _planned_keys = _prepare_e9_run(run_dir, monkeypatch)
+    if artifact == "claims":
+        path = run_dir / "stage-24" / "claims.json"
+        payload = json.loads(path.read_text())
+        support_claim = next(
+            row for row in payload["claims"] if row["id"].startswith("support-")
+        )
+        support_claim["status"] = "unsupported"
+    elif artifact == "citations":
+        path = run_dir / "stage-24" / "citations.json"
+        payload = json.loads(path.read_text())
+        payload["instances"] = list(reversed(payload["instances"]))
+    else:
+        path = run_dir / "stage-24" / "truth_audit.json"
+        payload = json.loads(path.read_text())
+        payload["citation_support_sha256"] = "0" * 64
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    contract_path = find_stage09_contract(run_dir)
+    assert contract_path is not None
+    with pytest.raises(CitationAuditError) as exc_info:
+        audit_citation_evidence(
+            run_dir,
+            contract_path=contract_path,
+            contract=load_contract(contract_path),
+        )
+    assert exc_info.value.code == "citation_support_replay_failed"
 
 
 def test_stage22_rejects_multi_key_markers_when_canonical_bib_is_missing(

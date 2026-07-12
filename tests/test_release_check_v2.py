@@ -25,6 +25,7 @@ from researchclaw.pipeline.sectional_execution import (  # noqa: E402
     execute_sectional_revision,
 )
 from researchclaw.pipeline.stages import FINAL_STAGE, Stage  # noqa: E402
+from tests.test_evidence_cards import _prepare_e9_run  # noqa: E402
 
 
 PAPER = (
@@ -123,7 +124,14 @@ def _write(path: Path, obj) -> None:
 
 
 @pytest.fixture()
-def good_run(tmp_path: Path) -> Path:
+def good_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Legacy gate fixtures focus on one release_check finding at a time. E9's
+    # full citation replay has dedicated end-to-end fixtures in
+    # test_evidence_cards.py; keep these older fixtures isolated from it.
+    monkeypatch.setattr(
+        "researchclaw.pipeline.citation_release_audit.audit_citation_evidence",
+        lambda *_args, **_kwargs: None,
+    )
     run = tmp_path / "run"
     run.mkdir()
 
@@ -1338,6 +1346,69 @@ def test_cost_log_missing_is_warning_not_error(good_run: Path) -> None:
     checker = _check(good_run)
     assert "cost_log_missing" not in _codes(checker)
     assert any(f.code == "cost_log_missing" for f in checker.findings)
+
+
+def test_citation_replay_error_is_exit_one_even_with_degradation(
+    good_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from researchclaw.pipeline.citation_release_audit import CitationAuditError
+
+    def _fail(*_args, **_kwargs) -> None:
+        raise CitationAuditError(
+            "citation_support_replay_failed",
+            "tampered citation support",
+            "stage-24/citation_support.json",
+        )
+
+    monkeypatch.setattr(
+        "researchclaw.pipeline.citation_release_audit.audit_citation_evidence",
+        _fail,
+    )
+    checker = _check(good_run)
+    assert "citation_support_replay_failed" in _codes(checker)
+    assert checker.exit_code() == release_check.EXIT_FAIL
+
+
+def test_degraded_compatible_codes_are_closed_snapshot() -> None:
+    assert release_check.DEGRADED_COMPATIBLE_CODES == frozenset(
+        {
+            "degradation_signal",
+            "stale_degradation_signal",
+            "degraded_summary",
+            "quality_below_threshold",
+        }
+    )
+    assert not any(
+        code.startswith("citation_")
+        for code in release_check.DEGRADED_COMPATIBLE_CODES
+    )
+
+
+def test_release_checker_invokes_real_e9_and_allow_suspicious_cannot_waive_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = tmp_path / "run"
+    _config, _keys = _prepare_e9_run(run, monkeypatch)
+    clean = release_check.ReleaseChecker(
+        run, quality_threshold=6.0, allow_suspicious=True
+    )
+    clean.check_citation_evidence_replay()
+    assert not [finding for finding in clean.findings if finding.severity == "error"]
+
+    report_path = run / "stage-23" / "verification_report.json"
+    report = json.loads(report_path.read_text())
+    report["results"][0]["status"] = "suspicious"
+    report["summary"]["verified"] -= 1
+    report["summary"]["suspicious"] += 1
+    report["summary"]["verification_complete"] = False
+    report["summary"]["suspicious_keys"] = [report["results"][0]["cite_key"]]
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    tampered = release_check.ReleaseChecker(
+        run, quality_threshold=6.0, allow_suspicious=True
+    )
+    tampered.check_citation_evidence_replay()
+    assert "citation_verification_replay_failed" in _codes(tampered)
+    assert tampered.exit_code() == release_check.EXIT_FAIL
 
 
 # ---------------------------------------------------------------------------
