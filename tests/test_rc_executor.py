@@ -21,7 +21,27 @@ from researchclaw.experiment_runtime.contract import (
 )
 from researchclaw.pipeline import executor as rc_executor
 from researchclaw.pipeline.stage_impls import _release_audit as release_audit
+from researchclaw.pipeline.stage_impls import _paper_writing, _review_publish
 from researchclaw.pipeline.stages import Stage, StageStatus
+
+
+@pytest.fixture(autouse=True)
+def _stub_effective_citation_policy_for_legacy_unit_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = {
+        "effective_min_unique_sources": 1,
+        "effective_target_unique_sources": 15,
+    }
+    monkeypatch.setattr(
+        _paper_writing, "load_effective_citation_policy", lambda *_args: policy
+    )
+    monkeypatch.setattr(
+        _paper_writing, "build_effective_citation_policy", lambda *_args: policy
+    )
+    monkeypatch.setattr(
+        _review_publish, "load_effective_citation_policy", lambda *_args: policy
+    )
 
 
 class FakeLLMClient:

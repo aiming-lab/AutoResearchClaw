@@ -12,6 +12,7 @@ from researchclaw.config import (
     SandboxConfig,
     SecurityConfig,
     ValidationResult,
+    _parse_citation_policy_config,
     _parse_paper_revision_config,
     load_config,
     validate_config,
@@ -379,7 +380,7 @@ def test_rcconfig_from_dict_parses_partial_run_and_q1_gate_controls(
     assert config.security.q1_spine_max_rollbacks == 2
 
 
-@pytest.mark.parametrize("stage", [4, 5, 6])
+@pytest.mark.parametrize("stage", [4, 5, 6, 16])
 def test_validate_config_rejects_skipping_evidence_authority_stages(
     tmp_path: Path, stage: int
 ) -> None:
@@ -393,6 +394,56 @@ def test_validate_config_rejects_skipping_evidence_authority_stages(
         f"runtime.skip_stages cannot skip evidence-authority stage: {stage}"
         in result.errors
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "min_unique_sources_research_release",
+            True,
+            "must be an integer >= 1",
+        ),
+        ("target_unique_sources", 0, "must be an integer >= 1"),
+        ("max_fulltext_acquisition_rounds", 3, "must equal 2"),
+    ],
+)
+def test_validate_config_rejects_invalid_citation_policy(
+    tmp_path: Path, field: str, value: object, message: str
+) -> None:
+    data = _valid_config_data()
+    data["citation_policy"] = {field: value}
+    result = validate_config(data, project_root=tmp_path, check_paths=False)
+    assert result.ok is False
+    assert any(message in error for error in result.errors)
+
+
+def test_validate_config_rejects_citation_target_below_release_minimum(
+    tmp_path: Path,
+) -> None:
+    data = _valid_config_data()
+    data["citation_policy"] = {
+        "min_unique_sources_research_release": 15,
+        "target_unique_sources": 14,
+    }
+    result = validate_config(data, project_root=tmp_path, check_paths=False)
+    assert result.ok is False
+    assert any("target_unique_sources must be at least" in e for e in result.errors)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"target_unique_sources": True},
+        {"require_fulltext_evidence": "false"},
+        {"reading_export_root": 123},
+    ],
+)
+def test_parse_citation_policy_rejects_loose_coercions(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="citation_policy"):
+        _parse_citation_policy_config(payload)
 
 
 def test_rcconfig_from_dict_missing_fields_raises_value_error(tmp_path: Path):

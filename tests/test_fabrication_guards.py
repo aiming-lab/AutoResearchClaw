@@ -18,11 +18,23 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from researchclaw.pipeline.stages import NONCRITICAL_STAGES, Stage, StageStatus
+from researchclaw.pipeline.stage_impls import _review_publish
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _stub_effective_citation_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        _review_publish,
+        "load_effective_citation_policy",
+        lambda *_args: {
+            "effective_min_unique_sources": 1,
+            "effective_target_unique_sources": 15,
+        },
+    )
 
 @pytest.fixture
 def run_dir(tmp_path: Path) -> Path:

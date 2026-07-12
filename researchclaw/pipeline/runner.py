@@ -194,6 +194,11 @@ def _write_checkpoint(
         "run_id": run_id,
         "timestamp": _utcnow_iso(),
     }
+    from researchclaw.literature.citation_policy import (
+        active_config_checkpoint_fields,
+    )
+
+    checkpoint.update(active_config_checkpoint_fields(run_dir))
 
     # Embed HITL session data if available
     if adapters is not None:

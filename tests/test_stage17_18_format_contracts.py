@@ -6,12 +6,30 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
+from researchclaw.pipeline.stage_impls import _review_publish
 from researchclaw.pipeline.stage_impls._paper_writing import (
     _validate_stage17_manuscript_structure,
     _write_paper_sections,
 )
-from researchclaw.pipeline.stage_impls._review_publish import _execute_peer_review
+from researchclaw.pipeline.stage_impls._review_publish import (
+    _citation_count_policy_violations,
+    _execute_peer_review,
+)
 from researchclaw.pipeline.stages import StageStatus
+
+
+@pytest.fixture(autouse=True)
+def _stub_effective_citation_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        _review_publish,
+        "load_effective_citation_policy",
+        lambda *_args: {
+            "effective_min_unique_sources": 1,
+            "effective_target_unique_sources": 15,
+        },
+    )
 
 
 class _PromptManagerStub:
@@ -191,3 +209,90 @@ def test_stage18_no_llm_fallback_obeys_the_contract(tmp_path: Path) -> None:
     )
     assert report["valid"] is True
     assert report["comment_count"] == 4
+
+
+def test_stage18_repairs_citation_requirement_above_effective_target(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    stage_dir = run_dir / "stage-18"
+    stage_dir.mkdir(parents=True)
+    _write_draft(run_dir)
+    excessive = """## Reviewer A
+
+### Strengths
+Clear scope.
+
+### Weaknesses
+Limited evidence.
+
+### Actionable Revisions
+1. Ensure at least 20 relevant references.
+"""
+    repaired = excessive.replace("20", "15")
+    llm = _SequentialLLM([excessive, repaired])
+    result = _execute_peer_review(
+        stage_dir,
+        run_dir,
+        cast(Any, _config()),
+        cast(Any, None),
+        llm=cast(Any, llm),
+        prompts=cast(Any, _PromptManagerStub()),
+    )
+    assert result.status == StageStatus.DONE
+    assert len(llm.calls) == 2
+    assert "effective target of 15" in llm.calls[1][0]["content"]
+
+
+def test_stage18_fails_when_citation_requirement_remains_above_target(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    stage_dir = run_dir / "stage-18"
+    stage_dir.mkdir(parents=True)
+    _write_draft(run_dir)
+    excessive = """## Reviewer A
+
+### Strengths
+Clear scope.
+
+### Weaknesses
+Limited evidence.
+
+### Actionable Revisions
+1. Include at least twenty five unique citations.
+"""
+    llm = _SequentialLLM([excessive, excessive])
+    result = _execute_peer_review(
+        stage_dir,
+        run_dir,
+        cast(Any, _config()),
+        cast(Any, None),
+        llm=cast(Any, llm),
+        prompts=cast(Any, _PromptManagerStub()),
+    )
+    assert result.status == StageStatus.FAILED
+    report = json.loads((stage_dir / "review_structure_report.json").read_text())
+    assert report["issues"][0]["code"] == "citation_count_policy_exceeded"
+
+
+@pytest.mark.parametrize(
+    ("text", "target"),
+    [
+        ("At least fifteen unique citations are required.", 14),
+        ("Ensure at least twenty five relevant references.", 20),
+    ],
+)
+def test_citation_count_detector_does_not_swallow_qualifiers(
+    text: str, target: int
+) -> None:
+    ledger = SimpleNamespace(
+        comments=(
+            SimpleNamespace(
+                category="actionable_revision",
+                exact_text=text,
+                comment_id="comment-001",
+            ),
+        )
+    )
+    assert _citation_count_policy_violations(ledger, target) == ["comment-001"]

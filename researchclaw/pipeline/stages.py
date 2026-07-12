@@ -129,9 +129,14 @@ GATE_STAGES: frozenset[Stage] = frozenset(
 )
 
 # Evidence-authority stages cannot be replaced by generic skip stubs. Keep this
-# narrow for E2; later citation milestones may extend the set deliberately.
+# Citation-evidence authority stages cannot be represented by generic stubs.
 SKIP_FORBIDDEN_STAGES: frozenset[Stage] = frozenset(
-    {Stage.LITERATURE_COLLECT, Stage.LITERATURE_SCREEN, Stage.KNOWLEDGE_EXTRACT}
+    {
+        Stage.LITERATURE_COLLECT,
+        Stage.LITERATURE_SCREEN,
+        Stage.KNOWLEDGE_EXTRACT,
+        Stage.PAPER_OUTLINE,
+    }
 )
 
 # Gate rollback targets: when a gate rejects, where to roll back

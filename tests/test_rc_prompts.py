@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import textwrap
+import re
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,28 @@ from researchclaw.prompts import (
     RenderedPrompt,
     _render,
 )
+from researchclaw.prompts import hep, ml, shared
+
+
+def _prompt_strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in _prompt_strings(item)]
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in _prompt_strings(item)]
+    return []
+
+
+def test_prompt_banks_have_no_numeric_citation_range_policy() -> None:
+    texts = _prompt_strings(hep.STAGES) + _prompt_strings(ml.STAGES)
+    texts += _prompt_strings(shared._DEFAULT_BLOCKS)
+    pattern = re.compile(
+        r"\b\d+\s*-\s*\d+\b[^.\n]{0,80}\b(?:citations|references)\b",
+        re.IGNORECASE,
+    )
+    matches = [match.group(0) for text in texts for match in pattern.finditer(text)]
+    assert matches == []
 
 
 # ---------------------------------------------------------------------------

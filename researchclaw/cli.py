@@ -291,9 +291,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         if snapshot_path.exists():
             ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             snapshot_path = run_dir / f"config.resumed-{ts}.yaml"
+            if snapshot_path.exists():
+                raise RuntimeError(
+                    f"resume config snapshot already exists: {snapshot_path.name}"
+                )
         shutil.copy2(config_path, snapshot_path)
+        from researchclaw.literature.citation_policy import (
+            write_active_config_binding,
+        )
+
+        write_active_config_binding(run_dir, snapshot_path)
     except Exception as _snap_exc:  # noqa: BLE001
-        print(f"Warning: config snapshot failed: {_snap_exc}", file=sys.stderr)
+        print(f"Error: config snapshot failed: {_snap_exc}", file=sys.stderr)
+        return 1
 
     if config.knowledge_base.root:
         kb_root_path = Path(config.knowledge_base.root)

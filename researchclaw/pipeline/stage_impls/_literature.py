@@ -34,6 +34,11 @@ from researchclaw.literature.evidence_cards import (
     render_evidence_card_markdown,
     validate_cards_artifacts,
 )
+from researchclaw.literature.citation_policy import (
+    CitationPolicyContractError,
+    build_citation_allowlist,
+    validate_citation_allowlist,
+)
 from researchclaw.literature.screening import (
     MAX_SCREEN_CANDIDATES,
     MIN_RELEVANCE_SCORE,
@@ -1147,6 +1152,7 @@ def _execute_knowledge_extract(
 ) -> StageResult:
     cards_dir = stage_dir / "cards"
     manifest_path = stage_dir / "cards_manifest.json"
+    allowlist_path = stage_dir / "citation_allowlist.json"
     failure_path = stage_dir / "card_extraction_failures.json"
     try:
         if cards_dir.is_symlink():
@@ -1154,6 +1160,7 @@ def _execute_knowledge_extract(
         elif cards_dir.exists():
             shutil.rmtree(cards_dir)
         manifest_path.unlink(missing_ok=True)
+        allowlist_path.unlink(missing_ok=True)
         failure_path.unlink(missing_ok=True)
     except OSError as exc:
         return StageResult(
@@ -1269,8 +1276,18 @@ def _execute_knowledge_extract(
             candidates_sha256=candidates_sha256,
             shortlist=inputs.shortlist,
         )
-    except (EvidenceCardContractError, OSError, UnicodeDecodeError) as exc:
+        allowlist = build_citation_allowlist(run_dir, config)
+        allowlist_text = canonical_json_text(allowlist)
+        allowlist_path.write_text(allowlist_text, encoding="utf-8")
+        validate_citation_allowlist(run_dir, config, allowlist_text)
+    except (
+        CitationPolicyContractError,
+        EvidenceCardContractError,
+        OSError,
+        UnicodeDecodeError,
+    ) as exc:
         manifest_path.unlink(missing_ok=True)
+        allowlist_path.unlink(missing_ok=True)
         if cards_dir.is_symlink():
             cards_dir.unlink(missing_ok=True)
         elif cards_dir.exists():
@@ -1285,8 +1302,12 @@ def _execute_knowledge_extract(
     return StageResult(
         stage=Stage.KNOWLEDGE_EXTRACT,
         status=StageStatus.DONE,
-        artifacts=("cards/", "cards_manifest.json"),
-        evidence_refs=("stage-06/cards/", "stage-06/cards_manifest.json"),
+        artifacts=("cards/", "cards_manifest.json", "citation_allowlist.json"),
+        evidence_refs=(
+            "stage-06/cards/",
+            "stage-06/cards_manifest.json",
+            "stage-06/citation_allowlist.json",
+        ),
     )
 
 

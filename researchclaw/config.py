@@ -159,6 +159,17 @@ class ResearchConfig:
 
 
 @dataclass(frozen=True)
+class CitationPolicyConfig:
+    schema_version: int = 1
+    min_unique_sources_research_release: int = 15
+    target_unique_sources: int = 25
+    min_unique_sources_pipeline_validation: int = 1
+    require_fulltext_evidence: bool = False
+    max_fulltext_acquisition_rounds: int = 2
+    reading_export_root: str = ""
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     timezone: str
     max_parallel_tasks: int = 1
@@ -906,6 +917,7 @@ class RCConfig:
     llm: LlmConfig
     security: SecurityConfig = field(default_factory=SecurityConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
+    citation_policy: CitationPolicyConfig = field(default_factory=CitationPolicyConfig)
     paper_revision: PaperRevisionConfig = field(default_factory=PaperRevisionConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     prompts: PromptsConfig = field(default_factory=PromptsConfig)
@@ -959,6 +971,7 @@ class RCConfig:
         llm = data["llm"]
         security = data.get("security") or {}
         experiment = data.get("experiment") or {}
+        citation_policy = data.get("citation_policy") or {}
         paper_revision = data.get("paper_revision") or {}
         export = data.get("export") or {}
         prompts = data.get("prompts") or {}
@@ -1036,6 +1049,7 @@ class RCConfig:
                 q1_spine_max_rollbacks=int(security.get("q1_spine_max_rollbacks", 1)),
             ),
             experiment=_parse_experiment_config(experiment),
+            citation_policy=_parse_citation_policy_config(citation_policy),
             paper_revision=_parse_paper_revision_config(paper_revision),
             export=ExportConfig(
                 target_conference=export.get("target_conference", "neurips_2025"),
@@ -1221,6 +1235,75 @@ def validate_config(
     if not _is_blank(exp_direction) and exp_direction not in ("minimize", "maximize"):
         errors.append(f"Invalid experiment.metric_direction: {exp_direction}")
 
+    citation_policy = data.get("citation_policy")
+    if citation_policy is not None:
+        if not isinstance(citation_policy, dict):
+            errors.append("citation_policy must be a mapping")
+        else:
+            allowed_policy_fields = {
+                "schema_version",
+                "min_unique_sources_research_release",
+                "target_unique_sources",
+                "min_unique_sources_pipeline_validation",
+                "require_fulltext_evidence",
+                "max_fulltext_acquisition_rounds",
+                "reading_export_root",
+            }
+            unknown_policy_fields = sorted(
+                set(citation_policy) - allowed_policy_fields
+            )
+            if unknown_policy_fields:
+                errors.append(
+                    "Unknown citation_policy fields: "
+                    + ", ".join(unknown_policy_fields)
+                )
+            schema_version = citation_policy.get("schema_version", 1)
+            release_min = citation_policy.get(
+                "min_unique_sources_research_release", 15
+            )
+            target = citation_policy.get("target_unique_sources", 25)
+            validation_min = citation_policy.get(
+                "min_unique_sources_pipeline_validation", 1
+            )
+            rounds = citation_policy.get("max_fulltext_acquisition_rounds", 2)
+            for field_name, value, minimum in (
+                ("schema_version", schema_version, 1),
+                ("min_unique_sources_research_release", release_min, 1),
+                ("target_unique_sources", target, 1),
+                ("min_unique_sources_pipeline_validation", validation_min, 1),
+                ("max_fulltext_acquisition_rounds", rounds, 2),
+            ):
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < minimum
+                ):
+                    errors.append(
+                        f"citation_policy.{field_name} must be an integer >= {minimum}"
+                    )
+            if isinstance(schema_version, int) and schema_version != 1:
+                errors.append("citation_policy.schema_version must equal 1")
+            if isinstance(rounds, int) and not isinstance(rounds, bool) and rounds != 2:
+                errors.append(
+                    "citation_policy.max_fulltext_acquisition_rounds must equal 2"
+                )
+            if (
+                isinstance(target, int)
+                and not isinstance(target, bool)
+                and isinstance(release_min, int)
+                and not isinstance(release_min, bool)
+                and target < release_min
+            ):
+                errors.append(
+                    "citation_policy.target_unique_sources must be at least "
+                    "min_unique_sources_research_release"
+                )
+            for field_name in ("require_fulltext_evidence",):
+                if not isinstance(citation_policy.get(field_name, False), bool):
+                    errors.append(f"citation_policy.{field_name} must be a boolean")
+            if not isinstance(citation_policy.get("reading_export_root", ""), str):
+                errors.append("citation_policy.reading_export_root must be a string")
+
     revision = data.get("paper_revision")
     if revision is not None:
         if not isinstance(revision, dict):
@@ -1348,6 +1431,38 @@ def _parse_paper_revision_config(data: dict[str, Any]) -> PaperRevisionConfig:
         min_length_ratio=_safe_float(data.get("min_length_ratio"), 0.80),
         max_length_ratio=_safe_float(data.get("max_length_ratio"), 1.75),
         critic_model=str(data.get("critic_model", "") or ""),
+    )
+
+
+def _parse_citation_policy_config(data: dict[str, Any]) -> CitationPolicyConfig:
+    def _strict_int(field: str, default: int) -> int:
+        value = data.get(field, default)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"citation_policy.{field} must be an integer")
+        return value
+
+    require_fulltext = data.get("require_fulltext_evidence", False)
+    if not isinstance(require_fulltext, bool):
+        raise ValueError(
+            "citation_policy.require_fulltext_evidence must be a boolean"
+        )
+    reading_export_root = data.get("reading_export_root", "")
+    if not isinstance(reading_export_root, str):
+        raise ValueError("citation_policy.reading_export_root must be a string")
+    return CitationPolicyConfig(
+        schema_version=_strict_int("schema_version", 1),
+        min_unique_sources_research_release=_strict_int(
+            "min_unique_sources_research_release", 15
+        ),
+        target_unique_sources=_strict_int("target_unique_sources", 25),
+        min_unique_sources_pipeline_validation=_strict_int(
+            "min_unique_sources_pipeline_validation", 1
+        ),
+        require_fulltext_evidence=require_fulltext,
+        max_fulltext_acquisition_rounds=_strict_int(
+            "max_fulltext_acquisition_rounds", 2
+        ),
+        reading_export_root=reading_export_root,
     )
 
 

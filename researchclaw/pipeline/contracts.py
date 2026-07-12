@@ -70,14 +70,14 @@ CONTRACTS: dict[Stage, StageContract] = {
     Stage.KNOWLEDGE_EXTRACT: StageContract(
         stage=Stage.KNOWLEDGE_EXTRACT,
         input_files=("shortlist.jsonl", "screening_report.json"),
-        output_files=("cards/", "cards_manifest.json"),
+        output_files=("cards/", "cards_manifest.json", "citation_allowlist.json"),
         dod="Strict JSON evidence card plus deterministic Markdown per shortlisted paper",
         error_code="E06_EXTRACT_FAIL",
     ),
     # Phase C: Knowledge Synthesis
     Stage.SYNTHESIS: StageContract(
         stage=Stage.SYNTHESIS,
-        input_files=("cards/", "cards_manifest.json"),
+        input_files=("cards/", "cards_manifest.json", "citation_allowlist.json"),
         output_files=("synthesis.md",),
         dod="Topic clusters + >=2 research gaps identified",
         error_code="E07_SYNTHESIS_WEAK",
@@ -149,21 +149,21 @@ CONTRACTS: dict[Stage, StageContract] = {
     # Phase G: Paper Writing
     Stage.PAPER_OUTLINE: StageContract(
         stage=Stage.PAPER_OUTLINE,
-        input_files=("analysis.md", "decision.md"),
-        output_files=("outline.md",),
+        input_files=("analysis.md", "decision.md", "citation_allowlist.json"),
+        output_files=("outline.md", "citation_policy_effective.json"),
         dod="Complete paper outline with section-level detail",
         error_code="E16_OUTLINE_FAIL",
     ),
     Stage.PAPER_DRAFT: StageContract(
         stage=Stage.PAPER_DRAFT,
-        input_files=("outline.md",),
+        input_files=("outline.md", "citation_policy_effective.json"),
         output_files=("paper_draft.md",),
         dod="Full paper draft with all sections written",
         error_code="E17_DRAFT_FAIL",
     ),
     Stage.PEER_REVIEW: StageContract(
         stage=Stage.PEER_REVIEW,
-        input_files=("paper_draft.md",),
+        input_files=("paper_draft.md", "citation_policy_effective.json"),
         output_files=("reviews.md",),
         dod=">=2 simulated review perspectives with actionable feedback",
         error_code="E18_REVIEW_FAIL",
@@ -178,7 +178,7 @@ CONTRACTS: dict[Stage, StageContract] = {
     # Phase H: Finalization
     Stage.QUALITY_GATE: StageContract(
         stage=Stage.QUALITY_GATE,
-        input_files=("paper_revised.md",),
+        input_files=("paper_revised.md", "citation_policy_effective.json"),
         # fabrication_flags.json was always produced but never declared —
         # release_check depends on it, so the contract must require it.
         output_files=("quality_report.json", "fabrication_flags.json"),

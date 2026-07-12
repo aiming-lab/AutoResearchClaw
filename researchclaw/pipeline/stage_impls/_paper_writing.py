@@ -15,6 +15,12 @@ import yaml
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.llm.client import LLMClient
+from researchclaw.literature.citation_policy import (
+    CitationPolicyContractError,
+    build_effective_citation_policy,
+    load_effective_citation_policy,
+)
+from researchclaw.literature.evidence_cards import canonical_json_text
 from researchclaw.pipeline._domain import _detect_domain, _is_ml_domain
 from researchclaw.pipeline._helpers import (
     StageResult,
@@ -79,6 +85,23 @@ def _execute_paper_outline(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
+    policy_path = stage_dir / "citation_policy_effective.json"
+    outline_path = stage_dir / "outline.md"
+    try:
+        policy_path.unlink(missing_ok=True)
+        outline_path.unlink(missing_ok=True)
+        effective_policy = build_effective_citation_policy(run_dir, config)
+        policy_path.write_text(
+            canonical_json_text(effective_policy), encoding="utf-8"
+        )
+    except (CitationPolicyContractError, OSError, UnicodeDecodeError) as exc:
+        return StageResult(
+            stage=Stage.PAPER_OUTLINE,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Citation policy could not be closed: {exc}",
+            decision="retry",
+        )
     analysis = _read_best_analysis(run_dir)
     decision = _read_prior_artifact(run_dir, "decision.md") or ""
     preamble = _build_context_preamble(
@@ -155,12 +178,15 @@ def _execute_paper_outline(
             outline = _default_paper_outline(config.research.topic)
     else:
         outline = _default_paper_outline(config.research.topic)
-    (stage_dir / "outline.md").write_text(outline, encoding="utf-8")
+    outline_path.write_text(outline, encoding="utf-8")
     return StageResult(
         stage=Stage.PAPER_OUTLINE,
         status=StageStatus.DONE,
-        artifacts=("outline.md",),
-        evidence_refs=("stage-16/outline.md",),
+        artifacts=("outline.md", "citation_policy_effective.json"),
+        evidence_refs=(
+            "stage-16/outline.md",
+            "stage-16/citation_policy_effective.json",
+        ),
     )
 
 
@@ -517,7 +543,7 @@ def _write_paper_sections(
             "method -> key numerical result in natural units -> implication for upcoming "
             "experiments). NO bullets.\n"
             "3. **Introduction** (800-1200 words): physics motivation, brief review of "
-            "the relevant literature with 15-25 citations (ATLAS/CMS/LZ/XENONnT/Fermi-LAT "
+            "eligible literature under the effective citation policy (ATLAS/CMS/LZ/XENONnT/Fermi-LAT "
             "and recent JHEP/PRD theory work), statement of what the paper contributes. "
             "The review of prior work goes HERE; do NOT open a 'Related Work' section.\n\n"
             f"Outline:\n{outline}\n\n"
@@ -546,9 +572,9 @@ def _write_paper_sections(
             f"Do NOT include raw metric paths or 16-digit decimals.){abstract_structure}\n"
             "3. **Introduction** (800-1000 words): real-world motivation, problem statement, "
             "research gap analysis with citations, method overview, 3-4 contributions as bullet points, "
-            "paper organization paragraph. MUST cite 8-12 references.\n"
+            "paper organization paragraph. Follow the effective citation policy.\n"
             "4. **Related Work** (600-800 words): organized into 3-4 thematic subsections, each discussing "
-            "4-5 papers with proper citations. Compare approaches, identify limitations, position this work.\n\n"
+            "eligible prior work with proper citations. Compare approaches, identify limitations, position this work.\n\n"
             f"Outline:\n{outline}\n\n"
             "Output markdown with ## headers. Do NOT include a References section.\n"
             "IMPORTANT: Start DIRECTLY with '## Title'. Do NOT include any preamble, "
@@ -656,7 +682,7 @@ def _write_paper_sections(
             f"{narrative_writing_rules}\n"
             f"{anti_hedging_rules}\n"
             f"{anti_repetition_rules}\n\n"
-            "CITATION REQUIREMENT: Discussion must cite 3-5 prior JHEP/PRD phenomenology "
+            "CITATION REQUIREMENT: Discussion must cite eligible prior JHEP/PRD phenomenology "
             "analyses that studied the same or neighbouring parameter space. Cite each "
             "experimental bound plotted on the exclusion figures.\n"
             f"{citation_instruction}\n\n"
@@ -694,7 +720,7 @@ def _write_paper_sections(
             f"{anti_repetition_rules}\n\n"
             # IMP-21: Citation instruction for Results + Discussion + Conclusion
             "CITATION REQUIREMENT: The Discussion section MUST cite at least 3-5 papers "
-            "when comparing findings with prior work. The Conclusion may cite 1-2 "
+            "when comparing findings with prior work. The Conclusion may cite eligible "
             "foundational references.\n"
             f"{citation_instruction}\n\n"
             "You are completing a paper. The sections written so far are:\n\n"
@@ -785,6 +811,7 @@ _BALANCE_SECTIONS = frozenset({
 def _validate_draft_quality(
     draft: str,
     stage_dir: Path | None = None,
+    citation_target: int = 15,
 ) -> dict[str, Any]:
     """Validate a paper draft for section balance and prose quality.
 
@@ -930,13 +957,14 @@ def _validate_draft_quality(
     cited_keys = set(_cite_pattern.findall(draft))
     if cited_keys:
         n_citations = len(cited_keys)
-        if n_citations < 15:
+        if n_citations < citation_target:
             overall_warnings.append(
-                f"Only {n_citations} unique citations found (target: >=15 for a full paper)"
+                f"Only {n_citations} unique citations found "
+                f"(effective target: >={citation_target})"
             )
             revision_directives.append(
-                f"Add more references — a top-venue paper typically cites 25-40 works. "
-                f"Currently only {n_citations} unique citations."
+                f"Use eligible references up to the effective target of "
+                f"{citation_target}; currently {n_citations} unique citations."
             )
         # Check recency: count citations with year >= current_year - 2
         _year_pat = re.compile(r"(\d{4})")
@@ -1477,7 +1505,26 @@ def _execute_paper_draft(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
-    (stage_dir / "paper_structure_report.json").unlink(missing_ok=True)
+    for owned_name in (
+        "paper_draft.md",
+        "paper_structure_report.json",
+        "draft_quality.json",
+        "references_preverified.bib",
+    ):
+        (stage_dir / owned_name).unlink(missing_ok=True)
+    try:
+        effective_citation_policy = load_effective_citation_policy(run_dir, config)
+    except CitationPolicyContractError as exc:
+        return StageResult(
+            stage=Stage.PAPER_DRAFT,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Effective citation policy is invalid: {exc}",
+            decision="retry",
+        )
+    citation_target = int(
+        effective_citation_policy["effective_target_unique_sources"]
+    )
     outline = _read_prior_artifact(run_dir, "outline.md") or ""
     preamble = _build_context_preamble(
         config,
@@ -2305,8 +2352,9 @@ def _execute_paper_draft(
                 "- Each [cite_key] MUST correspond to the paper whose title is shown\n"
                 "  next to that key in the list above. Cross-check before citing.\n"
                 "\nCITATION QUANTITY & QUALITY CONSTRAINTS:\n"
-                "- Cite 25-40 unique references in the paper body. The Related Work\n"
-                "  section alone should cite at least 15 references.\n"
+                f"- Use at least {effective_citation_policy['effective_min_unique_sources']} "
+                f"and target {citation_target} unique eligible references. Do not "
+                "exceed the available evidence by inventing keys.\n"
                 "- Every citation MUST be directly relevant to the paper's topic.\n"
                 "- DO NOT cite papers from unrelated domains (wireless communication, "
                 "manufacturing, UAV, etc.).\n"
@@ -2413,7 +2461,9 @@ Generated: {_utcnow_iso()}
     (stage_dir / "paper_draft.md").write_text(draft, encoding="utf-8")
 
     # Validate draft quality (section balance + bullet density)
-    _validate_draft_quality(draft, stage_dir=stage_dir)
+    _validate_draft_quality(
+        draft, stage_dir=stage_dir, citation_target=citation_target
+    )
 
     # --- HITL: Read human guidance for paper draft ---
     guidance_file = stage_dir / "hitl_guidance.md"

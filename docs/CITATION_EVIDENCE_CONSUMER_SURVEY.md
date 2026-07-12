@@ -36,12 +36,14 @@ Surveyed repository reads of:
 
 ## Stage Contracts
 
-Current pipeline contracts declare only:
+After E0-E3, pipeline contracts declare:
 
-- Stage 4 output: `candidates.jsonl`;
-- Stage 5 input/output: `candidates.jsonl` -> `shortlist.jsonl`;
-- Stage 6 input/output: `shortlist.jsonl` + `screening_report.json` -> `cards/` + `cards_manifest.json`;
-- Stage 7 input: `cards/` + `cards_manifest.json`, with strict replay before Markdown consumption.
+- Stage 4 output: candidates, canonical bibliography, and cite-key registry;
+- Stage 5 input/output: the sealed Stage 4 collection -> shortlist + screening report;
+- Stage 6 input/output: shortlist + screening report -> cards + manifest + citation allowlist;
+- Stage 7 input: cards + manifest + citation allowlist, with strict card replay;
+- Stage 16 input/output: citation allowlist -> effective citation policy + outline;
+- Stages 17, 18, and 20 require and replay the same effective policy.
 
 E0 must add the cite-key registry and canonical bibliography to Stage 4's
 declared outputs. E2 later adds structured cards and manifest while preserving
@@ -49,18 +51,14 @@ the Markdown directory until Stage 7 migration is complete.
 
 ## Hard-Coded Citation Targets
 
-Current independent thresholds exist in:
+E3 removes independent writing/review thresholds from active prompts and local
+draft-quality checks. Remaining citation-count policy comes from:
 
-- `researchclaw/pipeline/stage_impls/_paper_writing.py`: draft-quality warning
-  below 15 unique citations;
-- `researchclaw/pipeline/stage_impls/_paper_writing.py`: writer instruction for
-  25-40 unique citations and at least 15 in Related Work;
-- `researchclaw/prompts/shared.py`: at least 15 relevant references;
-- `researchclaw/prompts/ml.py`: 25-40 unique citations and at least 15 in
-  Related Work.
+- top-level `citation_policy` in the bound run-local config snapshot;
+- `stage-16/citation_policy_effective.json`, recomputed by Stages 17, 18, and 20.
 
-E3/E5/E6 must replace these independent policy values with the validated
-effective-policy artifact. No threshold is changed during E0.
+E5 still removes the free Stage 4 candidate catalog and preverification path;
+those are evidence-surface tasks, not citation-count policy sources.
 
 ## Migration Risks
 

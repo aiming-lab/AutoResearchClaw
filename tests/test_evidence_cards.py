@@ -8,8 +8,19 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 from researchclaw.adapters import AdapterBundle
+from researchclaw.config import RCConfig
+from researchclaw.literature.citation_policy import (
+    CitationPolicyContractError,
+    load_effective_citation_policy,
+    parse_citation_allowlist,
+    parse_effective_citation_policy,
+    resolve_active_config_snapshot,
+    validate_citation_allowlist,
+    write_active_config_binding,
+)
 from researchclaw.literature.citation_identity import seal_citation_collection
 from researchclaw.literature.evidence_cards import (
     EvidenceCardContractError,
@@ -25,6 +36,12 @@ from researchclaw.literature.screening import sha256_text
 from researchclaw.pipeline.stage_impls._literature import (
     _execute_knowledge_extract,
     _execute_literature_screen,
+)
+from researchclaw.pipeline.stage_impls._paper_writing import _execute_paper_outline
+from researchclaw.pipeline.stage_impls._paper_writing import _execute_paper_draft
+from researchclaw.pipeline.stage_impls._review_publish import (
+    _execute_peer_review,
+    _execute_quality_gate,
 )
 from researchclaw.pipeline.stage_impls._synthesis import _execute_synthesis
 from researchclaw.pipeline.stages import StageStatus
@@ -116,7 +133,11 @@ def _card_response(rows: list[dict[str, Any]]) -> str:
     )
 
 
-def _prepare_stage5(run_dir: Path, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _prepare_stage5(
+    run_dir: Path,
+    candidates: list[dict[str, Any]],
+    config: Any | None = None,
+) -> list[dict[str, Any]]:
     sealed = seal_citation_collection(candidates)
     stage4 = run_dir / "stage-04"
     stage4.mkdir(parents=True)
@@ -131,7 +152,7 @@ def _prepare_stage5(run_dir: Path, candidates: list[dict[str, Any]]) -> list[dic
     result = _execute_literature_screen(
         stage5,
         run_dir,
-        _config(),  # type: ignore[arg-type]
+        config or _config(),  # type: ignore[arg-type]
         AdapterBundle(),
         llm=_SequenceLLM([_screen_response(source_ids)]),  # type: ignore[arg-type]
     )
@@ -140,6 +161,20 @@ def _prepare_stage5(run_dir: Path, candidates: list[dict[str, Any]]) -> list[dic
         json.loads(line)
         for line in (stage5 / "shortlist.jsonl").read_text(encoding="utf-8").splitlines()
     ]
+
+
+def _real_config_snapshot(
+    run_dir: Path, *, claim_scope: str = "pipeline_validation"
+) -> RCConfig:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    source = Path("config.deepseek.sectional-dry-run.yaml")
+    raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    raw["experiment"]["claim_scope"] = claim_scope
+    snapshot = run_dir / "config.yaml"
+    snapshot.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    config = RCConfig.from_dict(raw, project_root=run_dir, check_paths=False)
+    write_active_config_binding(run_dir, snapshot)
+    return config
 
 
 def test_card_batch_requires_exact_identity_closure() -> None:
@@ -289,7 +324,11 @@ def test_stage6_writes_json_authority_and_deterministic_markdown(tmp_path: Path)
         llm=_SequenceLLM([_card_response(shortlist)]),  # type: ignore[arg-type]
     )
     assert result.status is StageStatus.DONE
-    assert result.artifacts == ("cards/", "cards_manifest.json")
+    assert result.artifacts == (
+        "cards/",
+        "cards_manifest.json",
+        "citation_allowlist.json",
+    )
     manifest = json.loads((stage6 / "cards_manifest.json").read_text())
     assert [entry["source_identity"] for entry in manifest["cards"]] == [
         row["source_identity"] for row in shortlist
@@ -465,3 +504,212 @@ def test_stage7_replays_manifest_before_consuming_markdown(tmp_path: Path) -> No
     assert synthesis.status is StageStatus.FAILED
     assert "Markdown hash mismatch" in (synthesis.error or "")
     assert not (stage7 / "synthesis.md").exists()
+
+
+def test_stage6_allowlist_is_recomputed_from_success_cards(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    shortlist = _prepare_stage5(run_dir, [_candidate(1), _candidate(2)])
+    response = json.loads(_card_response(shortlist))
+    response["cards"][1]["evidence_excerpt_texts"] = [
+        "This substantive sentence is absent from the retained abstract."
+    ]
+    stage6 = run_dir / "stage-06"
+    stage6.mkdir()
+    result = _execute_knowledge_extract(
+        stage6,
+        run_dir,
+        _config(),  # type: ignore[arg-type]
+        AdapterBundle(),
+        llm=_SequenceLLM([json.dumps(response)]),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.DONE
+    allowlist_text = (stage6 / "citation_allowlist.json").read_text()
+    allowlist = json.loads(allowlist_text)
+    assert allowlist["eligible_keys"] == [shortlist[0]["cite_key"]]
+    assert allowlist["ineligible"] == [
+        {"cite_key": shortlist[1]["cite_key"], "reason_code": "card_fallback"}
+    ]
+
+    allowlist["eligible_keys"].append(shortlist[1]["cite_key"])
+    allowlist["ineligible"] = []
+    with pytest.raises(CitationPolicyContractError, match="replay mismatch"):
+        validate_citation_allowlist(
+            run_dir,
+            _config(),  # type: ignore[arg-type]
+            canonical_json_text(allowlist),
+        )
+
+
+def test_stage16_effective_policy_binds_run_local_config(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    shortlist = _prepare_stage5(run_dir, [_candidate(1)], config)
+    stage6 = run_dir / "stage-06"
+    stage6.mkdir()
+    result = _execute_knowledge_extract(
+        stage6,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM([_card_response(shortlist)]),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.DONE
+    stage16 = run_dir / "stage-16"
+    stage16.mkdir()
+    outline = _execute_paper_outline(
+        stage16, run_dir, config, AdapterBundle(), llm=None
+    )
+    assert outline.status is StageStatus.DONE
+    policy = load_effective_citation_policy(run_dir, config)
+    assert policy["eligible_count"] == 1
+    assert policy["effective_min_unique_sources"] == 1
+    assert policy["effective_target_unique_sources"] == 1
+    assert policy["config_source_path"] == "config.yaml"
+
+    history_path = run_dir / "config_snapshot_history.jsonl"
+    history_text = history_path.read_text(encoding="utf-8")
+    history_path.write_text(history_text + "{}\n", encoding="utf-8")
+    with pytest.raises(CitationPolicyContractError, match="history hash mismatch"):
+        load_effective_citation_policy(run_dir, config)
+    history_path.write_text(history_text, encoding="utf-8")
+
+    (run_dir / "config.yaml").write_text("tampered: true\n", encoding="utf-8")
+    with pytest.raises(CitationPolicyContractError, match="hash mismatch"):
+        load_effective_citation_policy(run_dir, config)
+
+
+def test_research_release_fails_below_citation_minimum(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir, claim_scope="research_release")
+    shortlist = _prepare_stage5(run_dir, [_candidate(1)], config)
+    stage6 = run_dir / "stage-06"
+    stage6.mkdir()
+    result = _execute_knowledge_extract(
+        stage6,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM([_card_response(shortlist)]),  # type: ignore[arg-type]
+    )
+    assert result.status is StageStatus.DONE
+    stage16 = run_dir / "stage-16"
+    stage16.mkdir()
+    outline = _execute_paper_outline(
+        stage16, run_dir, config, AdapterBundle(), llm=None
+    )
+    assert outline.status is StageStatus.FAILED
+    assert "below required minimum 15" in (outline.error or "")
+    assert not (stage16 / "citation_policy_effective.json").exists()
+
+
+def test_citation_policy_loaders_reject_duplicate_keys_and_boolean_counts() -> None:
+    with pytest.raises(CitationPolicyContractError, match="duplicate JSON key"):
+        parse_citation_allowlist(
+            '{"schema_version":1,"schema_version":1}'
+        )
+    payload = {
+        "schema_version": 1,
+        "policy_version": 1,
+        "claim_scope": "pipeline_validation",
+        "eligible_count": True,
+        "effective_min_unique_sources": 1,
+        "effective_target_unique_sources": 1,
+        "citation_allowlist_path": "stage-06/citation_allowlist.json",
+        "citation_allowlist_sha256": "a" * 64,
+        "config_source_path": "config.yaml",
+        "config_source_sha256": "b" * 64,
+    }
+    with pytest.raises(CitationPolicyContractError, match="nonnegative integer"):
+        parse_effective_citation_policy(canonical_json_text(payload))
+
+
+def test_resumed_config_without_active_pointer_fails_closed(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    (run_dir / "active_config_snapshot.json").unlink()
+    (run_dir / "config_snapshot_history.jsonl").unlink()
+    (run_dir / "config.resumed-20260711-120000.yaml").write_text(
+        (run_dir / "config.yaml").read_text(), encoding="utf-8"
+    )
+    with pytest.raises(CitationPolicyContractError, match="without active config pointer"):
+        resolve_active_config_snapshot(run_dir, config)
+
+
+def test_config_history_cannot_be_truncated_before_append(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    _real_config_snapshot(run_dir)
+    base_text = (run_dir / "config.yaml").read_text(encoding="utf-8")
+    resumed = run_dir / "config.resumed-20260711-120000.yaml"
+    resumed.write_text(base_text, encoding="utf-8")
+    write_active_config_binding(run_dir, resumed)
+    history_path = run_dir / "config_snapshot_history.jsonl"
+    history_lines = history_path.read_text(encoding="utf-8").splitlines()
+    assert len(history_lines) == 2
+    history_path.write_text(history_lines[0] + "\n", encoding="utf-8")
+    third = run_dir / "config.resumed-20260711-120001.yaml"
+    third.write_text(base_text, encoding="utf-8")
+    with pytest.raises(CitationPolicyContractError, match="history hash mismatch"):
+        write_active_config_binding(run_dir, third)
+
+
+def test_active_config_binding_updates_and_replays_checkpoint(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "checkpoint.json").write_text(
+        canonical_json_text({"last_completed_stage": 15, "run_id": "test"}),
+        encoding="utf-8",
+    )
+    source = Path("config.deepseek.sectional-dry-run.yaml")
+    raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    snapshot = run_dir / "config.yaml"
+    snapshot.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    config = RCConfig.from_dict(raw, project_root=run_dir, check_paths=False)
+    write_active_config_binding(run_dir, snapshot)
+    checkpoint_path = run_dir / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    assert checkpoint["active_config_snapshot_path"] == "config.yaml"
+    resolve_active_config_snapshot(run_dir, config)
+
+    checkpoint["active_config_snapshot_sha256"] = "0" * 64
+    checkpoint_path.write_text(canonical_json_text(checkpoint), encoding="utf-8")
+    with pytest.raises(CitationPolicyContractError, match="checkpoint config binding"):
+        resolve_active_config_snapshot(run_dir, config)
+
+
+@pytest.mark.parametrize(
+    ("stage_name", "executor"),
+    [
+        ("stage-17", _execute_paper_draft),
+        ("stage-18", _execute_peer_review),
+        ("stage-20", _execute_quality_gate),
+    ],
+)
+def test_paper_consumers_reject_tampered_effective_policy(
+    tmp_path: Path, stage_name: str, executor: Any
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    shortlist = _prepare_stage5(run_dir, [_candidate(1)], config)
+    stage6 = run_dir / "stage-06"
+    stage6.mkdir()
+    assert _execute_knowledge_extract(
+        stage6,
+        run_dir,
+        config,
+        AdapterBundle(),
+        llm=_SequenceLLM([_card_response(shortlist)]),  # type: ignore[arg-type]
+    ).status is StageStatus.DONE
+    stage16 = run_dir / "stage-16"
+    stage16.mkdir()
+    assert _execute_paper_outline(
+        stage16, run_dir, config, AdapterBundle(), llm=None
+    ).status is StageStatus.DONE
+    policy_path = stage16 / "citation_policy_effective.json"
+    policy = json.loads(policy_path.read_text())
+    policy["eligible_count"] = 2
+    policy_path.write_text(canonical_json_text(policy), encoding="utf-8")
+    stage_dir = run_dir / stage_name
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    result = executor(stage_dir, run_dir, config, AdapterBundle(), llm=None)
+    assert result.status is StageStatus.FAILED
+    assert "Effective citation policy is invalid" in (result.error or "")

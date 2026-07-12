@@ -520,6 +520,18 @@ path alone. Release replay cross-checks the path against canonical run history
 and then re-hashes the run-local snapshot. Later edits to the repository config
 are irrelevant, while edits to the bound run snapshot are detected.
 
+The CLI records this selection in `active_config_snapshot.json` and appends one
+strict JSONL event to `config_snapshot_history.jsonl`. The active pointer binds
+the history path, exact history SHA-256, contiguous final ordinal, snapshot
+path, and snapshot SHA-256. If any resumed snapshot or history exists without
+the active pointer, policy construction fails rather than selecting by filename
+ordering. An uninterrupted programmatic run may use `config.yaml` without a
+pointer only when no resume snapshot or history artifact exists.
+When `checkpoint.json` exists, the CLI atomically records the active snapshot
+path/hash and history hash there before resume, and every later checkpoint
+rewrite preserves those fields. Stage 16 requires the checkpoint binding to
+match the pointer and history exactly.
+
 ### 7.6 Preliminary and final citation plans
 
 Stage 16 writes `citation_plan.preliminary.json` before any v2 acquisition

@@ -21,6 +21,10 @@ from researchclaw.experiment_runtime.contract import (
     load_contract,
 )
 from researchclaw.llm.client import LLMClient
+from researchclaw.literature.citation_policy import (
+    CitationPolicyContractError,
+    load_effective_citation_policy,
+)
 from researchclaw.pipeline._domain import _detect_domain  # noqa: F401
 from researchclaw.pipeline._helpers import (
     StageResult,
@@ -175,6 +179,42 @@ STAGE 18 OUTPUT CONTRACT (OVERRIDES ALL EARLIER FORMAT INSTRUCTIONS):
 - Do not emit any other markdown heading at any level.
 """
 
+_CITATION_COUNT_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+    "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20, "twenty-five": 25, "thirty": 30,
+    "forty": 40, "fifty": 50, "sixty": 60,
+}
+_CITATION_COUNT_REQUIREMENT_RE = re.compile(
+    r"\b(?:at\s+least|minimum(?:\s+of)?|ensure(?:\s+at\s+least)?|"
+    r"include(?:\s+at\s+least)?|cite(?:\s+at\s+least)?|add(?:\s+at\s+least)?)"
+    r"\s+(?P<count>\d+|[a-z]+(?:[-\s][a-z]+)?)\s+"
+    r"(?:(?:relevant|unique)\s+)*(?:citations?|references?|sources?)\b",
+    re.IGNORECASE,
+)
+
+
+def _citation_count_policy_violations(ledger: Any, target: int) -> list[str]:
+    violations: list[str] = []
+    for comment in ledger.comments:
+        if comment.category != "actionable_revision":
+            continue
+        for match in _CITATION_COUNT_REQUIREMENT_RE.finditer(comment.exact_text):
+            raw = match.group("count").casefold()
+            normalized = raw.replace(" ", "-")
+            count = (
+                int(raw)
+                if raw.isdigit()
+                else _CITATION_COUNT_WORDS.get(normalized)
+            )
+            if count is None and "-" in normalized:
+                count = _CITATION_COUNT_WORDS.get(normalized.split("-", 1)[0])
+            if count is not None and count > target:
+                violations.append(comment.comment_id)
+    return violations
+
 def _execute_peer_review(
     stage_dir: Path,
     run_dir: Path,
@@ -184,6 +224,18 @@ def _execute_peer_review(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
+    for owned_name in ("reviews.md", "review_structure_report.json"):
+        (stage_dir / owned_name).unlink(missing_ok=True)
+    try:
+        effective_citation_policy = load_effective_citation_policy(run_dir, config)
+    except CitationPolicyContractError as exc:
+        return StageResult(
+            stage=Stage.PEER_REVIEW,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Effective citation policy is invalid: {exc}",
+            decision="retry",
+        )
     draft = _read_prior_artifact(run_dir, "paper_draft.md") or ""
     experiment_evidence = _collect_experiment_evidence(run_dir)
 
@@ -218,7 +270,20 @@ def _execute_peer_review(
         # prompt bank (ML bank -> NeurIPS/ICML referees, HEP bank -> HEP
         # theorist/phenomenologist/experimentalist). No adapter overlay.
         _review_system = sp.system
-        _review_user = sp.user + _quality_suffix + _STAGE18_REVIEW_FORMAT_CONTRACT
+        _citation_policy_suffix = (
+            "\n\nCITATION COUNT POLICY:\n"
+            f"- Effective minimum unique sources: "
+            f"{effective_citation_policy['effective_min_unique_sources']}.\n"
+            f"- Effective target unique sources: "
+            f"{effective_citation_policy['effective_target_unique_sources']}.\n"
+            "- Do not require a citation count above the effective target.\n"
+        )
+        _review_user = (
+            sp.user
+            + _quality_suffix
+            + _citation_policy_suffix
+            + _STAGE18_REVIEW_FORMAT_CONTRACT
+        )
         resp = _chat_with_prompt(
             llm,
             _review_system,
@@ -299,6 +364,95 @@ Statistical reporting is incomplete.
                 "Peer review failed strict structure validation: "
                 + ", ".join(issue_codes)
             ),
+            evidence_refs=(
+                "stage-18/reviews.md",
+                "stage-18/review_structure_report.json",
+            ),
+        )
+    citation_target = int(
+        effective_citation_policy["effective_target_unique_sources"]
+    )
+    policy_violations = _citation_count_policy_violations(ledger, citation_target)
+    if policy_violations and llm is not None:
+        repair_prompt = (
+            _review_user
+            + "\n\nYour previous review imposed a citation-count requirement above "
+            + f"the effective target of {citation_target}. Regenerate the complete "
+            + "review once, preserving the exact heading contract and lowering any "
+            + "citation-count requirement to the effective target or below."
+        )
+        repaired = _chat_with_prompt(
+            llm,
+            _review_system,
+            repair_prompt,
+            json_mode=sp.json_mode,
+            max_tokens=sp.max_tokens,
+            retries=0,
+        )
+        reviews = repaired.content
+        (stage_dir / "reviews.md").write_text(reviews, encoding="utf-8")
+        try:
+            ledger = extract_review_ledger(reviews, source_path="stage-18/reviews.md")
+        except SectionalRevisionContractError as exc:
+            report = {
+                "schema_version": 1,
+                "valid": False,
+                "source_reviews_sha256": hashlib.sha256(
+                    reviews.encode("utf-8")
+                ).hexdigest(),
+                "issues": [
+                    {
+                        "code": issue.code,
+                        "message": issue.message,
+                        "line": issue.line,
+                    }
+                    for issue in exc.issues
+                ],
+            }
+            (stage_dir / "review_structure_report.json").write_text(
+                json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            issue_codes = sorted({issue.code for issue in exc.issues})
+            return StageResult(
+                stage=Stage.PEER_REVIEW,
+                status=StageStatus.FAILED,
+                artifacts=("reviews.md", "review_structure_report.json"),
+                error=(
+                    "Citation-policy repair broke review structure: "
+                    + ", ".join(issue_codes)
+                ),
+                evidence_refs=(
+                    "stage-18/reviews.md",
+                    "stage-18/review_structure_report.json",
+                ),
+            )
+        policy_violations = _citation_count_policy_violations(
+            ledger, citation_target
+        )
+    if policy_violations:
+        report = {
+            "schema_version": 1,
+            "valid": False,
+            "source_reviews_sha256": ledger.source_reviews_sha256,
+            "issues": [
+                {
+                    "code": "citation_count_policy_exceeded",
+                    "message": (
+                        f"Actionable revision exceeds effective target {citation_target}: "
+                        + ", ".join(policy_violations)
+                    ),
+                    "line": None,
+                }
+            ],
+        }
+        (stage_dir / "review_structure_report.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return StageResult(
+            stage=Stage.PEER_REVIEW,
+            status=StageStatus.FAILED,
+            artifacts=("reviews.md", "review_structure_report.json"),
+            error="Peer review exceeds the effective citation target",
             evidence_refs=(
                 "stage-18/reviews.md",
                 "stage-18/review_structure_report.json",
@@ -594,6 +748,18 @@ def _execute_quality_gate(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
+    for owned_name in ("quality_report.json", "fabrication_flags.json"):
+        (stage_dir / owned_name).unlink(missing_ok=True)
+    try:
+        effective_citation_policy = load_effective_citation_policy(run_dir, config)
+    except CitationPolicyContractError as exc:
+        return StageResult(
+            stage=Stage.QUALITY_GATE,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Effective citation policy is invalid: {exc}",
+            decision="retry",
+        )
     revised = _read_prior_artifact(run_dir, "paper_revised.md") or ""
     report: dict[str, Any] | None = None
 
@@ -687,7 +853,15 @@ def _execute_quality_gate(
             "quality_gate",
             evolution_overlay=_overlay,
             quality_threshold=str(config.research.quality_threshold),
-            revised=paper_for_eval + _exp_context,
+            revised=(
+                paper_for_eval
+                + _exp_context
+                + "\n\nCitation policy: require at least "
+                + str(effective_citation_policy["effective_min_unique_sources"])
+                + " unique eligible sources and target "
+                + str(effective_citation_policy["effective_target_unique_sources"])
+                + ". Do not penalize the paper for not exceeding that target.\n"
+            ),
         )
         resp = _chat_with_prompt(
             llm,

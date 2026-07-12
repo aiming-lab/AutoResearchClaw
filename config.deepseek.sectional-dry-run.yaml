@@ -53,6 +53,15 @@ experiment:
     python_path: ".venv/bin/python"
     env_policy: allowlist
 
+citation_policy:
+  schema_version: 1
+  min_unique_sources_research_release: 15
+  target_unique_sources: 25
+  min_unique_sources_pipeline_validation: 1
+  require_fulltext_evidence: false
+  max_fulltext_acquisition_rounds: 2
+  reading_export_root: ""
+
 paper_revision:
   sectional_enabled: true
   max_section_retries: 1
