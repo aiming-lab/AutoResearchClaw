@@ -354,8 +354,8 @@ artifacts, so an edited candidate row or shadow bibliography cannot enter E1.
 `shortlist.jsonl` is success-only. Every Stage 5 failure writes decisions, if
 any, to `screening_partial.jsonl` and sets `screening_output_path` accordingly;
 it never leaves a canonical shortlist that a later `--from-stage` run can
-consume. Stage 4 and Stage 5 are evidence-authority stages and cannot appear in
-`runtime.skip_stages`.
+consume. Stage 4, Stage 5, and Stage 6 are evidence-authority stages and cannot
+appear in `runtime.skip_stages`.
 
 ### 7.3 Stage 6 evidence card
 
@@ -399,7 +399,9 @@ Authoritative cards are JSON:
 
 `char_start` and `char_end` are Python Unicode-code-point offsets over the exact
 decoded Stage 4 abstract value. The excerpt must equal the indicated slice, and
-its UTF-8 SHA-256 must match `excerpt_sha256`.
+its UTF-8 SHA-256 must match `excerpt_sha256`. Policy v1 requires every excerpt
+to contain at least 25 Unicode code points; shorter strings cannot make a card
+eligible.
 
 `source_record_id` equals the candidate row's canonical `source_identity`. It
 is never a JSONL line number or ordinal. The Stage 4 candidates loader requires
@@ -415,13 +417,16 @@ similarity.
 the JSON card. It is never independently generated and never authoritative.
 
 `stage-06/cards_manifest.json` binds every JSON card, every derived Markdown
-view, the shortlist, and the renderer version:
+view, the shortlist, the validated Stage 5 screening report, and the renderer
+version:
 
 ```json
 {
   "schema_version": 1,
   "shortlist_path": "stage-05/shortlist.jsonl",
   "shortlist_sha256": "...",
+  "screening_report_path": "stage-05/screening_report.json",
+  "screening_report_sha256": "...",
   "renderer_version": 1,
   "cards": [
     {
@@ -441,6 +446,19 @@ Card IDs, source identities, cite keys, JSON paths, and Markdown paths are each
 unique. The renderer recomputes each Markdown view from its JSON card before
 hash comparison. Extra, missing, nested, symlinked, or unmanifested files fail
 validation.
+
+Stage 6 revalidates the sealed Stage 4 citation collection and the complete
+Stage 5 shortlist/report binding before any extraction call. It publishes
+`cards/` and `cards_manifest.json` only when at least one card contains a
+replayable evidence excerpt. A zero-evidence failure may write
+`card_extraction_failures.json` for diagnosis, but it must not leave either
+canonical Stage 6 artifact for a later `--from-stage` run to consume.
+Stage 7 must replay the manifest, JSON-card, excerpt, and deterministic Markdown
+bindings before reading any Markdown view into the synthesis prompt.
+
+A failed Stage 6 extraction batch produces non-evidentiary `failed` cards but
+does not by itself fail a strict-scope run when other cards succeed. E3 owns the
+scope-specific minimum eligible-evidence count and fails insufficient runs.
 
 ### 7.4 Citation allowlist
 

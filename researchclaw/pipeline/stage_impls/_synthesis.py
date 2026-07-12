@@ -10,6 +10,10 @@ from typing import Any
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.llm.client import LLMClient
+from researchclaw.literature.evidence_cards import (
+    EvidenceCardContractError,
+    load_validated_cards,
+)
 from researchclaw.pipeline._helpers import (
     StageResult,
     _default_hypotheses,
@@ -35,13 +39,32 @@ def _execute_synthesis(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
-    cards_path = _read_prior_artifact(run_dir, "cards/") or ""
-    cards_context = ""
-    if cards_path:
-        snippets: list[str] = []
-        for path in sorted(Path(cards_path).glob("*.md"))[:24]:
-            snippets.append(path.read_text(encoding="utf-8"))
+    synthesis_path = stage_dir / "synthesis.md"
+    try:
+        synthesis_path.unlink(missing_ok=True)
+        cards = load_validated_cards(run_dir, config)
+        successful_card_ids = [
+            str(card["card_id"])
+            for card in cards
+            if card["extraction_status"] == "success"
+        ]
+        if not successful_card_ids:
+            raise EvidenceCardContractError("no successful evidence cards")
+        snippets = [
+            (run_dir / "stage-06" / "cards" / f"{card_id}.md").read_text(
+                encoding="utf-8"
+            )
+            for card_id in successful_card_ids[:24]
+        ]
         cards_context = "\n\n".join(snippets)
+    except (EvidenceCardContractError, OSError, UnicodeDecodeError) as exc:
+        return StageResult(
+            stage=Stage.SYNTHESIS,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Stage 6 evidence cards are invalid: {exc}",
+            decision="retry",
+        )
 
     if llm is not None:
         _pm = prompts or PromptManager()
@@ -80,7 +103,7 @@ Under-reported failure behavior under distribution shift.
 ## Generated
 {_utcnow_iso()}
 """
-    (stage_dir / "synthesis.md").write_text(synthesis_md, encoding="utf-8")
+    synthesis_path.write_text(synthesis_md, encoding="utf-8")
     return StageResult(
         stage=Stage.SYNTHESIS,
         status=StageStatus.DONE,

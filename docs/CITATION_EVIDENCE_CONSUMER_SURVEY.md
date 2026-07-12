@@ -26,7 +26,7 @@ Surveyed repository reads of:
 | `stage-05/shortlist.jsonl` | HITL claim verifier | evidence lookup | migrate to strict shortlist/allowlist semantics |
 | `stage-05/shortlist.jsonl` | HITL quality predictor | shortlist-size feature | degraded/fallback entries must not count as eligible evidence |
 | `stage-05/shortlist.jsonl` | HITL summarizer | stage summary | diagnostic consumer only |
-| `stage-06/cards/*.md` | Stage 7 `_synthesis.py` | synthesis prompt context | retain as deterministic JSON-derived view during migration |
+| `stage-06/cards/*.md` | Stage 7 `_synthesis.py` | synthesis prompt context | E2 replays the JSON/manifest binding before consuming the deterministic view |
 | `stage-04/references.bib` | Stage 19 `sectional_execution.py` | canonical draft-key closure | must remain registry-bound and immutable |
 | nearest `references.bib` | Stage 17 `_paper_writing.py` | preverification input | retire full-bibliography preverification in E5 |
 | nearest `references.bib` | Stage 22 `_review_publish.py` | export and missing-key repair | E5/E7 must pin Stage 4 canonical bib and remove auto-repair authority |
@@ -40,8 +40,8 @@ Current pipeline contracts declare only:
 
 - Stage 4 output: `candidates.jsonl`;
 - Stage 5 input/output: `candidates.jsonl` -> `shortlist.jsonl`;
-- Stage 6 input/output: `shortlist.jsonl` -> `cards/`;
-- Stage 7 input: `cards/`.
+- Stage 6 input/output: `shortlist.jsonl` + `screening_report.json` -> `cards/` + `cards_manifest.json`;
+- Stage 7 input: `cards/` + `cards_manifest.json`, with strict replay before Markdown consumption.
 
 E0 must add the cite-key registry and canonical bibliography to Stage 4's
 declared outputs. E2 later adds structured cards and manifest while preserving

@@ -69,15 +69,15 @@ CONTRACTS: dict[Stage, StageContract] = {
     ),
     Stage.KNOWLEDGE_EXTRACT: StageContract(
         stage=Stage.KNOWLEDGE_EXTRACT,
-        input_files=("shortlist.jsonl",),
-        output_files=("cards/",),
-        dod="Structured knowledge card per shortlisted paper",
+        input_files=("shortlist.jsonl", "screening_report.json"),
+        output_files=("cards/", "cards_manifest.json"),
+        dod="Strict JSON evidence card plus deterministic Markdown per shortlisted paper",
         error_code="E06_EXTRACT_FAIL",
     ),
     # Phase C: Knowledge Synthesis
     Stage.SYNTHESIS: StageContract(
         stage=Stage.SYNTHESIS,
-        input_files=("cards/",),
+        input_files=("cards/", "cards_manifest.json"),
         output_files=("synthesis.md",),
         dod="Topic clusters + >=2 research gaps identified",
         error_code="E07_SYNTHESIS_WEAK",

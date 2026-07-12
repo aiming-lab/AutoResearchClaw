@@ -800,6 +800,7 @@ def test_execute_stage_contract_validation_missing_output_directory_marks_failed
     adapters: AdapterBundle,
 ) -> None:
     _write_prior_artifact(run_dir, 5, "shortlist.jsonl", '{"title": "x"}')
+    _write_prior_artifact(run_dir, 5, "screening_report.json", "{}")
 
     def bad_executor(
         _stage_dir: Path,

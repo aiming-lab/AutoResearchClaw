@@ -379,7 +379,7 @@ def test_rcconfig_from_dict_parses_partial_run_and_q1_gate_controls(
     assert config.security.q1_spine_max_rollbacks == 2
 
 
-@pytest.mark.parametrize("stage", [4, 5])
+@pytest.mark.parametrize("stage", [4, 5, 6])
 def test_validate_config_rejects_skipping_evidence_authority_stages(
     tmp_path: Path, stage: int
 ) -> None:

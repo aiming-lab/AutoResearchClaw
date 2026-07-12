@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,19 @@ from researchclaw.literature.citation_identity import (
     parse_cite_key_registry,
     seal_citation_collection,
     validate_registry_artifacts,
+)
+from researchclaw.literature.evidence_cards import (
+    EXTRACTION_BATCH_SIZE,
+    MIN_EXCERPT_CHARS,
+    CardProposal,
+    EvidenceCardContractError,
+    build_cards_manifest,
+    build_evidence_card,
+    canonical_json_text,
+    load_validated_card_inputs,
+    parse_card_batch_response,
+    render_evidence_card_markdown,
+    validate_cards_artifacts,
 )
 from researchclaw.literature.screening import (
     MAX_SCREEN_CANDIDATES,
@@ -39,7 +53,6 @@ from researchclaw.pipeline._helpers import (
     _extract_topic_keywords,
     _extract_yaml_block,
     _get_evolution_overlay,
-    _parse_jsonl_rows,
     _read_prior_artifact,
     _safe_filename,
     _safe_json_loads,
@@ -1132,68 +1145,224 @@ def _execute_knowledge_extract(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
-    shortlist = _read_prior_artifact(run_dir, "shortlist.jsonl") or ""
-
-    # Inject web context from Stage 4 if available
-    web_context = _read_prior_artifact(run_dir, "web_context.md") or ""
-    if web_context:
-        shortlist = shortlist + "\n\n--- Web Search Context ---\n" + web_context[:10_000]
-
     cards_dir = stage_dir / "cards"
-    cards_dir.mkdir(parents=True, exist_ok=True)
-    cards: list[dict[str, Any]] = []
-    if llm is not None:
-        _pm = prompts or PromptManager()
-        _overlay = _get_evolution_overlay(run_dir, "knowledge_extract")
-        sp = _pm.for_stage("knowledge_extract", evolution_overlay=_overlay, shortlist=shortlist)
-        resp = _chat_with_prompt(
-            llm,
-            sp.system,
-            sp.user,
-            json_mode=sp.json_mode,
-            max_tokens=sp.max_tokens,
+    manifest_path = stage_dir / "cards_manifest.json"
+    failure_path = stage_dir / "card_extraction_failures.json"
+    try:
+        if cards_dir.is_symlink():
+            cards_dir.unlink()
+        elif cards_dir.exists():
+            shutil.rmtree(cards_dir)
+        manifest_path.unlink(missing_ok=True)
+        failure_path.unlink(missing_ok=True)
+    except OSError as exc:
+        return StageResult(
+            stage=Stage.KNOWLEDGE_EXTRACT,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Cannot clean stale Stage 6 outputs: {exc}",
+            decision="retry",
         )
-        payload = _safe_json_loads(resp.content, {})
-        if isinstance(payload, dict) and isinstance(payload.get("cards"), list):
-            cards = [item for item in payload["cards"] if isinstance(item, dict)]
-    if not cards:
-        rows = _parse_jsonl_rows(shortlist)
-        for idx, paper in enumerate(rows[:6]):
-            title = str(paper.get("title", f"Paper {idx + 1}"))
-            cards.append(
-                {
-                    "card_id": f"card-{idx + 1}",
-                    "title": title,
-                    "problem": f"How to improve {config.research.topic}",
-                    "method": "Template method summary",
-                    "data": "Template dataset",
-                    "metrics": "Template metric",
-                    "findings": "Template key finding",
-                    "limitations": "Template limitation",
-                    "citation": str(paper.get("url", "")),
-                    "cite_key": str(paper.get("cite_key", "")),
-                }
+
+    try:
+        inputs = load_validated_card_inputs(run_dir, config)
+    except EvidenceCardContractError as exc:
+        return StageResult(
+            stage=Stage.KNOWLEDGE_EXTRACT,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Stage 6 canonical inputs are invalid: {exc}",
+            decision="retry",
+        )
+
+    proposals: dict[str, CardProposal] = {}
+    failures: dict[str, str] = {}
+    batches = [
+        inputs.shortlist[index:index + EXTRACTION_BATCH_SIZE]
+        for index in range(0, len(inputs.shortlist), EXTRACTION_BATCH_SIZE)
+    ]
+    for batch_index, batch in enumerate(batches, start=1):
+        expected_ids = [str(row["source_identity"]) for row in batch]
+        if llm is None:
+            failures.update({identity: "LLM client unavailable" for identity in expected_ids})
+            continue
+        try:
+            batch_proposals = _extract_evidence_card_batch(
+                llm=llm,
+                prompts=prompts,
+                run_dir=run_dir,
+                config=config,
+                batch_id=f"card-batch-{batch_index:03d}",
+                rows=list(batch),
             )
-    for idx, card in enumerate(cards):
-        card_id = _safe_filename(str(card.get("card_id", f"card-{idx + 1}")))
-        parts = [f"# {card.get('title', card_id)}", ""]
-        for key in (
-            "cite_key",
-            "problem",
-            "method",
-            "data",
-            "metrics",
-            "findings",
-            "limitations",
-            "citation",
-        ):
-            parts.append(f"## {key.title()}")
-            parts.append(str(card.get(key, "")))
-            parts.append("")
-        (cards_dir / f"{card_id}.md").write_text("\n".join(parts), encoding="utf-8")
+            proposals.update(
+                {proposal.source_identity: proposal for proposal in batch_proposals}
+            )
+        except (RuntimeError, EvidenceCardContractError) as exc:
+            failures.update({identity: str(exc)[:1000] for identity in expected_ids})
+
+    candidates_sha256 = sha256_text(inputs.candidates_text)
+    cards: list[dict[str, Any]] = []
+    for index, candidate in enumerate(inputs.shortlist, start=1):
+        identity = str(candidate["source_identity"])
+        cards.append(
+            build_evidence_card(
+                card_id=f"card-{index:03d}",
+                candidate=candidate,
+                candidates_sha256=candidates_sha256,
+                proposal=proposals.get(identity),
+                failure_reason=failures.get(identity),
+            )
+        )
+
+    successful_cards = [
+        card for card in cards if card["extraction_status"] == "success"
+    ]
+    if not successful_cards:
+        diagnostic = {
+            "schema_version": 1,
+            "status": "failed",
+            "reason": "zero_eligible_evidence_cards",
+            "cards": cards,
+        }
+        try:
+            failure_path.write_text(canonical_json_text(diagnostic), encoding="utf-8")
+        except OSError as exc:
+            return StageResult(
+                stage=Stage.KNOWLEDGE_EXTRACT,
+                status=StageStatus.FAILED,
+                artifacts=(),
+                error=f"Stage 6 produced zero eligible evidence and diagnostics failed: {exc}",
+                decision="retry",
+            )
+        return StageResult(
+            stage=Stage.KNOWLEDGE_EXTRACT,
+            status=StageStatus.FAILED,
+            artifacts=(failure_path.name,),
+            evidence_refs=(f"stage-06/{failure_path.name}",),
+            error="Stage 6 produced zero eligible abstract evidence cards",
+            decision="retry",
+        )
+
+    serialized_cards: list[tuple[dict[str, Any], str, str]] = []
+    try:
+        cards_dir.mkdir(parents=True, exist_ok=False)
+        for card in cards:
+            json_text = canonical_json_text(card)
+            markdown_text = render_evidence_card_markdown(card)
+            card_id = str(card["card_id"])
+            (cards_dir / f"{card_id}.json").write_text(json_text, encoding="utf-8")
+            (cards_dir / f"{card_id}.md").write_text(markdown_text, encoding="utf-8")
+            serialized_cards.append((card, json_text, markdown_text))
+        manifest = build_cards_manifest(
+            shortlist_sha256=sha256_text(inputs.shortlist_text),
+            screening_report_sha256=sha256_text(inputs.screening_report_text),
+            cards=serialized_cards,
+        )
+        manifest_text = canonical_json_text(manifest)
+        manifest_path.write_text(manifest_text, encoding="utf-8")
+        validate_cards_artifacts(
+            stage_dir=stage_dir,
+            manifest=manifest,
+            shortlist_text=inputs.shortlist_text,
+            screening_report_text=inputs.screening_report_text,
+            candidates_sha256=candidates_sha256,
+            shortlist=inputs.shortlist,
+        )
+    except (EvidenceCardContractError, OSError, UnicodeDecodeError) as exc:
+        manifest_path.unlink(missing_ok=True)
+        if cards_dir.is_symlink():
+            cards_dir.unlink(missing_ok=True)
+        elif cards_dir.exists():
+            shutil.rmtree(cards_dir, ignore_errors=True)
+        return StageResult(
+            stage=Stage.KNOWLEDGE_EXTRACT,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Stage 6 evidence-card persistence failed: {exc}",
+            decision="retry",
+        )
     return StageResult(
         stage=Stage.KNOWLEDGE_EXTRACT,
         status=StageStatus.DONE,
-        artifacts=("cards/",),
-        evidence_refs=("stage-06/cards/",),
+        artifacts=("cards/", "cards_manifest.json"),
+        evidence_refs=("stage-06/cards/", "stage-06/cards_manifest.json"),
     )
+
+
+def _extract_evidence_card_batch(
+    *,
+    llm: LLMClient,
+    prompts: PromptManager | None,
+    run_dir: Path,
+    config: RCConfig,
+    batch_id: str,
+    rows: list[dict[str, Any]],
+) -> tuple[CardProposal, ...]:
+    expected_ids = [str(row["source_identity"]) for row in rows]
+    source_rows = [
+        {
+            "source_identity": row["source_identity"],
+            "title": row["title"],
+            "abstract": row["abstract"],
+        }
+        for row in rows
+    ]
+    contract = (
+        "Extract structured summaries only from each retained abstract. "
+        "Return one JSON object and no prose.\n"
+        f"schema_version must be 1; batch_id must be {batch_id}.\n"
+        "cards must contain exactly one object for every source_identity. "
+        "Each card has exactly source_identity, summary_text, and "
+        "evidence_excerpt_texts. summary_text has exactly problem, method, "
+        "data, metrics, findings, limitations, each a nonempty string. "
+        "evidence_excerpt_texts has 1-4 unique, verbatim substrings copied from "
+        f"that source's abstract, each at least {MIN_EXCERPT_CHARS} Unicode "
+        "code points long. Do not infer missing evidence.\n"
+        f"SOURCES:\n{json.dumps(source_rows, ensure_ascii=False, sort_keys=True)}"
+    )
+    manager = prompts or PromptManager()
+    stage_prompt = manager.for_stage(
+        "knowledge_extract",
+        evolution_overlay=_get_evolution_overlay(run_dir, "knowledge_extract"),
+        shortlist="",
+    )
+    response = _chat_with_prompt(
+        llm,
+        stage_prompt.system,
+        contract,
+        json_mode=True,
+        max_tokens=stage_prompt.max_tokens,
+        retries=1,
+    )
+    try:
+        return parse_card_batch_response(
+            response.content,
+            expected_batch_id=batch_id,
+            expected_source_ids=expected_ids,
+        )
+    except EvidenceCardContractError as initial_error:
+        repair_prompt = (
+            contract
+            + "\n\nThe previous response violated the exact contract: "
+            + str(initial_error)
+            + "\nRegenerate the complete batch once."
+        )
+        repaired = _chat_with_prompt(
+            llm,
+            stage_prompt.system,
+            repair_prompt,
+            json_mode=True,
+            max_tokens=stage_prompt.max_tokens,
+            retries=0,
+        )
+        try:
+            return parse_card_batch_response(
+                repaired.content,
+                expected_batch_id=batch_id,
+                expected_source_ids=expected_ids,
+            )
+        except EvidenceCardContractError as repair_error:
+            raise EvidenceCardContractError(
+                f"initial_error={initial_error}; repair_error={repair_error}"
+            ) from repair_error
