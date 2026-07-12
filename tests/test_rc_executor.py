@@ -42,6 +42,9 @@ def _stub_effective_citation_policy_for_legacy_unit_tests(
     monkeypatch.setattr(
         _review_publish, "load_effective_citation_policy", lambda *_args: policy
     )
+    monkeypatch.setattr(
+        _review_publish, "validate_paper_citation_minimum", lambda *_args, **_kwargs: ()
+    )
     monkeypatch.setattr(_paper_writing, "load_final_citation_plan", lambda *_args: {})
     monkeypatch.setattr(
         _paper_writing,

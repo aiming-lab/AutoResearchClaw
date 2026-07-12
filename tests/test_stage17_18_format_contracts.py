@@ -287,6 +287,10 @@ Limited evidence.
     [
         ("At least fifteen unique citations are required.", 14),
         ("Ensure at least twenty five relevant references.", 20),
+        ("Increase references to 30.", 15),
+        ("Raise the citation count above twenty-five.", 20),
+        ("30 references are required.", 15),
+        ("Twenty five or more sources should be included.", 20),
     ],
 )
 def test_citation_count_detector_does_not_swallow_qualifiers(

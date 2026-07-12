@@ -29,6 +29,7 @@ from researchclaw.literature.citation_plan import (
     build_citation_writer_instruction,
     load_final_citation_plan,
     parse_citation_plan,
+    validate_paper_citation_minimum,
 )
 from researchclaw.literature.evidence_cards import (
     EvidenceCardContractError,
@@ -915,6 +916,23 @@ def test_stage17_uses_final_plan_only_and_writes_replayable_closure(
     closure = json.loads((stage17 / "citation_closure_report.json").read_text())
     assert closure["valid"] is True
     assert closure["experiment_fact_closure_valid"] is True
+    draft_text = (stage17 / "paper_draft.md").read_text(encoding="utf-8")
+    assert validate_paper_citation_minimum(
+        run_dir, config, draft_text, minimum=1
+    ) == (key,)
+    stage19 = run_dir / "stage-19"
+    stage19.mkdir()
+    stage20 = run_dir / "stage-20"
+    stage20.mkdir()
+    (stage19 / "paper_revised.md").write_text(
+        draft_text.replace(f"[{key}]", ""), encoding="utf-8"
+    )
+    quality = _execute_quality_gate(
+        stage20, run_dir, config, AdapterBundle(), llm=None
+    )
+    assert quality.status is StageStatus.FAILED
+    assert "effective citation policy" in (quality.error or "").lower()
+    assert "minimum=1" in (quality.error or "")
     closure["paper_sha256"] = "0" * 64
     (stage17 / "citation_closure_report.json").write_text(
         canonical_json_text(closure), encoding="utf-8"
@@ -928,7 +946,7 @@ def test_stage17_uses_final_plan_only_and_writes_replayable_closure(
     assert "closure" in (review.error or "").lower()
 
 
-def test_stage22_and_stage23_reject_bibliography_key_outside_allowlist(
+def test_stage20_22_and_23_reject_bibliography_key_outside_allowlist(
     tmp_path: Path,
 ) -> None:
     run_dir = tmp_path / "run"
@@ -960,6 +978,14 @@ def test_stage22_and_stage23_reject_bibliography_key_outside_allowlist(
     stage19 = run_dir / "stage-19"
     stage19.mkdir()
     (stage19 / "paper_revised.md").write_text(final_text, encoding="utf-8")
+    stage20 = run_dir / "stage-20"
+    stage20.mkdir()
+    quality = _execute_quality_gate(
+        stage20, run_dir, config, AdapterBundle(), llm=None
+    )
+    assert quality.status is StageStatus.FAILED
+    assert "invalid=" in (quality.error or "")
+
     stage22 = run_dir / "stage-22"
     stage22.mkdir()
     exported = _execute_export_publish(

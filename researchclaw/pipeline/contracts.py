@@ -183,6 +183,8 @@ CONTRACTS: dict[Stage, StageContract] = {
             "experiment_fact_closure_report.json",
             "citation_closure_report.json",
             "citation_policy_effective.json",
+            "citation_allowlist.json",
+            "citation_plan.json",
         ),
         output_files=("reviews.md",),
         dod=">=2 simulated review perspectives with actionable feedback",
@@ -198,7 +200,12 @@ CONTRACTS: dict[Stage, StageContract] = {
     # Phase H: Finalization
     Stage.QUALITY_GATE: StageContract(
         stage=Stage.QUALITY_GATE,
-        input_files=("paper_revised.md", "citation_policy_effective.json"),
+        input_files=(
+            "paper_revised.md",
+            "citation_policy_effective.json",
+            "citation_allowlist.json",
+            "citation_plan.json",
+        ),
         # fabrication_flags.json was always produced but never declared —
         # release_check depends on it, so the contract must require it.
         output_files=("quality_report.json", "fabrication_flags.json"),

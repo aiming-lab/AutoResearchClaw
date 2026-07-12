@@ -29,6 +29,7 @@ from researchclaw.literature.citation_plan import (
     CitationPlanContractError,
     load_canonical_bibliography,
     validate_final_paper_citations,
+    validate_paper_citation_minimum,
     validate_citation_closure_report,
 )
 from researchclaw.literature.experiment_fact_closure import (
@@ -198,12 +199,29 @@ _CITATION_COUNT_WORDS = {
     "nineteen": 19, "twenty": 20, "twenty-five": 25, "thirty": 30,
     "forty": 40, "fifty": 50, "sixty": 60,
 }
-_CITATION_COUNT_REQUIREMENT_RE = re.compile(
-    r"\b(?:at\s+least|minimum(?:\s+of)?|ensure(?:\s+at\s+least)?|"
-    r"include(?:\s+at\s+least)?|cite(?:\s+at\s+least)?|add(?:\s+at\s+least)?)"
-    r"\s+(?P<count>\d+|[a-z]+(?:[-\s][a-z]+)?)\s+"
-    r"(?:(?:relevant|unique)\s+)*(?:citations?|references?|sources?)\b",
-    re.IGNORECASE,
+_COUNT_TOKEN = r"(?P<count>\d+|[a-z]+(?:[-\s][a-z]+)?)"
+_CITATION_COUNT_REQUIREMENT_RES = (
+    re.compile(
+        r"\b(?:at\s+least|minimum(?:\s+of)?|ensure(?:\s+at\s+least)?|"
+        r"include(?:\s+at\s+least)?|cite(?:\s+at\s+least)?|add(?:\s+at\s+least)?)"
+        rf"\s+{_COUNT_TOKEN}\s+"
+        r"(?:(?:relevant|unique)\s+)*(?:citations?|references?|sources?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:increase|expand|raise|grow)\s+(?:the\s+)?"
+        r"(?:(?:number|count)\s+of\s+)?"
+        r"(?:citations?|references?|sources?|bibliography|citation\s+count|reference\s+count)"
+        rf"\s+(?:to|above|beyond)\s+{_COUNT_TOKEN}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b{_COUNT_TOKEN}\s+(?:or\s+more\s+)?"
+        r"(?:citations?|references?|sources?)\s+"
+        r"(?:(?:are|is|should\s+be|must\s+be)\s+)?"
+        r"(?:required|needed|necessary|included|the\s+minimum)\b",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -212,18 +230,22 @@ def _citation_count_policy_violations(ledger: Any, target: int) -> list[str]:
     for comment in ledger.comments:
         if comment.category != "actionable_revision":
             continue
-        for match in _CITATION_COUNT_REQUIREMENT_RE.finditer(comment.exact_text):
-            raw = match.group("count").casefold()
-            normalized = raw.replace(" ", "-")
-            count = (
-                int(raw)
-                if raw.isdigit()
-                else _CITATION_COUNT_WORDS.get(normalized)
-            )
-            if count is None and "-" in normalized:
-                count = _CITATION_COUNT_WORDS.get(normalized.split("-", 1)[0])
-            if count is not None and count > target:
-                violations.append(comment.comment_id)
+        for pattern in _CITATION_COUNT_REQUIREMENT_RES:
+            for match in pattern.finditer(comment.exact_text):
+                raw = match.group("count").casefold()
+                normalized = raw.replace(" ", "-")
+                count = (
+                    int(raw)
+                    if raw.isdigit()
+                    else _CITATION_COUNT_WORDS.get(normalized)
+                )
+                if count is None and "-" in normalized:
+                    count = _CITATION_COUNT_WORDS.get(normalized.split("-", 1)[0])
+                if count is not None and count > target:
+                    violations.append(comment.comment_id)
+                    break
+            if comment.comment_id in violations:
+                break
     return violations
 
 def _execute_peer_review(
@@ -778,6 +800,24 @@ def _execute_quality_gate(
             decision="retry",
         )
     revised = _read_prior_artifact(run_dir, "paper_revised.md") or ""
+    citation_minimum = int(
+        effective_citation_policy["effective_min_unique_sources"]
+    )
+    try:
+        validate_paper_citation_minimum(
+            run_dir,
+            config,
+            revised,
+            minimum=citation_minimum,
+        )
+    except CitationPlanContractError as exc:
+        return StageResult(
+            stage=Stage.QUALITY_GATE,
+            status=StageStatus.FAILED,
+            artifacts=(),
+            error=f"Paper does not satisfy the effective citation policy: {exc}",
+            decision="retry",
+        )
     report: dict[str, Any] | None = None
 
     # BUG-25 + BUG-180: Load the RICHEST experiment summary for cross-checking.

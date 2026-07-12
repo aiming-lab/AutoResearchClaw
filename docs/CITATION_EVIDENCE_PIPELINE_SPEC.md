@@ -909,6 +909,12 @@ Stage 20 reads the same effective-policy artifact, re-hashes its sources, and
 recomputes all counts. It does not retain a separate hard-coded minimum of 15
 for pipeline-validation runs.
 
+Before any quality-model call, Stage 20 extracts citations from the actual
+revised manuscript and counts only keys that remain in both the validated
+Stage 6 allowlist and final Stage 16 plan. Counts below the effective minimum,
+or padding with ineligible/unplanned keys, fail deterministically. The target
+is guidance rather than an additional hard minimum.
+
 For research release, the effective minimum remains 15 by construction. A
 lower target in a non-release scope is diagnostic only and cannot make the run
 release eligible.

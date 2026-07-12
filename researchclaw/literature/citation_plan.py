@@ -321,6 +321,47 @@ def validate_final_paper_citations(
     return tuple(sorted(cited))
 
 
+def validate_paper_citation_minimum(
+    run_dir: Path,
+    config: RCConfig,
+    paper_text: str,
+    *,
+    minimum: int,
+) -> tuple[str, ...]:
+    """Require the current paper to meet policy using eligible planned keys."""
+
+    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
+        raise CitationPlanContractError("citation minimum must be a nonnegative integer")
+    allowlist_path = run_dir / "stage-06" / "citation_allowlist.json"
+    try:
+        if allowlist_path.is_symlink() or not allowlist_path.is_file():
+            raise CitationPlanContractError("citation allowlist is missing or unsafe")
+        allowlist_text = allowlist_path.read_text(encoding="utf-8")
+        allowlist = validate_citation_allowlist(run_dir, config, allowlist_text)
+        plan = load_final_citation_plan(run_dir, config)
+    except (OSError, UnicodeDecodeError, CitationPolicyContractError) as exc:
+        raise CitationPlanContractError(
+            f"cannot validate paper citation minimum: {exc}"
+        ) from exc
+    cited = set(extract_citation_keys(paper_text))
+    eligible = set(allowlist["eligible_keys"])
+    planned = {
+        citation["cite_key"]
+        for claim in plan["claims"]
+        for citation in claim["planned_citations"]
+    }
+    invalid = sorted(cited - eligible)
+    unplanned = sorted(cited - planned)
+    counted = sorted(cited & eligible & planned)
+    if invalid or unplanned or len(counted) < minimum:
+        raise CitationPlanContractError(
+            "paper citation minimum failed: "
+            f"eligible_count={len(counted)}, minimum={minimum}, "
+            f"invalid={invalid}, unplanned={unplanned}"
+        )
+    return tuple(counted)
+
+
 def build_citation_closure_report(
     run_dir: Path,
     config: RCConfig,
