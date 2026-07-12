@@ -51,7 +51,7 @@ from researchclaw.literature.experiment_fact_closure import (
     build_experiment_fact_closure_report,
     parse_experiment_fact_closure_report,
 )
-from researchclaw.literature.screening import sha256_text
+from researchclaw.literature.screening import SCREEN_BATCH_SIZE, sha256_text
 from researchclaw.literature.verify import (
     CitationResult,
     VerificationReport,
@@ -121,11 +121,13 @@ def _candidate(index: int, *, abstract: str | None = None) -> dict[str, Any]:
     }
 
 
-def _screen_response(source_ids: list[str]) -> str:
+def _screen_response(
+    source_ids: list[str], *, batch_id: str = "screen-batch-001"
+) -> str:
     return json.dumps(
         {
             "schema_version": 1,
-            "batch_id": "screen-batch-001",
+            "batch_id": batch_id,
             "decisions": [
                 {
                     "source_identity": source_id,
@@ -186,7 +188,15 @@ def _prepare_stage5(
         run_dir,
         config or _config(),  # type: ignore[arg-type]
         AdapterBundle(),
-        llm=_SequenceLLM([_screen_response(source_ids)]),  # type: ignore[arg-type]
+        llm=_SequenceLLM(
+            [
+                _screen_response(
+                    source_ids[start:start + SCREEN_BATCH_SIZE],
+                    batch_id=f"screen-batch-{start // SCREEN_BATCH_SIZE + 1:03d}",
+                )
+                for start in range(0, len(source_ids), SCREEN_BATCH_SIZE)
+            ]
+        ),  # type: ignore[arg-type]
     )
     assert result.status is StageStatus.DONE
     return [
@@ -615,6 +625,36 @@ def test_stage6_rejects_tampered_screening_report_before_llm(tmp_path: Path) -> 
     assert "screening report" in (result.error or "")
     assert llm.calls == []
     assert not (stage6 / "cards").exists()
+
+
+def test_stage6_replay_rejects_overlong_screening_reason(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    shortlist = _prepare_stage5(run_dir, [_candidate(1)])
+    shortlist[0]["keep_reason"] = "界" * 161
+    shortlist_text = (
+        json.dumps(shortlist[0], ensure_ascii=False, sort_keys=True) + "\n"
+    )
+    shortlist_path = run_dir / "stage-05" / "shortlist.jsonl"
+    shortlist_path.write_text(shortlist_text, encoding="utf-8")
+    report_path = run_dir / "stage-05" / "screening_report.json"
+    report = json.loads(report_path.read_text())
+    report["screening_output_sha256"] = sha256_text(shortlist_text)
+    report_path.write_text(canonical_json_text(report), encoding="utf-8")
+
+    stage6 = run_dir / "stage-06"
+    stage6.mkdir()
+    llm = _SequenceLLM([_card_response(shortlist)])
+    result = _execute_knowledge_extract(
+        stage6,
+        run_dir,
+        _config(),  # type: ignore[arg-type]
+        AdapterBundle(),
+        llm=llm,  # type: ignore[arg-type]
+    )
+
+    assert result.status is StageStatus.FAILED
+    assert "keep_reason exceeds 160 Unicode code points" in (result.error or "")
+    assert llm.calls == []
 
 
 def test_cards_manifest_rejects_reordered_shortlist_identity(tmp_path: Path) -> None:
@@ -1821,6 +1861,30 @@ def test_e9_replays_stage5_prefilter_instead_of_trusting_report_partition(
         )
     assert exc_info.value.code == "literature_screening_replay_failed"
     assert "prefilter partition replay" in exc_info.value.message
+
+
+def test_e9_rejects_stage5_policy_v1_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    _config_value, _planned_keys = _prepare_e9_run(run_dir, monkeypatch)
+    report_path = run_dir / "stage-05" / "screening_report.json"
+    report = json.loads(report_path.read_text())
+    report["screening_policy_version"] = 1
+    report["batch_size"] = 25
+    report_path.write_text(canonical_json_text(report), encoding="utf-8")
+    contract_path = find_stage09_contract(run_dir)
+    assert contract_path is not None
+
+    with pytest.raises(CitationAuditError) as exc_info:
+        audit_citation_evidence(
+            run_dir,
+            contract_path=contract_path,
+            contract=load_contract(contract_path),
+        )
+
+    assert exc_info.value.code == "literature_screening_replay_failed"
+    assert "screening_policy_version" in exc_info.value.message
 
 
 def test_e9_rejects_active_config_contract_scope_divergence(

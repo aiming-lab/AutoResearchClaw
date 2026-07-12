@@ -41,8 +41,10 @@ from researchclaw.literature.citation_policy import (
 )
 from researchclaw.literature.screening import (
     MAX_SCREEN_CANDIDATES,
+    MAX_SCREEN_REASON_CHARS,
     MIN_RELEVANCE_SCORE,
     SCREEN_BATCH_SIZE,
+    SCREENING_POLICY_VERSION,
     ScreeningContractError,
     ScreeningDecision,
     build_screening_report,
@@ -910,7 +912,7 @@ def _execute_literature_screen(
                 if not decision.keep:
                     continue
                 selected = dict(row_by_id[decision.source_identity])
-                selected["screening_policy_version"] = 1
+                selected["screening_policy_version"] = SCREENING_POLICY_VERSION
                 selected["relevance_score"] = decision.relevance_score
                 selected["quality_score"] = decision.quality_score
                 selected["keep_reason"] = decision.reason
@@ -1028,9 +1030,10 @@ def _screen_candidate_batch(
         "- Return exactly one decision for every source_identity below.\n"
         "- Do not return or modify candidate metadata.\n"
         "- decision is exactly keep or reject. Scores are numbers in [0,1].\n"
+        f"- reason is a nonempty screening explanation of at most "
+        f"{MAX_SCREEN_REASON_CHARS} Unicode code points.\n"
         f"- keep requires relevance_score >= {MIN_RELEVANCE_SCORE:.2f} and "
         f"quality_score >= {minimum_quality_score:.2f}; reject otherwise.\n"
-        "- reason is a nonempty screening explanation.\n"
         "- Return ONLY this JSON object shape:\n"
         '{"schema_version":1,"batch_id":"...","decisions":['
         '{"source_identity":"...","decision":"keep|reject",'

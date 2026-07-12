@@ -16,6 +16,8 @@ from researchclaw.literature.citation_identity import (
     validate_registry_artifacts,
 )
 from researchclaw.literature.screening import (
+    MAX_SCREEN_REASON_CHARS,
+    SCREENING_POLICY_VERSION,
     ScreeningContractError,
     normalize_quality_threshold,
     parse_screening_candidates,
@@ -114,7 +116,7 @@ def load_validated_card_inputs(run_dir: Path, config: Any) -> ValidatedCardInput
                 raise EvidenceCardContractError(
                     f"shortlist mutated canonical candidate field: {key}"
                 )
-        if row.get("screening_policy_version") != 1:
+        if row.get("screening_policy_version") != SCREENING_POLICY_VERSION:
             raise EvidenceCardContractError("invalid shortlist screening policy")
         for field in ("screen_rank_score", "relevance_score", "quality_score"):
             value = row.get(field)
@@ -127,7 +129,12 @@ def load_validated_card_inputs(run_dir: Path, config: Any) -> ValidatedCardInput
         overlap = row.get("keyword_overlap")
         if isinstance(overlap, bool) or not isinstance(overlap, int) or overlap < 1:
             raise EvidenceCardContractError("invalid shortlist keyword_overlap")
-        _required_string(row, "keep_reason")
+        keep_reason = _required_string(row, "keep_reason")
+        if len(keep_reason) > MAX_SCREEN_REASON_CHARS:
+            raise EvidenceCardContractError(
+                "shortlist keep_reason exceeds "
+                f"{MAX_SCREEN_REASON_CHARS} Unicode code points"
+            )
 
     try:
         report = parse_screening_report(

@@ -13,14 +13,18 @@ from researchclaw.adapters import AdapterBundle
 from researchclaw.literature.citation_identity import seal_citation_collection
 from researchclaw.literature.screening import (
     MAX_SCREEN_CANDIDATES,
+    MAX_SCREEN_REASON_CHARS,
     SCREEN_BATCH_SIZE,
+    SCREENING_POLICY_VERSION,
     ScreeningContractError,
     build_screening_report,
+    parse_screening_candidates,
     parse_screening_report,
     parse_screening_response,
     sha256_text,
 )
 from researchclaw.pipeline.stage_impls._literature import _execute_literature_screen
+from researchclaw.pipeline.citation_release_audit import _replay_screening_admission
 from researchclaw.pipeline.stages import StageStatus
 
 
@@ -160,6 +164,28 @@ def test_screening_response_rejects_decision_score_contradiction() -> None:
         )
 
 
+@pytest.mark.parametrize(("reason_length", "accepted"), [(160, True), (161, False)])
+def test_screening_response_bounds_reason_by_unicode_code_points(
+    reason_length: int, accepted: bool
+) -> None:
+    payload = json.loads(_response("screen-batch-001", ["doi:10.1000/a"]))
+    payload["decisions"][0]["reason"] = "界" * reason_length
+    if accepted:
+        decisions = parse_screening_response(
+            json.dumps(payload, ensure_ascii=False),
+            expected_batch_id="screen-batch-001",
+            expected_source_ids=["doi:10.1000/a"],
+        )
+        assert len(decisions[0].reason) == MAX_SCREEN_REASON_CHARS
+    else:
+        with pytest.raises(ScreeningContractError, match="Unicode code points"):
+            parse_screening_response(
+                json.dumps(payload, ensure_ascii=False),
+                expected_batch_id="screen-batch-001",
+                expected_source_ids=["doi:10.1000/a"],
+            )
+
+
 def test_stage5_strict_screen_does_not_backfill_to_fifteen(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     ids = _write_candidates(run_dir, [_candidate(1), _candidate(2), _candidate(3)])
@@ -209,6 +235,7 @@ def test_stage5_repairs_one_malformed_batch_once(tmp_path: Path) -> None:
     assert result.status is StageStatus.DONE
     assert len(llm.calls) == 2
     assert "PREVIOUS RESPONSE VIOLATED" in llm.calls[1]
+    assert f"at most {MAX_SCREEN_REASON_CHARS} Unicode" in llm.calls[0]
 
 
 def test_pipeline_validation_can_continue_only_verified_batches_degraded(
@@ -580,6 +607,39 @@ def test_stage5_rejects_invalid_quality_threshold(tmp_path: Path) -> None:
     assert result.artifacts == ()
 
 
+def test_stage5_entry_clears_stale_v1_outputs_before_failure(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    stage5 = run_dir / "stage-05"
+    stage5.mkdir(parents=True)
+    for name in (
+        "shortlist.jsonl",
+        "screening_partial.jsonl",
+        "screening_report.json",
+        "screen_meta.json",
+    ):
+        (stage5 / name).write_text("stale-v1\n", encoding="utf-8")
+
+    result = _execute_literature_screen(
+        stage5,
+        run_dir,
+        _config(),  # type: ignore[arg-type]
+        AdapterBundle(),
+        llm=None,
+    )
+
+    assert result.status is StageStatus.FAILED
+    assert "Stage 4 sealed citation collection is invalid" in (result.error or "")
+    assert not any(
+        (stage5 / name).exists()
+        for name in (
+            "shortlist.jsonl",
+            "screening_partial.jsonl",
+            "screening_report.json",
+            "screen_meta.json",
+        )
+    )
+
+
 def test_stage5_caps_model_screening_without_backfill(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     ids = _write_candidates(
@@ -608,11 +668,64 @@ def test_stage5_caps_model_screening_without_backfill(tmp_path: Path) -> None:
 
     assert result.status is StageStatus.DONE
     report = json.loads((stage_dir / "screening_report.json").read_text())
-    assert report["batch_count"] == MAX_SCREEN_CANDIDATES // SCREEN_BATCH_SIZE
+    expected_batch_count = (
+        MAX_SCREEN_CANDIDATES + SCREEN_BATCH_SIZE - 1
+    ) // SCREEN_BATCH_SIZE
+    assert report["batch_count"] == expected_batch_count
+    assert report["batch_size"] == SCREEN_BATCH_SIZE
+    assert report["screening_policy_version"] == SCREENING_POLICY_VERSION
     assert report["screened_candidate_ids"] == admitted_ids
     assert report["prefilter_rejected_candidate_ids"] == ids[MAX_SCREEN_CANDIDATES:]
     assert report["unscreened_candidate_ids"] == []
-    assert len(llm.calls) == MAX_SCREEN_CANDIDATES // SCREEN_BATCH_SIZE
+    assert len(llm.calls) == expected_batch_count
+    assert admitted_ids[7] in llm.calls[0]
+    assert admitted_ids[8] not in llm.calls[0]
+    assert admitted_ids[8] in llm.calls[1]
+    assert admitted_ids[143] in llm.calls[17]
+    assert admitted_ids[144] not in llm.calls[17]
+    assert admitted_ids[144] in llm.calls[18]
+    candidates = parse_screening_candidates(
+        (run_dir / "stage-04" / "candidates.jsonl").read_text(encoding="utf-8")
+    )
+    _replay_screening_admission(_config(), candidates, report)  # type: ignore[arg-type]
+
+
+def test_screening_report_rejects_previous_policy_version() -> None:
+    candidates_text = '{"source_identity":"doi:10.1000/a"}\n'
+    report = build_screening_report(
+        candidates_sha256=sha256_text(candidates_text),
+        registry_sha256=sha256_text("registry"),
+        references_sha256=sha256_text("references"),
+        screening_output_path="stage-05/shortlist.jsonl",
+        screening_output_sha256=sha256_text(candidates_text),
+        minimum_quality_score=0.6,
+        claim_scope="pipeline_validation",
+        candidate_ids=["doi:10.1000/a"],
+        prefilter_rejected_ids=[],
+        screened_ids=["doi:10.1000/a"],
+        selected_ids=["doi:10.1000/a"],
+        semantic_duplicate_ids=[],
+        unscreened_ids=[],
+        batch_count=1,
+        failed_batches=[],
+        degraded=False,
+        degradation_codes=[],
+    )
+    assert report["screening_policy_version"] == SCREENING_POLICY_VERSION
+    report["screening_policy_version"] = 1
+    with pytest.raises(ScreeningContractError, match="screening_policy_version"):
+        parse_screening_report(
+            json.dumps(report),
+            candidates_text_sha256=sha256_text(candidates_text),
+            registry_text_sha256=sha256_text("registry"),
+            references_text_sha256=sha256_text("references"),
+            expected_screening_output_path="stage-05/shortlist.jsonl",
+            screening_output_text_sha256=sha256_text(candidates_text),
+            expected_minimum_quality_score=0.6,
+            expected_claim_scope="pipeline_validation",
+            expected_candidate_ids=["doi:10.1000/a"],
+            expected_selected_ids=["doi:10.1000/a"],
+        )
 
 
 def test_screening_report_rejects_hash_mutation() -> None:

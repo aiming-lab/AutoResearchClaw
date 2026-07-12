@@ -11,8 +11,9 @@ from typing import Any, Iterable, Mapping
 
 
 SCREENING_SCHEMA_VERSION = 1
-SCREENING_POLICY_VERSION = 1
-SCREEN_BATCH_SIZE = 25
+SCREENING_POLICY_VERSION = 2
+SCREEN_BATCH_SIZE = 8
+MAX_SCREEN_REASON_CHARS = 160
 MAX_SCREEN_CANDIDATES = 150
 MIN_RELEVANCE_SCORE = 0.5
 
@@ -92,13 +93,18 @@ def parse_screening_response(
             raise ScreeningContractError(
                 "screening decision contradicts configured score thresholds"
             )
+        reason = _required_string(raw, "reason")
+        if len(reason) > MAX_SCREEN_REASON_CHARS:
+            raise ScreeningContractError(
+                f"reason exceeds {MAX_SCREEN_REASON_CHARS} Unicode code points"
+            )
         decisions.append(
             ScreeningDecision(
                 source_identity=source_identity,
                 decision=decision,
                 relevance_score=relevance_score,
                 quality_score=quality_score,
-                reason=_required_string(raw, "reason"),
+                reason=reason,
             )
         )
 
