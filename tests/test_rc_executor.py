@@ -2609,26 +2609,6 @@ class TestRemoveBibtexEntries:
         assert rc_executor._remove_bibtex_entries("", {"key"}) == ""
 
 
-class TestRemoveCitationsFromText:
-    """Tests for _remove_citations_from_text() helper."""
-
-    def test_removes_latex_cite(self) -> None:
-        text = r"As shown in \cite{venus2024}, the results are..."
-        result = rc_executor._remove_citations_from_text(text, {"venus2024"})
-        assert "venus2024" not in result
-        assert "results are" in result
-
-    def test_removes_markdown_cite(self) -> None:
-        text = "Prior work [venus2024] explored this topic."
-        result = rc_executor._remove_citations_from_text(text, {"venus2024"})
-        assert "venus2024" not in result
-
-    def test_cleans_multi_cite_comma(self) -> None:
-        text = r"\cite{good2024,venus2024}"
-        result = rc_executor._remove_citations_from_text(text, {"venus2024"})
-        assert r"\cite{good2024}" in result
-
-
 class TestCollectRawExperimentMetrics:
     """Tests for _collect_raw_experiment_metrics() helper."""
 

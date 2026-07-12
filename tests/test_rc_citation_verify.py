@@ -12,7 +12,6 @@ from researchclaw.literature.verify import (
     CitationResult,
     VerificationReport,
     VerifyStatus,
-    annotate_paper_hallucinations,
     filter_verified_bibtex,
     parse_bibtex_entries,
     title_similarity,
@@ -459,91 +458,6 @@ class TestFilterVerifiedBibtex:
     def test_empty_bib(self) -> None:
         report = VerificationReport()
         assert filter_verified_bibtex("", report) == ""
-
-
-class TestAnnotatePaperHallucinations:
-    def test_latex_citations(self) -> None:
-        paper = r"As shown in \cite{vaswani2017attention} and \cite{fakepaper2025hallucinated}."
-        report = VerificationReport(
-            results=[
-                CitationResult(
-                    cite_key="vaswani2017attention",
-                    title="",
-                    status=VerifyStatus.VERIFIED,
-                    confidence=1.0,
-                    method="arxiv_id",
-                ),
-                CitationResult(
-                    cite_key="fakepaper2025hallucinated",
-                    title="",
-                    status=VerifyStatus.HALLUCINATED,
-                    confidence=0.9,
-                    method="title_search",
-                ),
-            ],
-        )
-        result = annotate_paper_hallucinations(paper, report)
-        assert r"\cite{vaswani2017attention}" in result
-        # Hallucinated citations are removed, not annotated
-        assert "fakepaper2025hallucinated" not in result
-
-    def test_markdown_citations(self) -> None:
-        paper = "As shown in [vaswani2017attention] and [fakepaper2025hallucinated]."
-        report = VerificationReport(
-            results=[
-                CitationResult(
-                    cite_key="vaswani2017attention",
-                    title="",
-                    status=VerifyStatus.VERIFIED,
-                    confidence=1.0,
-                    method="arxiv_id",
-                ),
-                CitationResult(
-                    cite_key="fakepaper2025hallucinated",
-                    title="",
-                    status=VerifyStatus.HALLUCINATED,
-                    confidence=0.9,
-                    method="title_search",
-                ),
-            ],
-        )
-        result = annotate_paper_hallucinations(paper, report)
-        assert "[vaswani2017attention]" in result
-        # Hallucinated citations are removed, not annotated
-        assert "fakepaper2025hallucinated" not in result
-
-    def test_suspicious_annotation(self) -> None:
-        """Suspicious citations are left unchanged (not removed)."""
-        paper = r"\cite{devlin2019bert}"
-        report = VerificationReport(
-            results=[
-                CitationResult(
-                    cite_key="devlin2019bert",
-                    title="",
-                    status=VerifyStatus.SUSPICIOUS,
-                    confidence=0.6,
-                    method="doi",
-                ),
-            ],
-        )
-        result = annotate_paper_hallucinations(paper, report)
-        assert r"\cite{devlin2019bert}" in result
-
-    def test_no_modifications_all_verified(self) -> None:
-        paper = r"See \cite{vaswani2017attention}."
-        report = VerificationReport(
-            results=[
-                CitationResult(
-                    cite_key="vaswani2017attention",
-                    title="",
-                    status=VerifyStatus.VERIFIED,
-                    confidence=1.0,
-                    method="arxiv_id",
-                ),
-            ],
-        )
-        result = annotate_paper_hallucinations(paper, report)
-        assert result == paper
 
 
 class TestCitationResultSerialization:

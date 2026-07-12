@@ -48,14 +48,13 @@ The failure exposed a longer chain:
 - Stage 17 currently pre-verifies the complete Stage 4 bibliography before
   drafting. In the observed run, that path attempted 843 entries and timed out
   with 629 entries marked SKIPPED;
-- Stage 23 currently scores paper-level topical relevance from title and topic,
+- before E7, Stage 23 scored paper-level topical relevance from title and topic,
   not claim-specific support;
-- Stage 23 currently removes citation markers for low-relevance keys from the
-  manuscript. That can leave the surrounding claim unsupported and directly
-  conflicts with the new no-marker-only-repair invariant;
-- Stage 23 has a separate full-bibliography verification risk. Both the Stage
-  17 pre-verification path and Stage 23 must converge on the bounded set of
-  actual planned/cited keys rather than the complete candidate bibliography.
+- before E7, Stage 23 removed citation markers for low-relevance keys from the
+  manuscript. That could leave the surrounding claim unsupported and directly
+  conflicted with the no-marker-only-repair invariant;
+- before E7, Stage 23 verified the full bibliography. E7 bounds verification
+  to the final manuscript's actual planned/cited keys.
 
 This is primarily a workflow and gate-placement failure, not a Stage 19 bug.
 Stage 19 remains fail-closed and must not be loosened.
@@ -938,8 +937,19 @@ research-release run.
 
 Stage 23 reports invalid citations and fails the relevant release path. It must
 not silently delete a marker from the manuscript while retaining the claim.
-E7 explicitly removes the current low-relevance marker-deletion behavior; a
+E7 explicitly removes the former low-relevance marker-deletion behavior; a
 verification report is not a text-repair authority.
+
+The canonical audit input is exactly `stage-22/paper_final.md`; prior-artifact
+search and same-name shadow files are forbidden. Stage 23 cleans its owned
+outputs before reading that input. Its verified-paper artifact is a byte-exact
+copy of the Stage 22 manuscript, including on failure, so the report cannot hide
+an invalid citation by mutating the text.
+
+`pipeline_validation` may complete as degraded when verification is suspicious,
+skipped, unscored, topically low-relevance, or the bounded relevance response is
+malformed. Hallucinated citations fail every scope. `exploratory` and
+`research_release` fail on every incomplete or invalid verification condition.
 
 ### 8.9 Stage 24: support and dataset-origin closure
 
@@ -1258,6 +1268,9 @@ shadow-bibliography consumer from becoming a second authority.
 - verify actual cited keys only;
 - no permissive unscored default for release;
 - no silent citation deletion;
+- bind the audit to canonical `stage-22/paper_final.md` and clear stale outputs;
+- require exact verifier-result and relevance-response key/count closure;
+- permit incomplete verification only as `pipeline_validation` degradation;
 - separate existence/topic result from support;
 - land verification/gate changes in an independent gate commit.
 
