@@ -3348,6 +3348,8 @@ class TestDataIntegrityBlock:
         stale_invalid.write_text("stale invalid", encoding="utf-8")
         stale_generation = stage_dir / "section_generation_report.json"
         stale_generation.write_text("{}", encoding="utf-8")
+        stale_fact_diagnostic = stage_dir / "experiment_fact_closure_invalid.json"
+        stale_fact_diagnostic.write_text("{}", encoding="utf-8")
 
         llm = FakeLLMClient("should not be called")
         result = rc_executor._execute_paper_draft(
@@ -3363,6 +3365,7 @@ class TestDataIntegrityBlock:
         assert not stale_report.exists()
         assert not stale_invalid.exists()
         assert not stale_generation.exists()
+        assert not stale_fact_diagnostic.exists()
         assert meta.get("is_literature_first_topic") is False
         # LLM should NOT have been called
         assert len(llm.calls) == 0
@@ -3428,8 +3431,11 @@ class TestDataIntegrityBlock:
         block = _paper_writing._collect_grounded_metric_whitelist(run_dir)
 
         assert "GROUNDED METRIC VALUE WHITELIST" in block
-        assert "stage-12/runs/results.json :: metrics.detection_f1 = 0.4753" in block
-        assert "stage-12/runs/results.json :: metrics.fpr = 0.0292" in block
+        assert (
+            "stage-12/runs/results.json :: metrics.detection_f1 = 0.4753327669"
+            in block
+        )
+        assert "stage-12/runs/results.json :: metrics.fpr = 0.0291666667" in block
         assert "Do NOT introduce any other decimal metric values" in block
 
     def test_paper_draft_injects_scaffold_results_into_first_prompt(
@@ -3641,6 +3647,330 @@ class TestDataIntegrityBlock:
             "citation_closure_report.json",
         ):
             assert not (stage_dir / name).exists()
+
+    def test_paper_draft_fact_regeneration_closes_before_publish(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "evaluator_owner": "scaffold",
+                    "metrics": {"detection_f1": 0.4753327669},
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-17"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        invalid_report = {
+            "paper_sha256": "a" * 64,
+            "experiment_contract_path": "stage-09/experiment_contract.yaml",
+            "experiment_contract_sha256": "b" * 64,
+            "dataset_origin": "synthetic",
+            "grounded_numeric_values": [0.4753327669],
+            "manuscript_numeric_values": [0.4753327669, 0.47],
+            "unknown_numeric_values": [0.47],
+            "dataset_claim_violations": ["SPEC CPU2006"],
+            "valid": False,
+        }
+        valid_report = {**invalid_report, "paper_sha256": "c" * 64}
+        valid_report.update(
+            manuscript_numeric_values=[0.4753327669],
+            unknown_numeric_values=[],
+            dataset_claim_violations=[],
+            valid=True,
+        )
+        reports = iter((invalid_report, valid_report))
+        monkeypatch.setattr(
+            _paper_writing,
+            "build_experiment_fact_closure_report",
+            lambda *_args, **_kwargs: next(reports),
+        )
+
+        final = (
+            "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n"
+            "## Introduction\n\nI.\n\n## Related Work\n\nR.\n\n"
+            "## Method\n\nM.\n\n## Experiments\n\nE.\n\n"
+            "## Results\n\nF1 was 0.4753327669.\n\n## Discussion\n\nD.\n\n"
+            "## Limitations\n\nL.\n\n## Conclusion\n\nC."
+        )
+
+        class FactSequenceLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.responses = iter(
+                    (
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
+                        "## Method\n\nM.\n\n## Experiments\n\nE.",
+                        "## Results\n\nF1 was 0.4753327669; an unsupported summary said 0.47.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                        final,
+                    )
+                )
+
+            def chat(self, messages: list[dict[str, str]], **kwargs: object):
+                self.response_text = next(self.responses)
+                return super().chat(messages, **kwargs)
+
+        llm = FactSequenceLLM()
+        result = rc_executor._execute_paper_draft(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.DONE
+        assert len(llm.calls) == 4
+        assert (stage_dir / "paper_draft.md").read_text(encoding="utf-8") == final
+        assert not (stage_dir / "experiment_fact_closure_invalid.json").exists()
+
+    def test_fact_regeneration_cannot_add_grounded_numeric_authority(self) -> None:
+        before = {
+            "manuscript_numeric_values": [0.64],
+            "unknown_numeric_values": [0.64],
+        }
+        after = {
+            "manuscript_numeric_values": [0.639877],
+            "unknown_numeric_values": [],
+        }
+        assert _paper_writing._fact_regeneration_added_numeric_authority(
+            before, after
+        )
+
+    def test_paper_draft_fact_regeneration_fails_once_with_diagnostic(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "evaluator_owner": "scaffold",
+                    "metrics": {"detection_f1": 0.4753327669},
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-17"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        invalid_report = {
+            "paper_sha256": "a" * 64,
+            "experiment_contract_path": "stage-09/experiment_contract.yaml",
+            "experiment_contract_sha256": "b" * 64,
+            "dataset_origin": "synthetic",
+            "grounded_numeric_values": [0.4753327669],
+            "manuscript_numeric_values": [0.47],
+            "unknown_numeric_values": [0.47],
+            "dataset_claim_violations": [],
+            "valid": False,
+        }
+        monkeypatch.setattr(
+            _paper_writing,
+            "build_experiment_fact_closure_report",
+            lambda *_args, **_kwargs: invalid_report,
+        )
+
+        class FactFailureLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.responses = iter(
+                    (
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
+                        "## Method\n\nM.\n\n## Experiments\n\nE.",
+                        "## Results\n\nF1 was 0.47.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.\n\n## Method\n\nM.\n\n## Experiments\n\nE.\n\n## Results\n\nF1 was 0.47.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                    )
+                )
+
+            def chat(self, messages: list[dict[str, str]], **kwargs: object):
+                self.response_text = next(self.responses)
+                return super().chat(messages, **kwargs)
+
+        llm = FactFailureLLM()
+        result = rc_executor._execute_paper_draft(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.FAILED
+        assert len(llm.calls) == 4
+        assert not (stage_dir / "paper_draft.md").exists()
+        diagnostic = json.loads(
+            (stage_dir / "experiment_fact_closure_invalid.json").read_text()
+        )
+        assert "valid" not in diagnostic
+        assert diagnostic["unknown_numeric_values"] == [0.47]
+
+    def test_paper_draft_fact_regeneration_reruns_structure_gate(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "evaluator_owner": "scaffold",
+                    "metrics": {"detection_f1": 0.4753327669},
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-17"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        invalid_report = {
+            "paper_sha256": "a" * 64,
+            "experiment_contract_path": "stage-09/experiment_contract.yaml",
+            "experiment_contract_sha256": "b" * 64,
+            "dataset_origin": "synthetic",
+            "grounded_numeric_values": [0.4753327669],
+            "manuscript_numeric_values": [0.47],
+            "unknown_numeric_values": [0.47],
+            "dataset_claim_violations": [],
+            "valid": False,
+        }
+        calls = 0
+
+        def _build_once(*_args: object, **_kwargs: object) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            return invalid_report
+
+        monkeypatch.setattr(
+            _paper_writing, "build_experiment_fact_closure_report", _build_once
+        )
+
+        class BrokenStructureLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.responses = iter(
+                    (
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
+                        "## Method\n\nM.\n\n## Experiments\n\nE.",
+                        "## Results\n\nF1 was 0.47.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Abstract\n\nDuplicate.",
+                    )
+                )
+
+            def chat(self, messages: list[dict[str, str]], **kwargs: object):
+                self.response_text = next(self.responses)
+                return super().chat(messages, **kwargs)
+
+        result = rc_executor._execute_paper_draft(
+            stage_dir, run_dir, rc_config, adapters, llm=BrokenStructureLLM()
+        )
+
+        assert result.status == StageStatus.FAILED
+        assert calls == 1
+        assert not (stage_dir / "paper_draft.md").exists()
+        structure = json.loads(
+            (stage_dir / "paper_structure_report.json").read_text()
+        )
+        assert structure["valid"] is False
+        assert (stage_dir / "experiment_fact_closure_invalid.json").exists()
+
+    def test_paper_draft_fact_regeneration_reruns_citation_gate(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from researchclaw.literature.citation_plan import CitationPlanContractError
+
+        _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps(
+                {
+                    "evaluator_owner": "scaffold",
+                    "metrics": {"detection_f1": 0.4753327669},
+                }
+            ),
+            encoding="utf-8",
+        )
+        stage_dir = run_dir / "stage-17"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        invalid_report = {
+            "paper_sha256": "a" * 64,
+            "experiment_contract_path": "stage-09/experiment_contract.yaml",
+            "experiment_contract_sha256": "b" * 64,
+            "dataset_origin": "synthetic",
+            "grounded_numeric_values": [0.4753327669],
+            "manuscript_numeric_values": [0.4753327669, 0.47],
+            "unknown_numeric_values": [0.47],
+            "dataset_claim_violations": [],
+            "valid": False,
+        }
+        valid_report = {**invalid_report, "paper_sha256": "c" * 64}
+        valid_report.update(
+            manuscript_numeric_values=[0.4753327669],
+            unknown_numeric_values=[],
+            valid=True,
+        )
+        reports = iter((invalid_report, valid_report))
+        monkeypatch.setattr(
+            _paper_writing,
+            "build_experiment_fact_closure_report",
+            lambda *_args, **_kwargs: next(reports),
+        )
+        citation_checked = False
+
+        def _build_citation(*_args: object, **kwargs: object) -> dict[str, bool]:
+            nonlocal citation_checked
+            citation_checked = True
+            assert "[unplanned2024]" in str(kwargs["paper_text"])
+            return {"valid": False}
+
+        monkeypatch.setattr(
+            _paper_writing, "build_citation_closure_report", _build_citation
+        )
+        monkeypatch.setattr(
+            _paper_writing,
+            "validate_citation_closure_report",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                CitationPlanContractError("citation drift")
+            ),
+        )
+
+        class CitationDriftLLM(FakeLLMClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.responses = iter(
+                    (
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
+                        "## Method\n\nM.\n\n## Experiments\n\nE.",
+                        "## Results\n\nF1 was 0.4753327669 and 0.47.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.\n\n## Method\n\nM.\n\n## Experiments\n\nE.\n\n## Results\n\nF1 was 0.4753327669 [unplanned2024].\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                    )
+                )
+
+            def chat(self, messages: list[dict[str, str]], **kwargs: object):
+                self.response_text = next(self.responses)
+                return super().chat(messages, **kwargs)
+
+        result = rc_executor._execute_paper_draft(
+            stage_dir, run_dir, rc_config, adapters, llm=CitationDriftLLM()
+        )
+
+        assert result.status == StageStatus.FAILED
+        assert citation_checked is True
+        assert "citation drift" in (result.error or "")
+        assert not (stage_dir / "paper_draft.md").exists()
+        assert not (stage_dir / "citation_closure_report.json").exists()
 
 
 # ── R4-3: Conference-Grade Title Guidelines Tests ────────────────────

@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,7 @@ SECTION OUTPUT CONTRACT (OVERRIDES ANY CONFLICTING FORMAT INSTRUCTIONS):
 
 _SECTION_GENERATION_SCHEMA_VERSION = 1
 _SECTION_OWNERSHIP_CONTRACT_VERSION = 1
+_EXPERIMENT_FACT_INVALID_SCHEMA_VERSION = 1
 _RESERVED_MAJOR_SECTION_NAMES = frozenset(
     {
         "abstract",
@@ -155,6 +157,86 @@ def _persist_section_generation_report(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_experiment_fact_invalid(
+    stage_dir: Path, report: dict[str, Any]
+) -> None:
+    """Persist a diagnostic-only projection of a failed fact closure."""
+    payload = {
+        "schema_version": _EXPERIMENT_FACT_INVALID_SCHEMA_VERSION,
+        "paper_sha256": report["paper_sha256"],
+        "experiment_contract_path": report["experiment_contract_path"],
+        "experiment_contract_sha256": report["experiment_contract_sha256"],
+        "dataset_origin": report["dataset_origin"],
+        "grounded_numeric_values": report["grounded_numeric_values"],
+        "manuscript_numeric_values": report["manuscript_numeric_values"],
+        "unknown_numeric_values": report["unknown_numeric_values"],
+        "dataset_claim_violations": report["dataset_claim_violations"],
+    }
+    (stage_dir / "experiment_fact_closure_invalid.json").write_text(
+        canonical_json_text(payload), encoding="utf-8"
+    )
+
+
+def _regenerate_draft_for_experiment_facts(
+    llm: LLMClient,
+    *,
+    draft: str,
+    report: dict[str, Any],
+) -> str:
+    """Run the single bounded rewrite allowed for deterministic fact failures."""
+    grounded = json.dumps(
+        report["grounded_numeric_values"], ensure_ascii=False, separators=(",", ":")
+    )
+    unknown = json.dumps(
+        report["unknown_numeric_values"], ensure_ascii=False, separators=(",", ":")
+    )
+    contradictions = json.dumps(
+        report["dataset_claim_violations"], ensure_ascii=False, separators=(",", ":")
+    )
+    prompt = f"""Revise the complete scientific manuscript below exactly once.
+
+This is a constrained experiment-fact correction, not a new drafting task.
+- Preserve every existing Markdown heading and its order exactly.
+- Preserve every citation marker exactly and in its current top-level section.
+- The dataset origin is `{report['dataset_origin']}`.
+- Canonical numeric experiment literals already present in the manuscript are: {grounded}
+- Unsupported numeric literals detected by deterministic validation: {unknown}
+- Dataset-origin contradictions detected by deterministic validation: {contradictions}
+- Remove unsupported setup details and unsupported derived statistics.
+- Do not add or replace any numeric literal. Preserve only already-supported numeric
+  literals, without moving them to a different claim.
+- Do not round, convert, derive, average, or otherwise transform canonical values.
+- Do not invent dataset names, workloads, hardware, sample counts, thresholds, latency,
+  uncertainty, statistical tests, baselines, or experimental procedures.
+- If a quantitative sentence cannot be supported using a canonical literal exactly as
+  listed, rewrite it qualitatively or delete the complete unsupported claim.
+- Output only the complete revised Markdown manuscript. No commentary or fences.
+
+## Manuscript
+{draft}
+"""
+    response = _chat_with_prompt(
+        llm,
+        "You are a constrained scientific fact editor. Deterministic validation owns truth.",
+        prompt,
+        max_tokens=24000,
+        retries=1,
+    )
+    return response.content.strip()
+
+
+def _fact_regeneration_added_numeric_authority(
+    before: dict[str, Any], after: dict[str, Any]
+) -> bool:
+    """Return True if a rewrite adds numeric occurrences it did not already own."""
+    unknown = Counter(float(value) for value in before["unknown_numeric_values"])
+    retained = Counter(float(value) for value in before["manuscript_numeric_values"])
+    retained.subtract(unknown)
+    allowed = Counter({value: count for value, count in retained.items() if count > 0})
+    observed = Counter(float(value) for value in after["manuscript_numeric_values"])
+    return any(count > allowed[value] for value, count in observed.items())
 
 
 def _validate_or_regenerate_paper_part(
@@ -703,7 +785,8 @@ def _collect_grounded_metric_whitelist(run_dir: Path) -> str:
         "If a desired number is not listed, write an em dash (---) or omit the numeric claim.",
     ]
     for source, key, value in entries[:160]:
-        lines.append(f"- {source} :: {key} = {value:.4f}")
+        literal = json.dumps(value, allow_nan=False, separators=(",", ":"))
+        lines.append(f"- {source} :: {key} = {literal}")
     return "\n".join(lines) + "\n"
 
 
@@ -1833,6 +1916,7 @@ def _execute_paper_draft(
         "section_generation_report.json",
         "citation_closure_report.json",
         "experiment_fact_closure_report.json",
+        "experiment_fact_closure_invalid.json",
         "draft_quality.json",
         "references_preverified.bib",
     ):
@@ -2811,6 +2895,46 @@ Generated: {_utcnow_iso()}
         experiment_report = build_experiment_fact_closure_report(
             run_dir, paper_text=final_draft
         )
+        if not experiment_report["valid"]:
+            initial_experiment_report = experiment_report
+            _write_experiment_fact_invalid(stage_dir, experiment_report)
+            if llm is None:
+                raise ExperimentFactClosureError(
+                    "experiment facts are invalid and no regeneration model is available"
+                )
+            try:
+                final_draft = _regenerate_draft_for_experiment_facts(
+                    llm, draft=final_draft, report=experiment_report
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise ExperimentFactClosureError(
+                    f"bounded experiment-fact regeneration failed: {exc}"
+                ) from exc
+            structure_report = _validate_stage17_manuscript_structure(
+                final_draft, stage_dir=stage_dir
+            )
+            if not structure_report["valid"]:
+                raise ExperimentFactClosureError(
+                    "bounded experiment-fact regeneration broke manuscript structure"
+                )
+            experiment_report = build_experiment_fact_closure_report(
+                run_dir, paper_text=final_draft
+            )
+            if _fact_regeneration_added_numeric_authority(
+                initial_experiment_report, experiment_report
+            ):
+                _write_experiment_fact_invalid(stage_dir, experiment_report)
+                raise ExperimentFactClosureError(
+                    "bounded experiment-fact regeneration added numeric authority"
+                )
+            if not experiment_report["valid"]:
+                _write_experiment_fact_invalid(stage_dir, experiment_report)
+                raise ExperimentFactClosureError(
+                    "bounded experiment-fact regeneration did not close experiment facts"
+                )
+            (stage_dir / "experiment_fact_closure_invalid.json").unlink(
+                missing_ok=True
+            )
         experiment_report_text = canonical_json_text(experiment_report)
         (stage_dir / "experiment_fact_closure_report.json").write_text(
             experiment_report_text, encoding="utf-8"
@@ -2845,15 +2969,25 @@ Generated: {_utcnow_iso()}
             "citation_closure_report.json",
         ):
             (stage_dir / failed_name).unlink(missing_ok=True)
+        failure_artifacts = [
+            "paper_draft_invalid.md",
+            "paper_structure_report.json",
+            "section_generation_report.json",
+        ]
+        failure_refs = [
+            "stage-17/paper_draft_invalid.md",
+            "stage-17/paper_structure_report.json",
+            "stage-17/section_generation_report.json",
+        ]
+        if (stage_dir / "experiment_fact_closure_invalid.json").is_file():
+            failure_artifacts.append("experiment_fact_closure_invalid.json")
+            failure_refs.append("stage-17/experiment_fact_closure_invalid.json")
         return StageResult(
             stage=Stage.PAPER_DRAFT,
             status=StageStatus.FAILED,
-            artifacts=(
-                "paper_draft_invalid.md",
-                "paper_structure_report.json",
-                "section_generation_report.json",
-            ),
+            artifacts=tuple(failure_artifacts),
             error=f"Paper draft closure failed: {exc}",
+            evidence_refs=tuple(failure_refs),
             decision="retry",
         )
 

@@ -988,6 +988,14 @@ def test_experiment_fact_closure_binds_metrics_and_synthetic_origin(
     assert report["valid"] is False
     assert report["dataset_claim_violations"]
 
+    named_public_benchmark = paper.replace(
+        "The measured", "Using SPEC CPU2006 traces, the measured"
+    )
+    report = build_experiment_fact_closure_report(
+        run_dir, paper_text=named_public_benchmark
+    )
+    assert "SPEC CPU2006" in report["dataset_claim_violations"]
+
 
 def test_experiment_fact_closure_rejects_unknown_metric_and_duplicate_json() -> None:
     payload = {
@@ -1052,6 +1060,32 @@ def test_experiment_fact_closure_percent_normalization_is_token_explicit(
         run_dir, paper_text="## Results\n\nThe rate was 50.0.\n"
     )
     assert unmarked["unknown_numeric_values"] == [50.0]
+
+
+def test_experiment_fact_closure_rejects_display_rounding_v1(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    config = _real_config_snapshot(run_dir)
+    stage9 = run_dir / "stage-09"
+    stage9.mkdir()
+    dump_contract(derive_contract(config, None), stage9 / "experiment_contract.yaml")
+    metric_path = run_dir / "stage-12" / "runs" / "results.json"
+    metric_path.parent.mkdir(parents=True)
+    metric_path.write_text(
+        json.dumps({"metrics": {"f1": 0.639877, "std": 0.010216}}),
+        encoding="utf-8",
+    )
+    rounded = build_experiment_fact_closure_report(
+        run_dir,
+        paper_text="## Results\n\nF1 was 0.64 with standard deviation 0.0102.\n",
+    )
+    assert rounded["unknown_numeric_values"] == [0.64, 0.0102]
+    exact = build_experiment_fact_closure_report(
+        run_dir,
+        paper_text="## Results\n\nF1 was 0.639877 with standard deviation 0.010216.\n",
+    )
+    assert exact["valid"] is True
 
 
 def test_experiment_fact_closure_ignores_shadow_metric_stage_and_flags_hardware_claim(

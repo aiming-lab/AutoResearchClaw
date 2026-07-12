@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from researchclaw.experiment_runtime.contract import find_stage09_contract, load_contract
-from researchclaw.pipeline.release_artifacts import numbers_match
 from researchclaw.pipeline.manuscript_sections import (
     ManuscriptStructureError,
     parse_manuscript,
@@ -42,6 +41,8 @@ _SYNTHETIC_CONTRADICTIONS = (
     re.compile(r"\bcaptured\s+on\s+(?:our|a|the)\s+(?:fpga|prototype|physical)\b", re.I),
     re.compile(r"\bcollected\s+[^.\n]{0,60}\bfrom\s+(?:a|an|the)?\s*physical\b", re.I),
     re.compile(r"\bpublic\s+(?:hpc\s+)?benchmark\s+suite\b", re.I),
+    re.compile(r"\bpublic\s+benchmark(?:s|\s+dataset|\s+suite)?\b", re.I),
+    re.compile(r"\bSPEC\s*CPU\s*2006\b", re.I),
 )
 _PUBLIC_CONTRADICTIONS = (
     re.compile(r"\b(?:our|this)\s+(?:fpga|cpu|gpu|prototype|device)\s+(?:measurements?|traces?)\b", re.I),
@@ -283,9 +284,9 @@ def _extract_experiment_metric_literals(text: str) -> list[tuple[float, bool]]:
 def _numeric_equivalent(
     value: float, expected: float, *, is_percent: bool
 ) -> bool:
-    if numbers_match(value, expected):
+    if value == expected:
         return True
-    return is_percent and numbers_match(value * 100.0, expected)
+    return is_percent and value * 100.0 == expected
 
 
 def _source_record(run_dir: Path, path: Path) -> dict[str, str]:

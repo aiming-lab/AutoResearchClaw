@@ -614,6 +614,28 @@ records before/after hashes and actions, and then reruns citation closure, plan
 consistency, manuscript structure, and experiment-fact closure. A second
 failure is final.
 
+Stage 17 also permits one bounded experiment-fact regeneration after the
+manuscript structure gate and before publishing the canonical draft. The
+deterministic experiment-fact closure remains authoritative: the model receives
+only the canonical numeric literals and the concrete violations, and the
+regenerated manuscript must pass manuscript structure, experiment-fact closure,
+and citation closure again. It may only remove unsupported numeric occurrences;
+it cannot add a canonical value that was not already present or increase the
+occurrence count of an existing value. This prevents a model from assigning a
+valid metric number to a different unsupported claim. A second fact failure is final. A failed attempt may
+write `stage-17/experiment_fact_closure_invalid.json` as a diagnostic-only
+projection; no gate, E9 replay, or release checker may consume that file, and
+the canonical draft and canonical closure reports must remain absent.
+
+Version 1 numeric closure does not prove arbitrary non-numeric experimental
+claims. It deterministically rejects explicit dataset-origin contradictions,
+including named public benchmark claims in a synthetic run, but method names,
+setup prose, and qualitative evaluation claims require a future hash-bound
+`experiment_fact_registry`. That registry, along with a versioned display-value
+allowlist for legitimate rounded presentation values, is a separate milestone.
+Until then the writer must use the provided canonical numeric literals without
+rounding, and unsupported setup details must be removed rather than inferred.
+
 ### 7.8 Full-text acquisition request and history
 
 v2 writes one immutable request per acquisition round:
