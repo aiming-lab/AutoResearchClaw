@@ -54,7 +54,7 @@ CONTRACTS: dict[Stage, StageContract] = {
     Stage.LITERATURE_COLLECT: StageContract(
         stage=Stage.LITERATURE_COLLECT,
         input_files=("search_plan.yaml",),
-        output_files=("candidates.jsonl",),
+        output_files=("candidates.jsonl", "references.bib", "cite_key_registry.json"),
         dod=">=N candidate papers collected from specified sources",
         error_code="E04_COLLECT_EMPTY",
         max_retries=2,

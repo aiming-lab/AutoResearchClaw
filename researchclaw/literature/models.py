@@ -11,6 +11,12 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from researchclaw.literature.citation_identity import (
+    CITE_KEY_VERSION,
+    base_cite_key_for_candidate,
+    source_identity_for_candidate,
+)
+
 
 @dataclass(frozen=True)
 class Author:
@@ -60,16 +66,12 @@ class Paper:
 
         Example: ``smith2024transformer``
         """
-        last = self.authors[0].last_name() if self.authors else "anon"
-        yr = str(self.year) if self.year else "0000"
-        # First meaningful noun-ish word from title (>3 chars, alpha only)
-        kw = ""
-        for word in self.title.split():
-            cleaned = re.sub(r"[^a-zA-Z]", "", word).lower()
-            if len(cleaned) > 3 and cleaned not in _STOPWORDS:
-                kw = cleaned
-                break
-        return f"{last}{yr}{kw}"
+        return base_cite_key_for_candidate(self._identity_dict())
+
+    @property
+    def source_identity(self) -> str:
+        """Stable source identity used by the collection-level registry."""
+        return source_identity_for_candidate(self._identity_dict())
 
     # ------------------------------------------------------------------
     # BibTeX generation
@@ -171,45 +173,19 @@ class Paper:
             "arxiv_id": self.arxiv_id,
             "url": self.url,
             "source": self.source,
+            "source_identity": self.source_identity,
+            "cite_key_version": CITE_KEY_VERSION,
             "cite_key": self.cite_key,
         }
 
-
-# Common English stopwords to skip when picking a keyword for cite_key
-_STOPWORDS = frozenset(
-    {
-        "the",
-        "and",
-        "for",
-        "with",
-        "from",
-        "that",
-        "this",
-        "into",
-        "over",
-        "upon",
-        "about",
-        "through",
-        "using",
-        "based",
-        "towards",
-        "toward",
-        "between",
-        "under",
-        "more",
-        "than",
-        "when",
-        "what",
-        "which",
-        "where",
-        "does",
-        "have",
-        "been",
-        "some",
-        "each",
-        "also",
-        "much",
-        "very",
-        "learning",  # too generic for ML papers
-    }
-)
+    def _identity_dict(self) -> dict[str, object]:
+        return {
+            "paper_id": self.paper_id,
+            "title": self.title,
+            "authors": [{"name": a.name} for a in self.authors],
+            "year": self.year,
+            "doi": self.doi,
+            "arxiv_id": self.arxiv_id,
+            "url": self.url,
+            "source": self.source,
+        }

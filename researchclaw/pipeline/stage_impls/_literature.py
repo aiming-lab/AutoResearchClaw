@@ -13,6 +13,10 @@ import yaml
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.llm.client import LLMClient
+from researchclaw.literature.citation_identity import (
+    CitationIdentityError,
+    seal_citation_collection,
+)
 from researchclaw.pipeline._helpers import (
     StageResult,
     _build_fallback_queries,
@@ -373,13 +377,11 @@ def _execute_literature_collect(
 
     # --- Try real API search first ---
     candidates: list[dict[str, Any]] = []
-    bibtex_entries: list[str] = []
     real_search_succeeded = False
 
     try:
         from researchclaw.literature.search import (
             search_papers_multi_query,
-            papers_to_bibtex,
         )
 
         # Expand queries for broader coverage
@@ -405,7 +407,6 @@ def _execute_literature_collect(
                 d = p.to_dict()
                 d["collected_at"] = _utcnow_iso()
                 candidates.append(d)
-                bibtex_entries.append(p.to_bibtex())
             src_str = ", ".join(f"{s}: {n}" for s, n in src_counts.items())
             logger.info(
                 "[literature] Found %d papers (%s)", len(papers), src_str
@@ -493,7 +494,6 @@ def _execute_literature_collect(
                     d = lit_paper.to_dict()
                     d["collected_at"] = _utcnow_iso()
                     candidates.append(d)
-                    bibtex_entries.append(lit_paper.to_bibtex())
 
             # Save web search context for downstream stages
             web_context = web_result.to_context_string(max_length=20_000)
@@ -541,67 +541,73 @@ def _execute_literature_collect(
             for idx in range(max(20, config.research.daily_paper_count or 20))
         ]
 
-    # Write candidates
-    out = stage_dir / "candidates.jsonl"
-    _write_jsonl(out, candidates)
-
-    # BUG-50 fix: Generate BibTeX from candidates when real search failed
-    # (LLM/placeholder fallback paths don't populate bibtex_entries)
-    if not bibtex_entries and candidates:
-        for c in candidates:
-            if c.get("is_placeholder"):
-                continue
-            _ck = c.get("cite_key", "")
-            if not _ck:
-                # Derive cite_key from first author surname + year
-                _authors = c.get("authors", [])
-                _surname = "unknown"
-                if isinstance(_authors, list) and _authors:
-                    _a0 = _authors[0] if isinstance(_authors[0], str) else (_authors[0].get("name", "") if isinstance(_authors[0], dict) else "")
-                    _surname = _a0.split()[-1].lower() if _a0.strip() else "unknown"
-                _yr = c.get("year", 2024)
-                _title_word = "".join(
-                    w[0] for w in str(c.get("title", "study")).split()[:3]
-                ).lower()
-                _ck = f"{_surname}{_yr}{_title_word}"
-            _title = c.get("title", "Untitled")
-            _year = c.get("year", 2024)
-            _author_str = ""
-            _raw_authors = c.get("authors", [])
-            if isinstance(_raw_authors, list):
-                _names = []
-                for _a in _raw_authors:
-                    if isinstance(_a, str):
-                        _names.append(_a)
-                    elif isinstance(_a, dict):
-                        _names.append(_a.get("name", ""))
-                _author_str = " and ".join(n for n in _names if n)
-            bibtex_entries.append(
-                f"@article{{{_ck},\n"
-                f"  title={{{_title}}},\n"
-                f"  author={{{_author_str or 'Unknown'}}},\n"
-                f"  year={{{_year}}},\n"
-                f"  url={{{c.get('url', '')}}},\n"
-                f"}}"
-            )
-        logger.info(
-            "Stage 4: Generated %d BibTeX entries from candidates (fallback)",
-            len(bibtex_entries),
+    # Seal citation identities after all providers and injected sources have
+    # contributed. Remove prior-attempt identity outputs first so a failed seal
+    # cannot coexist with a stale successful registry or bibliography.
+    try:
+        for owned_name in (
+            "candidates.jsonl",
+            "references.bib",
+            "cite_key_registry.json",
+            "search_meta.json",
+        ):
+            (stage_dir / owned_name).unlink(missing_ok=True)
+    except OSError as exc:
+        return StageResult(
+            stage=Stage.LITERATURE_COLLECT,
+            status=StageStatus.FAILED,
+            error=f"Could not clear stale Stage 4 citation artifacts: {exc}",
+            decision="retry",
         )
 
-    # Write references.bib (F2.4)
-    artifacts = ["candidates.jsonl"]
+    # Candidates and BibTeX are projections of this one registry.
+    try:
+        sealed = seal_citation_collection(candidates)
+    except CitationIdentityError as exc:
+        _write_jsonl(stage_dir / "candidates.jsonl", candidates)
+        (stage_dir / "search_meta.json").write_text(
+            json.dumps(
+                {
+                    "real_search": real_search_succeeded,
+                    "queries_used": queries,
+                    "year_min": year_min,
+                    "total_candidates": len(candidates),
+                    "identity_error": str(exc),
+                    "ts": _utcnow_iso(),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return StageResult(
+            stage=Stage.LITERATURE_COLLECT,
+            status=StageStatus.FAILED,
+            artifacts=("candidates.jsonl", "search_meta.json"),
+            error=f"Citation identity registry could not be sealed: {exc}",
+            decision="retry",
+        )
+
+    (stage_dir / "candidates.jsonl").write_text(
+        sealed.candidates_jsonl, encoding="utf-8"
+    )
+    (stage_dir / "references.bib").write_text(
+        sealed.bibliography, encoding="utf-8"
+    )
+    (stage_dir / "cite_key_registry.json").write_text(
+        json.dumps(sealed.registry, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    artifacts = ["candidates.jsonl", "references.bib", "cite_key_registry.json"]
     if web_context_parts:
         artifacts.append("web_context.md")
     if (stage_dir / "web_search_result.json").exists():
         artifacts.append("web_search_result.json")
-    if bibtex_entries:
-        bib_content = "\n\n".join(bibtex_entries) + "\n"
-        (stage_dir / "references.bib").write_text(bib_content, encoding="utf-8")
-        artifacts.append("references.bib")
-        logger.info(
-            "Stage 4: Wrote %d BibTeX entries to references.bib", len(bibtex_entries)
-        )
+    logger.info(
+        "Stage 4: Sealed %d identities into candidates, bibliography, and registry",
+        len(sealed.candidates),
+    )
 
     # Write search metadata
     (stage_dir / "search_meta.json").write_text(
@@ -610,8 +616,9 @@ def _execute_literature_collect(
                 "real_search": real_search_succeeded,
                 "queries_used": queries,
                 "year_min": year_min,
-                "total_candidates": len(candidates),
-                "bibtex_entries": len(bibtex_entries),
+                "total_candidates": len(sealed.candidates),
+                "raw_candidates": len(candidates),
+                "bibtex_entries": len(sealed.candidates),
                 "ts": _utcnow_iso(),
             },
             indent=2,
