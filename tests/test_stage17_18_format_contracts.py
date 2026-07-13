@@ -57,9 +57,11 @@ class _SequentialLLM:
     def __init__(self, responses: list[str]):
         self.responses = responses
         self.calls: list[list[dict[str, str]]] = []
+        self.systems: list[str] = []
 
-    def chat(self, messages: list[dict[str, str]], **_kwargs: object) -> SimpleNamespace:
+    def chat(self, messages: list[dict[str, str]], **kwargs: object) -> SimpleNamespace:
         self.calls.append(messages)
+        self.systems.append(str(kwargs.get("system", "")))
         return SimpleNamespace(content=self.responses.pop(0))
 
 
@@ -127,10 +129,13 @@ def test_all_three_stage17_calls_receive_the_section_output_contract() -> None:
     )
 
     assert len(llm.calls) == 3
-    for call in llm.calls:
+    for call, system in zip(llm.calls, llm.systems, strict=True):
         prompt = "\n".join(message["content"] for message in call)
         assert "SECTION OUTPUT CONTRACT" in prompt
         assert "Output only the sections requested in this call" in prompt
+        assert system.rstrip().endswith(
+            "Do not emit a title/preamble outside the requested `##` sections."
+        )
 
 
 def test_stage17_part_contract_rejects_extra_major_section() -> None:
@@ -223,6 +228,96 @@ def test_stage17_part_contract_regenerates_once_and_records_attempts(
     assert len(report["parts"][0]["attempts"]) == 2
     assert report["parts"][0]["attempts"][0]["valid"] is False
     assert report["parts"][0]["attempts"][1]["valid"] is True
+
+
+def test_stage17_full_paper_response_uses_isolated_bounded_repair(
+    tmp_path: Path,
+) -> None:
+    full_paper = (
+        "## Paper Title\n\nT.\n\n## Abstract\n\nA.\n\n"
+        "## Introduction\n\nI.\n\n## Related Work\n\nR.\n\n"
+        "## Method\n\nM.\n\n## Experiments\n\nE.\n\n"
+        "## Results\n\nX.\n\n## Discussion\n\nD.\n\n"
+        "## Limitations\n\nL.\n\n## Conclusion\n\nC."
+    )
+    repaired_part = (
+        "## Paper Title\n\nT.\n\n## Abstract\n\nA.\n\n"
+        "## Introduction\n\nI.\n\n"
+        "## Related Work\n\nBounded evidence [smith2024deep]."
+    )
+    llm = _SequentialLLM(
+        [
+            full_paper,
+            repaired_part,
+            "## Method\n\nM.\n\n## Experiments\n\nE.",
+            "## Results\n\nR.\n\n## Discussion\n\nD.\n\n"
+            "## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+        ]
+    )
+    draft = _write_paper_sections(
+        llm=cast(Any, llm),
+        pm=cast(Any, _PromptManagerStub()),
+        preamble="PREAMBLE_SENTINEL",
+        topic_constraint="",
+        exp_metrics_instruction="",
+        citation_instruction="",
+        outline="OUTLINE_SENTINEL",
+        stage_dir=tmp_path,
+        citation_repair_claims=(
+            {
+                "section": "Related Work",
+                "claim_text": "Bounded evidence claim.",
+                "cite_key": "smith2024deep",
+            },
+        ),
+    )
+
+    assert repaired_part in draft
+    assert len(llm.calls) == 4
+    repair_prompt = "\n".join(message["content"] for message in llm.calls[1])
+    assert "PREAMBLE_SENTINEL" not in repair_prompt
+    assert "OUTLINE_SENTINEL" not in repair_prompt
+    assert "Bounded evidence claim." in repair_prompt
+    assert "[smith2024deep]" in repair_prompt
+    assert full_paper in repair_prompt
+    assert "Never output a complete paper" in llm.systems[1]
+    report = json.loads(
+        (tmp_path / "section_generation_report.json").read_text(encoding="utf-8")
+    )
+    assert report["_diagnostic"] is True
+    assert report["parts"][0]["attempts"][0]["observed_major_sections"][-1] == (
+        "Conclusion"
+    )
+
+
+def test_stage17_full_paper_repair_is_not_deterministically_trimmed(
+    tmp_path: Path,
+) -> None:
+    full_paper = (
+        "## Paper Title\n\nT.\n\n## Abstract\n\nA.\n\n"
+        "## Introduction\n\nI.\n\n## Related Work\n\nR.\n\n"
+        "## Method\n\nM.\n\n## Results\n\nR."
+    )
+    llm = _SequentialLLM([full_paper, full_paper])
+    with pytest.raises(PaperSectionContractError, match="part-1"):
+        _write_paper_sections(
+            llm=cast(Any, llm),
+            pm=cast(Any, _PromptManagerStub()),
+            preamble="",
+            topic_constraint="",
+            exp_metrics_instruction="",
+            citation_instruction="",
+            outline="",
+            stage_dir=tmp_path,
+        )
+    assert len(llm.calls) == 2
+    report = json.loads(
+        (tmp_path / "section_generation_report.json").read_text(encoding="utf-8")
+    )
+    assert report["parts"][0]["attempts"][-1]["valid"] is False
+    assert "Method" in report["parts"][0]["attempts"][-1][
+        "observed_major_sections"
+    ]
 
 
 def test_stage17_part_contract_fails_after_one_regeneration(

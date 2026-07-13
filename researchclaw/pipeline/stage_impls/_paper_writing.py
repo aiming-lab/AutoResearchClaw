@@ -74,6 +74,10 @@ SECTION OUTPUT CONTRACT (OVERRIDES ANY CONFLICTING FORMAT INSTRUCTIONS):
 - Do not emit a title/preamble outside the requested `##` sections.
 """
 
+_SECTION_REPAIR_SYSTEM = """You repair exactly one bounded manuscript part.
+Output only that part as Markdown. Never output a complete paper.
+The caller will reject every response whose CommonMark heading sequence is not exact."""
+
 _SECTION_GENERATION_SCHEMA_VERSION = 1
 _SECTION_OWNERSHIP_CONTRACT_VERSION = 1
 _EXPERIMENT_FACT_INVALID_SCHEMA_VERSION = 1
@@ -143,6 +147,15 @@ def _validate_paper_part_sections(
     return tuple(sorted(violations))
 
 
+def _observed_major_sections(text: str) -> tuple[str, ...]:
+    """Return diagnostic h2 titles without creating a second validator."""
+    try:
+        document = parse_manuscript(text, strict=False)
+    except ManuscriptStructureError:
+        return ()
+    return tuple(section.title for section in document.sections if section.level == 2)
+
+
 def _persist_section_generation_report(
     stage_dir: Path | None, entries: list[dict[str, Any]]
 ) -> None:
@@ -151,6 +164,7 @@ def _persist_section_generation_report(
     report = {
         "schema_version": _SECTION_GENERATION_SCHEMA_VERSION,
         "ownership_contract_version": _SECTION_OWNERSHIP_CONTRACT_VERSION,
+        "_diagnostic": True,
         "parts": entries,
     }
     (stage_dir / "section_generation_report.json").write_text(
@@ -242,12 +256,11 @@ def _fact_regeneration_added_numeric_authority(
 def _validate_or_regenerate_paper_part(
     *,
     llm: LLMClient,
-    system: str,
-    user_prompt: str,
     initial_text: str,
     part_name: str,
     expected_major_sections: tuple[str, ...],
     title_slot: bool,
+    citation_repair_context: str,
     max_tokens: int,
     report_entries: list[dict[str, Any]],
     stage_dir: Path | None,
@@ -266,6 +279,7 @@ def _validate_or_regenerate_paper_part(
                 "response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "valid": not violations,
                 "violations": list(violations),
+                "observed_major_sections": list(_observed_major_sections(text)),
             }
         )
         if not violations:
@@ -291,16 +305,44 @@ def _validate_or_regenerate_paper_part(
             _persist_section_generation_report(stage_dir, report_entries)
             raise PaperSectionContractError(part_name, violations, text)
 
-        repair_prompt = (
-            user_prompt
-            + "\n\nTHE PREVIOUS RESPONSE VIOLATED THE SECTION OWNERSHIP CONTRACT:\n"
-            + "\n".join(f"- {violation}" for violation in violations)
-            + "\nRegenerate this complete part once. Output only the owned sections."
+        expected_lines = []
+        if title_slot:
+            expected_lines.append(
+                "1. First h2: the actual concise paper title (not the literal word Title)"
+            )
+        start = len(expected_lines) + 1
+        expected_lines.extend(
+            f"{ordinal}. ## {heading}"
+            for ordinal, heading in enumerate(expected_major_sections, start=start)
         )
+        repair_prompt = f"""Repair one bounded manuscript part.
+
+Part name: {part_name}
+Exact h2 sequence:
+{chr(10).join(expected_lines)}
+
+Previous deterministic violations:
+{chr(10).join(f'- {violation}' for violation in violations)}
+
+Rules:
+- Output only the h2 sequence above, in exactly that order.
+- Do not output any other h2 section or a complete paper.
+- Preserve the owned sections' factual content and exact [cite_key] markers.
+- Do not invent, replace, or remove citations except when removing a non-owned section.
+- Optional h3 subsections may remain under their existing owned h2 parent.
+- Do not add a preamble, explanation, code fence, or References section.
+
+Validated citation claims assigned to this part:
+{citation_repair_context}
+
+<previous_invalid_response>
+{text}
+</previous_invalid_response>
+"""
         try:
             regenerated = _chat_with_prompt(
                 llm,
-                system,
+                _SECTION_REPAIR_SYSTEM,
                 repair_prompt,
                 max_tokens=max_tokens,
                 retries=1,
@@ -314,6 +356,7 @@ def _validate_or_regenerate_paper_part(
                     "response_sha256": hashlib.sha256(b"").hexdigest(),
                     "valid": False,
                     "violations": [f"section_part_transport_error:{type(exc).__name__}"],
+                    "observed_major_sections": [],
                 }
             )
             report_entries.append(
@@ -354,6 +397,7 @@ def _raise_initial_part_transport_failure(
                     "violations": [
                         f"section_part_transport_error:{type(exc).__name__}"
                     ],
+                    "observed_major_sections": [],
                 }
             ],
         }
@@ -790,6 +834,26 @@ def _collect_grounded_metric_whitelist(run_dir: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _compact_part_citation_context(
+    claims: tuple[dict[str, str], ...],
+    expected_major_sections: tuple[str, ...],
+) -> str:
+    """Render validated plan claims assigned to one bounded writer part."""
+    expected = set(expected_major_sections)
+    lines: list[str] = []
+    for claim in claims:
+        if claim["section"] not in expected:
+            continue
+        lines.extend(
+            (
+                f"- section: {claim['section']}",
+                f"  bounded claim: {claim['claim_text']}",
+                f"  required key: [{claim['cite_key']}]",
+            )
+        )
+    return "\n".join(lines) if lines else "None. Do not add citation markers."
+
+
 def _write_paper_sections(
     *,
     llm: LLMClient,
@@ -805,6 +869,7 @@ def _write_paper_sections(
     venue_guidance: str = "",
     is_hep: bool = False,
     stage_dir: Path | None = None,
+    citation_repair_claims: tuple[dict[str, str], ...] = (),
 ) -> str:
     """Write a conference-grade paper in 3 sequential LLM calls.
 
@@ -837,6 +902,7 @@ def _write_paper_sections(
         venue_guidance=venue_guidance,
     ).system
 
+    bounded_system = system.rstrip() + "\n\n" + _SECTION_OUTPUT_CONTRACT.strip()
     sections: list[str] = []
     section_generation_entries: list[dict[str, Any]] = []
 
@@ -934,7 +1000,7 @@ def _write_paper_sections(
 
     # T3.5: Retry once on failure, use placeholder if still fails
     try:
-        resp1 = _chat_with_prompt(llm, system, call1_user, max_tokens=_paper_max_tokens, retries=1)
+        resp1 = _chat_with_prompt(llm, bounded_system, call1_user, max_tokens=_paper_max_tokens, retries=1)
         part1 = resp1.content.strip()
     except Exception as exc:  # noqa: BLE001
         logger.error("Stage 17: Part 1 LLM call failed after transport retry")
@@ -950,14 +1016,18 @@ def _write_paper_sections(
         )
     part1 = _validate_or_regenerate_paper_part(
         llm=llm,
-        system=system,
-        user_prompt=call1_user,
         initial_text=part1,
         part_name="part-1",
         expected_major_sections=("Abstract", "Introduction")
         if is_hep
         else ("Abstract", "Introduction", "Related Work"),
         title_slot=True,
+        citation_repair_context=_compact_part_citation_context(
+            citation_repair_claims,
+            ("Abstract", "Introduction")
+            if is_hep
+            else ("Abstract", "Introduction", "Related Work"),
+        ),
         max_tokens=_paper_max_tokens,
         report_entries=section_generation_entries,
         stage_dir=stage_dir,
@@ -1024,7 +1094,7 @@ def _write_paper_sections(
         )
     call2_user += _SECTION_OUTPUT_CONTRACT
     try:
-        resp2 = _chat_with_prompt(llm, system, call2_user, max_tokens=_paper_max_tokens, retries=1)
+        resp2 = _chat_with_prompt(llm, bounded_system, call2_user, max_tokens=_paper_max_tokens, retries=1)
         part2 = resp2.content.strip()
     except Exception as exc:  # noqa: BLE001
         logger.error("Stage 17: Part 2 LLM call failed after transport retry")
@@ -1042,8 +1112,6 @@ def _write_paper_sections(
         )
     part2 = _validate_or_regenerate_paper_part(
         llm=llm,
-        system=system,
-        user_prompt=call2_user,
         initial_text=part2,
         part_name="part-2",
         expected_major_sections=(
@@ -1052,6 +1120,12 @@ def _write_paper_sections(
             else ("Method", "Experiments")
         ),
         title_slot=False,
+        citation_repair_context=_compact_part_citation_context(
+            citation_repair_claims,
+            ("Model / Theoretical Framework", "Phenomenology / Computational Setup")
+            if is_hep
+            else ("Method", "Experiments"),
+        ),
         max_tokens=_paper_max_tokens,
         report_entries=section_generation_entries,
         stage_dir=stage_dir,
@@ -1142,7 +1216,7 @@ def _write_paper_sections(
         )
     call3_user += _SECTION_OUTPUT_CONTRACT
     try:
-        resp3 = _chat_with_prompt(llm, system, call3_user, max_tokens=_paper_max_tokens, retries=1)
+        resp3 = _chat_with_prompt(llm, bounded_system, call3_user, max_tokens=_paper_max_tokens, retries=1)
         part3 = resp3.content.strip()
     except Exception as exc:  # noqa: BLE001
         logger.error("Stage 17: Part 3 LLM call failed after transport retry")
@@ -1158,14 +1232,18 @@ def _write_paper_sections(
         )
     part3 = _validate_or_regenerate_paper_part(
         llm=llm,
-        system=system,
-        user_prompt=call3_user,
         initial_text=part3,
         part_name="part-3",
         expected_major_sections=("Results", "Discussion", "Conclusions")
         if is_hep
         else ("Results", "Discussion", "Limitations", "Conclusion"),
         title_slot=False,
+        citation_repair_context=_compact_part_citation_context(
+            citation_repair_claims,
+            ("Results", "Discussion", "Conclusions")
+            if is_hep
+            else ("Results", "Discussion", "Limitations", "Conclusion"),
+        ),
         max_tokens=_paper_max_tokens,
         report_entries=section_generation_entries,
         stage_dir=stage_dir,
@@ -2431,7 +2509,7 @@ def _execute_paper_draft(
             )
 
     try:
-        load_final_citation_plan(run_dir, config)
+        final_citation_plan = load_final_citation_plan(run_dir, config)
         citation_instruction = build_citation_writer_instruction(run_dir, config)
     except CitationPlanContractError as exc:
         return StageResult(
@@ -2441,6 +2519,14 @@ def _execute_paper_draft(
             error=f"Final citation plan is invalid: {exc}",
             decision="retry",
         )
+    citation_repair_claims = tuple(
+        {
+            "section": str(claim["section_path"][0]),
+            "claim_text": str(claim["claim_text"]),
+            "cite_key": str(claim["planned_citations"][0]["cite_key"]),
+        }
+        for claim in final_citation_plan["claims"]
+    )
 
     # R11-5: Experiment quality minimum threshold before paper writing
     # Parse analysis.md for quality rating and condition completeness
@@ -2746,6 +2832,7 @@ def _execute_paper_draft(
                 venue_guidance=_paper_venue_guidance,
                 is_hep=_paper_is_hep,
                 stage_dir=stage_dir,
+                citation_repair_claims=citation_repair_claims,
             )
         except PaperSectionContractError as exc:
             (stage_dir / "paper_draft_invalid.md").write_text(
