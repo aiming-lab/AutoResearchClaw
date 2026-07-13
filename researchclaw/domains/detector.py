@@ -343,6 +343,18 @@ _KEYWORD_RULES: list[tuple[list[str], str]] = [
       "esm"], "biology_protein"),
     (["biology", "bioinformatics", "omics"], "biology_general"),
 
+    # Medical observational research (before economics so "logistic regression"
+    # in a retrospective cohort does not route to economics_empirical).
+    (["retrospective cohort", "case-control", "case control",
+      "cross-sectional", "cross sectional", "strobe",
+      "clinical registry", "trauma registry", "patient registry",
+      "ehr", "electronic health record", "his database", "his export",
+      "hospital information system", "observational clinical",
+      "observational study", "clinical observational",
+      "medical observational", "de-identified clinical",
+      "deidentified clinical", "table 1", "irb", "ethics waiver"],
+     "medical_observational"),
+
     # Economics
     (["econometrics", "regression", "instrumental variable",
       "fixed effect", "panel data", "difference-in-difference",
@@ -415,6 +427,7 @@ Available domains:
 - biology_singlecell: Single-cell analysis (scRNA-seq, scanpy)
 - biology_genomics: Genomics (sequencing, variant calling)
 - biology_protein: Protein science (folding, property prediction)
+- medical_observational: Medical observational studies (retrospective cohort, case-control, cross-sectional, STROBE, EHR/HIS/registry)
 - economics_empirical: Empirical economics (regression, causal inference)
 - mathematics_numerical: Numerical methods (ODE/PDE solvers, convergence)
 - mathematics_optimization: Optimization (convex, evolutionary)

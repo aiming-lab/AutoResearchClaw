@@ -78,6 +78,7 @@ class TestProfileLoading:
             "security_detection",
             "clinical_sleep",
             "robotics_control",
+            "medical_observational",
         ]:
             profile = get_profile(domain_id)
             assert profile is not None, f"Missing profile: {domain_id}"
@@ -157,6 +158,13 @@ class TestKeywordDetection:
     def test_case_insensitive(self):
         assert _keyword_detect("IMAGE CLASSIFICATION WITH RESNET") == "ml_vision"
         assert _keyword_detect("DFT Calculation") == "chemistry_qm"
+
+    def test_medical_observational_keywords(self):
+        assert _keyword_detect(
+            "Retrospective cohort study of mortality in trauma registry patients"
+        ) == "medical_observational"
+        assert _keyword_detect("STROBE-guided case-control analysis from EHR data") == "medical_observational"
+        assert _keyword_detect("Cross-sectional HIS database study") == "medical_observational"
 
 
 # ---------------------------------------------------------------------------

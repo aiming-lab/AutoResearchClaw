@@ -333,6 +333,13 @@ def _build_adapter_registry() -> dict[str, type[PromptAdapter]]:
         registry["hep_ph_"] = HEPPhPromptAdapter
     except ImportError:
         pass
+    try:
+        from researchclaw.domains.adapters.medical_observational import (
+            MedicalObservationalPromptAdapter,
+        )
+        registry["medical_observational"] = MedicalObservationalPromptAdapter
+    except ImportError:
+        pass
     return registry
 
 
