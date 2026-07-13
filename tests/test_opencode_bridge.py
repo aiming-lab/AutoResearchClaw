@@ -385,6 +385,97 @@ class TestOpenCodeBridge:
 
 
 # ============================================================
+# TestBuildOpencodeCommand (PTY wrapper)
+# ============================================================
+
+
+class TestBuildOpencodeCommand:
+    """Tests for _build_opencode_command — Linux pseudo-TTY wrapping."""
+
+    def test_linux_with_script_wraps_in_pty(self):
+        """On Linux with `script` available, wrap via `script -q -e -c <cmd> /dev/null`."""
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.sys.platform", "linux"
+        ), patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value="/usr/bin/script",
+        ):
+            cmd = OpenCodeBridge._build_opencode_command(
+                "/usr/bin/opencode", "anthropic/claude-sonnet-4-6", "do the thing"
+            )
+        assert cmd[0] == "/usr/bin/script"
+        assert cmd[1:4] == ["-q", "-e", "-c"]
+        assert cmd[-1] == "/dev/null"
+        # The wrapped inner string must carry the full opencode invocation
+        inner = cmd[4]
+        assert "opencode" in inner
+        assert "run" in inner
+        assert "--format json" in inner
+
+    def test_linux_wrapper_preserves_child_exit_status(self):
+        """The `-e` flag is required: without it `script` can return 0 even when
+        the child command fails, which would mask an opencode failure as success."""
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.sys.platform", "linux"
+        ), patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value="/usr/bin/script",
+        ):
+            cmd = OpenCodeBridge._build_opencode_command("/usr/bin/opencode", "m", "p")
+        assert "-e" in cmd
+
+    def test_linux_without_script_falls_back_to_direct(self):
+        """On Linux but `script` missing → direct invocation, no wrapper."""
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.sys.platform", "linux"
+        ), patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value=None,
+        ):
+            cmd = OpenCodeBridge._build_opencode_command(
+                "/usr/bin/opencode", "anthropic/claude-sonnet-4-6", "prompt"
+            )
+        assert cmd == [
+            "/usr/bin/opencode", "run", "-m",
+            "anthropic/claude-sonnet-4-6", "--format", "json", "prompt",
+        ]
+
+    def test_non_linux_does_not_wrap_even_if_script_present(self):
+        """On macOS/BSD, `script` uses a different arg order; never wrap (no regression)."""
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.sys.platform", "darwin"
+        ), patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value="/usr/bin/script",
+        ):
+            cmd = OpenCodeBridge._build_opencode_command(
+                "/usr/bin/opencode", "anthropic/claude-sonnet-4-6", "prompt"
+            )
+        assert "script" not in cmd[0]
+        assert cmd[0] == "/usr/bin/opencode"
+
+    def test_prompt_with_shell_metacharacters_is_quoted(self):
+        """The wrapped inner string must shell-quote the prompt so a shell
+        re-parses it back into the exact original argv (no injection)."""
+        import shlex
+
+        payload = "echo 'hi'; rm -rf /"
+        with patch(
+            "researchclaw.pipeline.opencode_bridge.sys.platform", "linux"
+        ), patch(
+            "researchclaw.pipeline.opencode_bridge.shutil.which",
+            return_value="/usr/bin/script",
+        ):
+            cmd = OpenCodeBridge._build_opencode_command("/usr/bin/opencode", "m", payload)
+        inner = cmd[4]
+        # A shell parsing `inner` must recover the original argv verbatim,
+        # with the payload as a single token rather than separate commands.
+        assert shlex.split(inner) == [
+            "/usr/bin/opencode", "run", "-m", "m", "--format", "json", payload,
+        ]
+
+
+# ============================================================
 # TestEnsureMainEntryPoint (BUG-R52-01)
 # ============================================================
 
