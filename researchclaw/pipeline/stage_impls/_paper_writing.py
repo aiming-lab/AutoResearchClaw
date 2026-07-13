@@ -7,7 +7,6 @@ import json
 import logging
 import math
 import re
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +33,7 @@ from researchclaw.literature.evidence_cards import canonical_json_text
 from researchclaw.literature.experiment_fact_closure import (
     ExperimentFactClosureError,
     build_experiment_fact_closure_report,
+    remove_unsupported_experiment_fact_blocks,
     validate_experiment_fact_closure_report,
 )
 from researchclaw.pipeline._domain import _detect_domain, _is_ml_domain
@@ -193,64 +193,17 @@ def _write_experiment_fact_invalid(
     )
 
 
-def _regenerate_draft_for_experiment_facts(
-    llm: LLMClient,
-    *,
-    draft: str,
-    report: dict[str, Any],
-) -> str:
-    """Run the single bounded rewrite allowed for deterministic fact failures."""
-    grounded = json.dumps(
-        report["grounded_numeric_values"], ensure_ascii=False, separators=(",", ":")
-    )
-    unknown = json.dumps(
-        report["unknown_numeric_values"], ensure_ascii=False, separators=(",", ":")
-    )
-    contradictions = json.dumps(
-        report["dataset_claim_violations"], ensure_ascii=False, separators=(",", ":")
-    )
-    prompt = f"""Revise the complete scientific manuscript below exactly once.
-
-This is a constrained experiment-fact correction, not a new drafting task.
-- Preserve every existing Markdown heading and its order exactly.
-- Preserve every citation marker exactly and in its current top-level section.
-- The dataset origin is `{report['dataset_origin']}`.
-- Canonical numeric experiment literals already present in the manuscript are: {grounded}
-- Unsupported numeric literals detected by deterministic validation: {unknown}
-- Dataset-origin contradictions detected by deterministic validation: {contradictions}
-- Remove unsupported setup details and unsupported derived statistics.
-- Do not add or replace any numeric literal. Preserve only already-supported numeric
-  literals, without moving them to a different claim.
-- Do not round, convert, derive, average, or otherwise transform canonical values.
-- Do not invent dataset names, workloads, hardware, sample counts, thresholds, latency,
-  uncertainty, statistical tests, baselines, or experimental procedures.
-- If a quantitative sentence cannot be supported using a canonical literal exactly as
-  listed, rewrite it qualitatively or delete the complete unsupported claim.
-- Output only the complete revised Markdown manuscript. No commentary or fences.
-
-## Manuscript
-{draft}
-"""
-    response = _chat_with_prompt(
-        llm,
-        "You are a constrained scientific fact editor. Deterministic validation owns truth.",
-        prompt,
-        max_tokens=24000,
-        retries=1,
-    )
-    return response.content.strip()
-
-
-def _fact_regeneration_added_numeric_authority(
+def _fact_repair_added_numeric_authority(
     before: dict[str, Any], after: dict[str, Any]
 ) -> bool:
-    """Return True if a rewrite adds numeric occurrences it did not already own."""
-    unknown = Counter(float(value) for value in before["unknown_numeric_values"])
-    retained = Counter(float(value) for value in before["manuscript_numeric_values"])
-    retained.subtract(unknown)
-    allowed = Counter({value: count for value, count in retained.items() if count > 0})
-    observed = Counter(float(value) for value in after["manuscript_numeric_values"])
-    return any(count > allowed[value] for value, count in observed.items())
+    """Return True unless the deterministic repair only removes numeric occurrences."""
+    before_values = list(float(value) for value in before["manuscript_numeric_values"])
+    for value in after["manuscript_numeric_values"]:
+        numeric = float(value)
+        if numeric not in before_values:
+            return True
+        before_values.remove(numeric)
+    return False
 
 
 def _validate_or_regenerate_paper_part(
@@ -1995,6 +1948,9 @@ def _execute_paper_draft(
         "citation_closure_report.json",
         "experiment_fact_closure_report.json",
         "experiment_fact_closure_invalid.json",
+        "experiment_fact_closure_initial.json",
+        "experiment_fact_closure_after.json",
+        "experiment_fact_repair_log.json",
         "draft_quality.json",
         "references_preverified.bib",
     ):
@@ -2985,39 +2941,48 @@ Generated: {_utcnow_iso()}
         if not experiment_report["valid"]:
             initial_experiment_report = experiment_report
             _write_experiment_fact_invalid(stage_dir, experiment_report)
-            if llm is None:
-                raise ExperimentFactClosureError(
-                    "experiment facts are invalid and no regeneration model is available"
-                )
+            (stage_dir / "experiment_fact_closure_initial.json").write_text(
+                canonical_json_text(initial_experiment_report), encoding="utf-8"
+            )
             try:
-                final_draft = _regenerate_draft_for_experiment_facts(
-                    llm, draft=final_draft, report=experiment_report
+                final_draft, repair_log = remove_unsupported_experiment_fact_blocks(
+                    final_draft,
+                    grounded_numeric_values=experiment_report[
+                        "grounded_numeric_values"
+                    ],
+                    dataset_origin=experiment_report["dataset_origin"],
                 )
             except Exception as exc:  # noqa: BLE001
                 raise ExperimentFactClosureError(
-                    f"bounded experiment-fact regeneration failed: {exc}"
+                    f"deterministic experiment-fact repair failed: {exc}"
                 ) from exc
+            (stage_dir / "experiment_fact_repair_log.json").write_text(
+                canonical_json_text(repair_log), encoding="utf-8"
+            )
             structure_report = _validate_stage17_manuscript_structure(
                 final_draft, stage_dir=stage_dir
             )
             if not structure_report["valid"]:
                 raise ExperimentFactClosureError(
-                    "bounded experiment-fact regeneration broke manuscript structure"
+                    "deterministic experiment-fact repair broke manuscript structure"
                 )
             experiment_report = build_experiment_fact_closure_report(
                 run_dir, paper_text=final_draft
             )
-            if _fact_regeneration_added_numeric_authority(
+            (stage_dir / "experiment_fact_closure_after.json").write_text(
+                canonical_json_text(experiment_report), encoding="utf-8"
+            )
+            if _fact_repair_added_numeric_authority(
                 initial_experiment_report, experiment_report
             ):
                 _write_experiment_fact_invalid(stage_dir, experiment_report)
                 raise ExperimentFactClosureError(
-                    "bounded experiment-fact regeneration added numeric authority"
+                    "deterministic experiment-fact repair added numeric authority"
                 )
             if not experiment_report["valid"]:
                 _write_experiment_fact_invalid(stage_dir, experiment_report)
                 raise ExperimentFactClosureError(
-                    "bounded experiment-fact regeneration did not close experiment facts"
+                    "deterministic experiment-fact repair did not close experiment facts"
                 )
             (stage_dir / "experiment_fact_closure_invalid.json").unlink(
                 missing_ok=True
@@ -3069,6 +3034,14 @@ Generated: {_utcnow_iso()}
         if (stage_dir / "experiment_fact_closure_invalid.json").is_file():
             failure_artifacts.append("experiment_fact_closure_invalid.json")
             failure_refs.append("stage-17/experiment_fact_closure_invalid.json")
+        for diagnostic_name in (
+            "experiment_fact_closure_initial.json",
+            "experiment_fact_closure_after.json",
+            "experiment_fact_repair_log.json",
+        ):
+            if (stage_dir / diagnostic_name).is_file():
+                failure_artifacts.append(diagnostic_name)
+                failure_refs.append(f"stage-17/{diagnostic_name}")
         return StageResult(
             stage=Stage.PAPER_DRAFT,
             status=StageStatus.FAILED,
@@ -3099,21 +3072,24 @@ Generated: {_utcnow_iso()}
     except Exception:
         pass
 
+    success_artifacts = [
+        "paper_draft.md",
+        "paper_structure_report.json",
+        "section_generation_report.json",
+        "experiment_fact_closure_report.json",
+        "citation_closure_report.json",
+    ]
+    success_refs = [f"stage-17/{name}" for name in success_artifacts]
+    for diagnostic_name in (
+        "experiment_fact_closure_initial.json",
+        "experiment_fact_closure_after.json",
+        "experiment_fact_repair_log.json",
+    ):
+        if (stage_dir / diagnostic_name).is_file():
+            success_artifacts.append(diagnostic_name)
     return StageResult(
         stage=Stage.PAPER_DRAFT,
         status=StageStatus.DONE,
-        artifacts=(
-            "paper_draft.md",
-            "paper_structure_report.json",
-            "section_generation_report.json",
-            "experiment_fact_closure_report.json",
-            "citation_closure_report.json",
-        ),
-        evidence_refs=(
-            "stage-17/paper_draft.md",
-            "stage-17/paper_structure_report.json",
-            "stage-17/section_generation_report.json",
-            "stage-17/experiment_fact_closure_report.json",
-            "stage-17/citation_closure_report.json",
-        ),
+        artifacts=tuple(success_artifacts),
+        evidence_refs=tuple(success_refs),
     )

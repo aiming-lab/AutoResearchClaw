@@ -51,6 +51,7 @@ from researchclaw.literature.evidence_cards import (
 from researchclaw.literature.experiment_fact_closure import (
     build_experiment_fact_closure_report,
     parse_experiment_fact_closure_report,
+    remove_unsupported_experiment_fact_blocks,
 )
 from researchclaw.literature.screening import SCREEN_BATCH_SIZE, sha256_text
 from researchclaw.literature.verify import (
@@ -1102,6 +1103,116 @@ def test_experiment_fact_closure_rejects_display_rounding_v1(
         paper_text="## Results\n\nF1 was 0.639877 with standard deviation 0.010216.\n",
     )
     assert exact["valid"] is True
+
+
+def test_experiment_fact_repair_removes_only_unsupported_sentence() -> None:
+    paper = (
+        "## Results\n\n"
+        "The exact F1 was 0.639877. "
+        "A rounded claim reported 0.64. "
+        "The following qualitative sentence remains.\n\n"
+        "## Conclusion\n\nThe exact result was 0.639877.\n"
+    )
+    repaired, log = remove_unsupported_experiment_fact_blocks(
+        paper,
+        grounded_numeric_values=[0.639877],
+        dataset_origin="synthetic",
+    )
+    assert "The exact F1 was 0.639877." in repaired
+    assert "A rounded claim reported 0.64." not in repaired
+    assert "The following qualitative sentence remains." in repaired
+    assert "The exact result was 0.639877." in repaired
+    assert log["operations"][0]["block_type"] == "sentence"
+    assert log["operations"][0]["unknown_numeric_values"] == [0.64]
+
+
+@pytest.mark.parametrize(
+    ("body", "block_type"),
+    (
+        ("| Method | F1 |\n| --- | --- |\n| ours | 0.64 |\n", "table_row"),
+        ("$$\nF_1 = 0.64\n$$\n", "display_math"),
+        ("**Figure 1:** Rounded F1 is 0.64.\n", "caption"),
+        ("- Rounded F1 is 0.64.\n  Continuation text.\n", "list_item"),
+    ),
+)
+def test_experiment_fact_repair_removes_complete_structural_block(
+    body: str, block_type: str
+) -> None:
+    paper = f"## Results\n\n{body}\nSupported F1 is 0.639877.\n"
+    repaired, log = remove_unsupported_experiment_fact_blocks(
+        paper,
+        grounded_numeric_values=[0.639877],
+        dataset_origin="synthetic",
+    )
+    assert "0.64" not in repaired
+    assert "Supported F1 is 0.639877." in repaired
+    assert log["operations"][0]["block_type"] == block_type
+
+
+def test_experiment_fact_repair_does_not_exempt_cited_or_conclusion_numbers() -> None:
+    paper = (
+        "## Discussion\n\n"
+        "Our detector achieved 0.97, unlike prior work at 0.90 [key2020].\n\n"
+        "## Conclusion\n\nOur method achieved 0.97.\n"
+    )
+    repaired, log = remove_unsupported_experiment_fact_blocks(
+        paper,
+        grounded_numeric_values=[0.5],
+        dataset_origin="synthetic",
+    )
+    assert "0.97" not in repaired
+    assert "0.90" not in repaired
+    assert len(log["operations"]) == 2
+
+
+@pytest.mark.parametrize("abbreviation", ("i.e.", "e.g.", "Fig.", "et al."))
+def test_experiment_fact_repair_does_not_split_at_abbreviation(
+    abbreviation: str,
+) -> None:
+    sentence = f"The method ({abbreviation} Z-score) achieved 0.64 F1. "
+    retained = "The exact value was 0.5.\n"
+    paper = f"## Results\n\n{sentence}{retained}"
+    repaired, log = remove_unsupported_experiment_fact_blocks(
+        paper,
+        grounded_numeric_values=[0.5],
+        dataset_origin="synthetic",
+    )
+    assert sentence not in repaired
+    assert retained in repaired
+    assert f"The method ({abbreviation}" not in repaired
+    assert log["operations"][0]["block_type"] == "sentence"
+
+
+def test_experiment_fact_repair_does_not_bridge_separate_math_blocks() -> None:
+    paper = (
+        "## Results\n\n"
+        "$$\nF_1 = 0.5\n$$\n\n"
+        "The unsupported prose value was 0.64.\n\n"
+        "$$\nR = 0.5\n$$\n"
+    )
+    repaired, log = remove_unsupported_experiment_fact_blocks(
+        paper,
+        grounded_numeric_values=[0.5],
+        dataset_origin="synthetic",
+    )
+    assert "unsupported prose" not in repaired
+    assert repaired.count("$$") == 4
+    assert "F_1 = 0.5" in repaired
+    assert "R = 0.5" in repaired
+    assert log["operations"][0]["block_type"] == "sentence"
+
+
+@pytest.mark.parametrize(
+    "body",
+    ("$$\nF_1 = 0.64\n", "\\[\nF_1 = 0.64\n", "\\begin{equation}\nF_1 = 0.64\n"),
+)
+def test_experiment_fact_repair_rejects_unbalanced_math(body: str) -> None:
+    with pytest.raises(ValueError, match="unbalanced"):
+        remove_unsupported_experiment_fact_blocks(
+            f"## Results\n\n{body}",
+            grounded_numeric_values=[0.5],
+            dataset_origin="synthetic",
+        )
 
 
 def test_experiment_fact_closure_ignores_shadow_metric_stage_and_flags_hardware_claim(

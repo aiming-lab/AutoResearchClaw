@@ -3650,7 +3650,7 @@ class TestDataIntegrityBlock:
         ):
             assert not (stage_dir / name).exists()
 
-    def test_paper_draft_fact_regeneration_closes_before_publish(
+    def test_paper_draft_fact_repair_closes_before_publish(
         self,
         run_dir: Path,
         rc_config: RCConfig,
@@ -3696,11 +3696,11 @@ class TestDataIntegrityBlock:
             lambda *_args, **_kwargs: next(reports),
         )
 
-        final = (
+        repaired = (
             "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n"
             "## Introduction\n\nI.\n\n## Related Work\n\nR.\n\n"
             "## Method\n\nM.\n\n## Experiments\n\nE.\n\n"
-            "## Results\n\nF1 was 0.4753327669.\n\n## Discussion\n\nD.\n\n"
+            "## Results\n\n\n\n## Discussion\n\nD.\n\n"
             "## Limitations\n\nL.\n\n## Conclusion\n\nC."
         )
 
@@ -3712,7 +3712,6 @@ class TestDataIntegrityBlock:
                         "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
                         "## Method\n\nM.\n\n## Experiments\n\nE.",
                         "## Results\n\nF1 was 0.4753327669; an unsupported summary said 0.47.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
-                        final,
                     )
                 )
 
@@ -3726,11 +3725,18 @@ class TestDataIntegrityBlock:
         )
 
         assert result.status == StageStatus.DONE
-        assert len(llm.calls) == 4
-        assert (stage_dir / "paper_draft.md").read_text(encoding="utf-8") == final
+        assert len(llm.calls) == 3
+        assert (stage_dir / "paper_draft.md").read_text(encoding="utf-8") == repaired
         assert not (stage_dir / "experiment_fact_closure_invalid.json").exists()
+        assert (stage_dir / "experiment_fact_closure_initial.json").exists()
+        assert (stage_dir / "experiment_fact_closure_after.json").exists()
+        repair_log = json.loads(
+            (stage_dir / "experiment_fact_repair_log.json").read_text()
+        )
+        assert repair_log["strategy"] == "deterministic_block_removal"
+        assert repair_log["operations"][0]["block_type"] == "sentence"
 
-    def test_fact_regeneration_cannot_add_grounded_numeric_authority(self) -> None:
+    def test_fact_repair_cannot_add_grounded_numeric_authority(self) -> None:
         before = {
             "manuscript_numeric_values": [0.64],
             "unknown_numeric_values": [0.64],
@@ -3739,11 +3745,11 @@ class TestDataIntegrityBlock:
             "manuscript_numeric_values": [0.639877],
             "unknown_numeric_values": [],
         }
-        assert _paper_writing._fact_regeneration_added_numeric_authority(
+        assert _paper_writing._fact_repair_added_numeric_authority(
             before, after
         )
 
-    def test_paper_draft_fact_regeneration_fails_once_with_diagnostic(
+    def test_paper_draft_fact_repair_fails_once_with_diagnostic(
         self,
         run_dir: Path,
         rc_config: RCConfig,
@@ -3789,7 +3795,6 @@ class TestDataIntegrityBlock:
                         "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
                         "## Method\n\nM.\n\n## Experiments\n\nE.",
                         "## Results\n\nF1 was 0.47.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
-                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.\n\n## Method\n\nM.\n\n## Experiments\n\nE.\n\n## Results\n\nF1 was 0.47.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
                     )
                 )
 
@@ -3803,7 +3808,7 @@ class TestDataIntegrityBlock:
         )
 
         assert result.status == StageStatus.FAILED
-        assert len(llm.calls) == 4
+        assert len(llm.calls) == 3
         assert not (stage_dir / "paper_draft.md").exists()
         diagnostic = json.loads(
             (stage_dir / "experiment_fact_closure_invalid.json").read_text()
@@ -3811,7 +3816,7 @@ class TestDataIntegrityBlock:
         assert "valid" not in diagnostic
         assert diagnostic["unknown_numeric_values"] == [0.47]
 
-    def test_paper_draft_fact_regeneration_reruns_structure_gate(
+    def test_paper_draft_fact_repair_reruns_structure_gate(
         self,
         run_dir: Path,
         rc_config: RCConfig,
@@ -3862,7 +3867,6 @@ class TestDataIntegrityBlock:
                         "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
                         "## Method\n\nM.\n\n## Experiments\n\nE.",
                         "## Results\n\nF1 was 0.47.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
-                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Abstract\n\nDuplicate.",
                     )
                 )
 
@@ -3875,15 +3879,15 @@ class TestDataIntegrityBlock:
         )
 
         assert result.status == StageStatus.FAILED
-        assert calls == 1
+        assert calls == 2
         assert not (stage_dir / "paper_draft.md").exists()
         structure = json.loads(
             (stage_dir / "paper_structure_report.json").read_text()
         )
-        assert structure["valid"] is False
+        assert structure["valid"] is True
         assert (stage_dir / "experiment_fact_closure_invalid.json").exists()
 
-    def test_paper_draft_fact_regeneration_reruns_citation_gate(
+    def test_paper_draft_fact_repair_reruns_citation_gate(
         self,
         run_dir: Path,
         rc_config: RCConfig,
@@ -3955,8 +3959,7 @@ class TestDataIntegrityBlock:
                     (
                         "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.",
                         "## Method\n\nM.\n\n## Experiments\n\nE.",
-                        "## Results\n\nF1 was 0.4753327669 and 0.47.\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
-                        "## Title\n\nPaper.\n\n## Abstract\n\nA.\n\n## Introduction\n\nI.\n\n## Related Work\n\nR.\n\n## Method\n\nM.\n\n## Experiments\n\nE.\n\n## Results\n\nF1 was 0.4753327669 [unplanned2024].\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
+                        "## Results\n\nF1 was 0.4753327669 and 0.47. A separate claim remains [unplanned2024].\n\n## Discussion\n\nD.\n\n## Limitations\n\nL.\n\n## Conclusion\n\nC.",
                     )
                 )
 

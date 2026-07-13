@@ -11,6 +11,7 @@ from typing import Any, Mapping
 from researchclaw.experiment_runtime.contract import find_stage09_contract, load_contract
 from researchclaw.pipeline.manuscript_sections import (
     ManuscriptStructureError,
+    merge_manuscript,
     parse_manuscript,
 )
 
@@ -279,6 +280,236 @@ def _extract_experiment_metric_literals(text: str) -> list[tuple[float, bool]]:
         )
     ]
     return _extract_metric_literals("\n".join(section_texts))
+
+
+def remove_unsupported_experiment_fact_blocks(
+    paper_text: str,
+    *,
+    grounded_numeric_values: list[float],
+    dataset_origin: str,
+) -> tuple[str, dict[str, Any]]:
+    """Remove the smallest deterministic blocks containing unsupported facts.
+
+    The repair never invents replacement prose. Text outside the reported body
+    spans is preserved byte-for-byte; headings are never eligible for removal.
+    """
+    try:
+        document = parse_manuscript(paper_text, strict=True)
+    except ManuscriptStructureError as exc:
+        raise ExperimentFactClosureError(
+            f"paper structure is invalid for experiment repair: {exc}"
+        ) from exc
+    patterns = {
+        "synthetic": _SYNTHETIC_CONTRADICTIONS,
+        "public": _PUBLIC_CONTRADICTIONS,
+        "local_hardware": _LOCAL_HARDWARE_CONTRADICTIONS,
+    }.get(dataset_origin)
+    if patterns is None:
+        raise ExperimentFactClosureError("invalid dataset_origin")
+
+    replacements: dict[str, str] = {}
+    operations: list[dict[str, Any]] = []
+    for section in document.sections:
+        body = section.body
+        targets: list[tuple[int, str, float | None]] = []
+        if _is_experiment_fact_section(section.title):
+            for start, _end, value, is_percent in _metric_literal_spans(body):
+                if not any(
+                    _numeric_equivalent(value, expected, is_percent=is_percent)
+                    for expected in grounded_numeric_values
+                ):
+                    targets.append((start, "unsupported_numeric", value))
+        for pattern in patterns:
+            targets.extend(
+                (match.start(), "dataset_origin_contradiction", None)
+                for match in pattern.finditer(body)
+            )
+        if not targets:
+            continue
+
+        spans: list[tuple[int, int, str, list[float]]] = []
+        for position, reason, value in targets:
+            start, end, block_type = _safe_fact_block_span(body, position)
+            values = [] if value is None else [value]
+            spans.append((start, end, block_type, values))
+        merged = _merge_repair_spans(spans)
+        repaired = body
+        for start, end, block_type, values in reversed(merged):
+            removed = repaired[start:end]
+            repaired = repaired[:start] + repaired[end:]
+            operations.append(
+                {
+                    "section_id": section.section_id,
+                    "block_type": block_type,
+                    "body_char_start": start,
+                    "body_char_end": end,
+                    "removed_sha256": _sha256(removed),
+                    "unknown_numeric_values": sorted(set(values)),
+                }
+            )
+        replacements[section.section_id] = repaired
+
+    repaired_text = merge_manuscript(document, replacements)
+    log = {
+        "schema_version": 1,
+        "_diagnostic": True,
+        "strategy": "deterministic_block_removal",
+        "source_sha256": _sha256(paper_text),
+        "repaired_sha256": _sha256(repaired_text),
+        "operations": sorted(
+            operations,
+            key=lambda row: (row["section_id"], row["body_char_start"]),
+        ),
+    }
+    return repaired_text, log
+
+
+def _is_experiment_fact_section(title: str) -> bool:
+    return any(
+        token in title.casefold()
+        for token in (
+            "abstract", "result", "experiment", "ablation", "evaluation",
+            "discussion", "conclusion",
+        )
+    )
+
+
+def _metric_literal_spans(text: str) -> list[tuple[int, int, float, bool]]:
+    spans: list[tuple[int, int, float, bool]] = []
+    occupied: list[tuple[int, int]] = []
+    for match in _DECIMAL_METRIC_RE.finditer(text):
+        token = match.group(0)
+        percent = token.endswith("%")
+        value = float(token[:-1] if percent else token)
+        spans.append(
+            (match.start(), match.end(), value / 100.0 if percent else value, percent)
+        )
+        occupied.append(match.span())
+    for match in _INTEGER_UNIT_RE.finditer(text):
+        if any(start <= match.start() < end for start, end in occupied):
+            continue
+        spans.append(
+            (match.start(), match.end(), float(match.group("number")), False)
+        )
+    return sorted(spans)
+
+
+def _safe_fact_block_span(text: str, position: int) -> tuple[int, int, str]:
+    line_start = text.rfind("\n", 0, position) + 1
+    line_end_marker = text.find("\n", position)
+    line_end = len(text) if line_end_marker < 0 else line_end_marker + 1
+    line = text[line_start:line_end]
+    stripped = line.strip()
+
+    display = _enclosing_display_math_span(text, position)
+    if display is not None:
+        return display[0], display[1], "display_math"
+    if (
+        stripped.startswith("|")
+        or ("&" in line and stripped.endswith(r"\\"))
+    ):
+        return line_start, line_end, "table_row"
+    if stripped.startswith("**Figure") or stripped.startswith("**Table") or "\\caption{" in line:
+        return line_start, line_end, "caption"
+    if re.match(r"\s*(?:[-+*]|\d+[.)])\s+", line):
+        end = line_end
+        while end < len(text):
+            next_end_marker = text.find("\n", end)
+            next_end = len(text) if next_end_marker < 0 else next_end_marker + 1
+            next_line = text[end:next_end]
+            if not next_line.strip() or re.match(r"\s*(?:[-+*]|\d+[.)])\s+", next_line):
+                break
+            end = next_end
+        return line_start, end, "list_item"
+
+    paragraph_start = text.rfind("\n\n", 0, position) + 2
+    paragraph_end_marker = text.find("\n\n", position)
+    paragraph_end = len(text) if paragraph_end_marker < 0 else paragraph_end_marker
+    sentence = _sentence_span(text, position, paragraph_start, paragraph_end)
+    if sentence is not None:
+        return sentence[0], sentence[1], "sentence"
+    return paragraph_start, paragraph_end, "paragraph"
+
+
+def _enclosing_display_math_span(text: str, position: int) -> tuple[int, int] | None:
+    for opener, closer in (("$$", "$$"), (r"\[", r"\]")):
+        starts = [match.start() for match in re.finditer(re.escape(opener), text[:position])]
+        if opener == closer:
+            start = starts[-1] if len(starts) % 2 == 1 else -1
+        else:
+            last_close = text.rfind(closer, 0, position)
+            start = starts[-1] if starts and starts[-1] > last_close else -1
+        if start >= 0:
+            end_marker = text.find(closer, position)
+            if end_marker >= position:
+                return start, end_marker + len(closer)
+            raise ExperimentFactClosureError(
+                "unsupported fact is inside unbalanced display math"
+            )
+    begin = text.rfind(r"\begin{equation}", 0, position + 1)
+    prior_end = text.rfind(r"\end{equation}", 0, position)
+    if begin >= 0 and begin > prior_end:
+        end_marker = text.find(r"\end{equation}", position)
+        if end_marker >= position:
+            return begin, end_marker + len(r"\end{equation}")
+        raise ExperimentFactClosureError(
+            "unsupported fact is inside unbalanced equation environment"
+        )
+    return None
+
+
+def _sentence_span(
+    text: str, position: int, paragraph_start: int, paragraph_end: int
+) -> tuple[int, int] | None:
+    paragraph = text[paragraph_start:paragraph_end]
+    relative = position - paragraph_start
+    boundaries = [0]
+    boundaries.extend(
+        match.end()
+        for match in re.finditer(r"[.!?][\"')\]]*(?:[ \t]+|\n+)", paragraph)
+        if not _is_abbreviation_boundary(paragraph, match.start())
+    )
+    boundaries.append(len(paragraph))
+    for start, end in zip(boundaries, boundaries[1:], strict=True):
+        if start <= relative < end:
+            while start < end and paragraph[start].isspace():
+                start += 1
+            if start < end:
+                return paragraph_start + start, paragraph_start + end
+    return None
+
+
+def _is_abbreviation_boundary(paragraph: str, punctuation_start: int) -> bool:
+    prefix = paragraph[: punctuation_start + 1]
+    return any(
+        pattern.search(prefix) is not None
+        for pattern in (
+            re.compile(r"(?:\b[A-Za-z]\.){2,}$"),
+            re.compile(r"\b[A-Z]\.$"),
+            re.compile(
+                r"\b(?:et\s+al|vs|Dr|Mr|Mrs|Ms|Prof|Fig|Eq|Ref|Sec|No)\.$",
+                re.I,
+            ),
+        )
+    )
+
+
+def _merge_repair_spans(
+    spans: list[tuple[int, int, str, list[float]]]
+) -> list[tuple[int, int, str, list[float]]]:
+    merged: list[tuple[int, int, str, list[float]]] = []
+    for start, end, block_type, values in sorted(spans):
+        if merged and start < merged[-1][1]:
+            prior_start, prior_end, prior_type, prior_values = merged[-1]
+            merged[-1] = (
+                prior_start,
+                max(prior_end, end),
+                prior_type if prior_type == block_type else "overlapping_blocks",
+                prior_values + values,
+            )
+        else:
+            merged.append((start, end, block_type, values))
+    return merged
 
 
 def _numeric_equivalent(
