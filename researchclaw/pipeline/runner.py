@@ -1163,6 +1163,50 @@ def _package_deliverables(
                     "Deliverables: paper.tex repaired — all remaining cite "
                     "keys verified"
                 )
+
+                # IMP-14b: Also strip orphan cites from paper_final.md so the
+                # markdown deliverable stays consistent with references.bib.
+                # The .md uses [key1, key2] markdown-style citations rather
+                # than \cite{...}; we conservatively only touch brackets whose
+                # entire content matches a comma-separated list of cite-key-
+                # shaped tokens (lowercase-author + 4-digit-year + suffix), so
+                # markdown links like [text](url) and other brackets are left
+                # untouched.
+                md_path = dest / "paper_final.md"
+                if md_path.exists():
+                    md_text = md_path.read_text(encoding="utf-8")
+                    _MD_CITE_KEY_RE = _re.compile(
+                        r"^[a-z][a-z]+\d{4}[a-z][a-z0-9]*$"
+                    )
+
+                    def _is_md_citation_block(content: str) -> bool:
+                        keys = [k.strip() for k in content.split(",")]
+                        keys = [k for k in keys if k]
+                        return bool(keys) and all(
+                            _MD_CITE_KEY_RE.match(k) for k in keys
+                        )
+
+                    def _filter_md_cite(m: _re.Match[str]) -> str:
+                        content = m.group(1)
+                        if not _is_md_citation_block(content):
+                            return m.group(0)  # not a citation block — leave it
+                        keys = [k.strip() for k in content.split(",")]
+                        kept = [k for k in keys if k not in missing]
+                        if not kept:
+                            return ""
+                        return "[" + ", ".join(kept) + "]"
+
+                    new_md = _re.sub(
+                        r"\[([^\[\]]+)\]", _filter_md_cite, md_text
+                    )
+                    if new_md != md_text:
+                        new_md = _re.sub(r"  +", " ", new_md)
+                        new_md = _re.sub(r" ([.,;:)])", r"\1", new_md)
+                        md_path.write_text(new_md, encoding="utf-8")
+                        logger.info(
+                            "Deliverables: paper_final.md repaired — orphan "
+                            "cite keys removed (mirroring paper.tex)"
+                        )
             else:
                 logger.info(
                     "Deliverables: all %d cite keys verified in references.bib",

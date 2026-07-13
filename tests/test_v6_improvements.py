@@ -212,6 +212,124 @@ class TestIMP14_StripOrphanedCites:
 
 
 # ============================================================
+# IMP-14b: Test orphaned cite-key stripping in paper_final.md
+# ============================================================
+
+class TestIMP14b_StripOrphanedCitesFromMarkdown:
+    """IMP-14b: paper_final.md uses [key1, key2] markdown citation syntax.
+    After packaging, any [key] where key is not in references.bib should be
+    stripped — mirroring the IMP-14 .tex stripping but in markdown form.
+
+    Conservative: only brackets whose entire content matches a comma-separated
+    list of cite-key-shaped tokens are touched. Markdown links like
+    [text](url) and other brackets are left alone.
+    """
+
+    @staticmethod
+    def _run_md_cite_stripping(md_text: str, missing: set[str]) -> str:
+        """Reproduce the IMP-14b logic from runner.py."""
+        _MD_CITE_KEY_RE = re.compile(r"^[a-z][a-z]+\d{4}[a-z][a-z0-9]*$")
+
+        def _is_md_citation_block(content: str) -> bool:
+            keys = [k.strip() for k in content.split(",")]
+            keys = [k for k in keys if k]
+            return bool(keys) and all(
+                _MD_CITE_KEY_RE.match(k) for k in keys
+            )
+
+        def _filter_md_cite(m: re.Match[str]) -> str:
+            content = m.group(1)
+            if not _is_md_citation_block(content):
+                return m.group(0)
+            keys = [k.strip() for k in content.split(",")]
+            kept = [k for k in keys if k not in missing]
+            if not kept:
+                return ""
+            return "[" + ", ".join(kept) + "]"
+
+        new_md = re.sub(r"\[([^\[\]]+)\]", _filter_md_cite, md_text)
+        if new_md != md_text:
+            new_md = re.sub(r"  +", " ", new_md)
+            new_md = re.sub(r" ([.,;:)])", r"\1", new_md)
+        return new_md
+
+    def test_mixed_real_and_missing_keys(self):
+        """[real_key, missing_key] should become [real_key]."""
+        md = "Some text [feng2020cross, bai2021memomentum] and more."
+        result = self._run_md_cite_stripping(md, {"bai2021memomentum"})
+        assert "[feng2020cross]" in result, (
+            f"Expected [feng2020cross], got: {result!r}"
+        )
+        assert "bai2021memomentum" not in result, (
+            f"missing key should be gone: {result!r}"
+        )
+        print(f"[IMP-14b] PASS: mixed keys → {result!r}")
+
+    def test_all_keys_missing(self):
+        """[missing1, missing2] should be entirely removed."""
+        md = "Some text [bai2021memomentum, xia2021robust] more."
+        result = self._run_md_cite_stripping(
+            md, {"bai2021memomentum", "xia2021robust"}
+        )
+        # Citation block fully removed; surrounding text preserved
+        assert "bai2021memomentum" not in result, (
+            f"missing1 should be gone: {result!r}"
+        )
+        assert "xia2021robust" not in result, (
+            f"missing2 should be gone: {result!r}"
+        )
+        # Whitespace cleanup folds the gap
+        assert "[" not in result and "]" not in result, (
+            f"No brackets should remain: {result!r}"
+        )
+        print(f"[IMP-14b] PASS: all missing → {result!r}")
+
+    def test_markdown_link_left_untouched(self):
+        """Markdown links like [text](url) must NOT be stripped even when
+        the link text contains words — they aren't citation blocks."""
+        md = "See [the docs](https://example.com) and [Open in DI](url2)."
+        # No keys missing here; link should still be untouched (the cite-block
+        # detector should reject these brackets even if there were a missing
+        # set).
+        result = self._run_md_cite_stripping(md, {"docs", "Open in DI"})
+        assert "[the docs](https://example.com)" in result, (
+            f"Markdown link mangled: {result!r}"
+        )
+        assert "[Open in DI](url2)" in result, (
+            f"Second link mangled: {result!r}"
+        )
+        print(f"[IMP-14b] PASS: markdown links preserved → {result!r}")
+
+    def test_real_world_paper_pattern(self):
+        """Realistic paper sentence with mixed valid/missing cite keys."""
+        md = (
+            "Prior work has emphasized loss-function design "
+            "[feng2020cross, ma2020normalized, zhou2023asymmetric], but "
+            "early-stopping interactions [bai2021memomentum, xia2021robust] "
+            "are equally important."
+        )
+        # Three valid, two orphans
+        missing = {"bai2021memomentum", "xia2021robust"}
+        result = self._run_md_cite_stripping(md, missing)
+        assert "feng2020cross" in result
+        assert "ma2020normalized" in result
+        assert "zhou2023asymmetric" in result
+        assert "bai2021memomentum" not in result
+        assert "xia2021robust" not in result
+        # Surrounding prose intact
+        assert "Prior work has emphasized loss-function design" in result
+        assert "are equally important." in result
+        print(f"[IMP-14b] PASS: real-world pattern → {result!r}")
+
+    def test_no_keys_missing_is_noop(self):
+        """When all cited keys are in the bib, paper_final.md is unchanged."""
+        md = "Text [valid2024paper, also2023ref] more text."
+        result = self._run_md_cite_stripping(md, set())
+        assert result == md, f"Expected no-op, got: {result!r}"
+        print(f"[IMP-14b] PASS: no-op → {result!r}")
+
+
+# ============================================================
 # IMP-15: Test BibTeX deduplication
 # ============================================================
 
