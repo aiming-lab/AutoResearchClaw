@@ -97,3 +97,32 @@ def test_contracts_follow_stage_sequence_order():
 @pytest.mark.parametrize("stage", STAGE_SEQUENCE)
 def test_contract_stage_int_matches_stage_enum_value(stage: Stage):
     assert int(CONTRACTS[stage].stage) == int(stage)
+
+
+def test_stage_output_satisfies_next_input():
+    # Valida la CONTINUIDAD declarativa output->input a lo largo de STAGE_SEQUENCE:
+    # recorriendo los stages en orden, cada archivo de input_files debe haber sido
+    # declarado como output_files por algun stage ANTERIOR.
+    #
+    # Notas de diseño:
+    # (a) El estado del pipeline fluye via un run_dir compartido (los stages leen/escriben
+    #     archivos en ese directorio), no por paso explicito de argumentos entre stages.
+    #     Por eso este test verifica la COHERENCIA DECLARATIVA de los contratos, no el
+    #     wiring runtime real.
+    # (b) Stages con input_files=() son casos aceptados: TOPIC_INIT (entrada del pipeline,
+    #     no consume nada previo) y KNOWLEDGE_ARCHIVE (opera sobre run_dir, no sobre
+    #     archivos declarados).
+    # (c) Si apareciera un input no cubierto por outputs previos, NO se debe parchear el
+    #     pipeline: documentarlo aqui en ALLOWED_UNSATISFIED con el motivo. Hoy esta VACIO
+    #     porque la cadena no tiene gaps.
+    ALLOWED_UNSATISFIED: set[tuple[Stage, str]] = set()
+
+    produced: set[str] = set()
+    for stage in STAGE_SEQUENCE:
+        for path in CONTRACTS[stage].input_files:
+            if (stage, path) in ALLOWED_UNSATISFIED:
+                continue
+            assert path in produced, (
+                f"{stage.name}: input file {path!r} no fue producido por ningun stage previo"
+            )
+        produced.update(CONTRACTS[stage].output_files)
