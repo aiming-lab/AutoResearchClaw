@@ -345,14 +345,17 @@ _KEYWORD_RULES: list[tuple[list[str], str]] = [
 
     # Medical observational research (before economics so "logistic regression"
     # in a retrospective cohort does not route to economics_empirical).
-    (["retrospective cohort", "case-control", "case control",
-      "cross-sectional", "cross sectional", "strobe",
+    # NOTE: generic terms "cross-sectional"/"cross sectional"/"table 1" were
+    # intentionally removed — they are common in econometrics/statistics and
+    # were hijacking non-medical topics (e.g. wage-inequality regressions)
+    # into this profile. The remaining keywords are medical-specific.
+    (["retrospective cohort", "case-control", "case control", "strobe",
       "clinical registry", "trauma registry", "patient registry",
       "ehr", "electronic health record", "his database", "his export",
       "hospital information system", "observational clinical",
       "observational study", "clinical observational",
       "medical observational", "de-identified clinical",
-      "deidentified clinical", "table 1", "irb", "ethics waiver"],
+      "deidentified clinical", "irb", "ethics waiver"],
      "medical_observational"),
 
     # Economics
