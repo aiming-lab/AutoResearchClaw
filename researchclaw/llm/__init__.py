@@ -22,15 +22,28 @@ PROVIDER_PRESETS = {
     },
     "anthropic": {
         "base_url": "https://api.anthropic.com",
+        "adapter": "anthropic",
     },
     "kimi-anthropic": {
         "base_url": "https://api.kimi.com/coding/",
+        "adapter": "anthropic",
     },
     "novita": {
         "base_url": "https://api.novita.ai/openai",
     },
     "minimax": {
         "base_url": "https://api.minimaxi.com/v1",
+    },
+    "minimax-global": {
+        "base_url": "https://api.minimax.io/v1",
+    },
+    "minimax-anthropic": {
+        "base_url": "https://api.minimax.io/anthropic",
+        "adapter": "anthropic",
+    },
+    "minimax-anthropic-cn": {
+        "base_url": "https://api.minimaxi.com/anthropic",
+        "adapter": "anthropic",
     },
     "ollama": {
         "base_url": "http://localhost:11434/v1",
@@ -45,8 +58,8 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
     """Factory: return the right LLM client based on ``config.llm.provider``.
 
     - ``"acp"`` → :class:`ACPClient` (spawns an ACP-compatible agent)
-    - ``"anthropic"`` → :class:`LLMClient` with Anthropic Messages API adapter
-    - ``"kimi-anthropic"`` → :class:`LLMClient` with Kimi Coding Anthropic adapter
+    - providers with an ``"anthropic"`` adapter → :class:`LLMClient` with
+      Anthropic Messages API support
     - ``"openrouter"`` → :class:`LLMClient` with OpenRouter base URL
     - ``"openai"`` → :class:`LLMClient` with OpenAI base URL
     - ``"deepseek"`` → :class:`LLMClient` with DeepSeek base URL

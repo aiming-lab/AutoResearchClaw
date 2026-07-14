@@ -601,7 +601,7 @@ runtime:
 
 # === LLM ===
 llm:
-  provider: "openai-compatible"    # openai | openrouter | deepseek | minimax | acp | openai-compatible
+  provider: "openai-compatible"    # See the provider presets below
   base_url: "https://..."          # API endpoint (required for openai-compatible)
   api_key_env: "OPENAI_API_KEY"    # Env var for API key (required for openai-compatible)
   api_key: ""                      # Or hardcode key here
@@ -759,6 +759,21 @@ openclaw_bridge:
   use_web_fetch: false             # Live web search
   use_browser: false               # Browser-based paper collection
 ```
+
+MiniMax presets use `MINIMAX_API_KEY`, `MiniMax-M3` as the primary model,
+and `MiniMax-M2.7` in the fallback chain.
+
+| Provider preset | Region | Protocol | Base URL |
+|---|---|---|---|
+| `minimax-global` | Global | OpenAI-compatible | `https://api.minimax.io/v1` |
+| `minimax` | China | OpenAI-compatible | `https://api.minimaxi.com/v1` |
+| `minimax-anthropic` | Global | Anthropic-compatible | `https://api.minimax.io/anthropic` |
+| `minimax-anthropic-cn` | China | Anthropic-compatible | `https://api.minimaxi.com/anthropic` |
+
+Anthropic-compatible presets require `pip install "researchclaw[anthropic]"`.
+The global and China API references are available from the
+[MiniMax platform](https://platform.minimax.io/docs) and
+[MiniMax China platform](https://platform.minimaxi.com/docs).
 
 </details>
 
