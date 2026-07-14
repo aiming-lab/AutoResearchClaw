@@ -776,6 +776,9 @@ _PROVIDER_CHOICES = {
     "4": ("minimax", "MINIMAX_API_KEY"),
     "5": ("acp", ""),
     "6": ("ollama", ""),
+    "7": ("minimax-global", "MINIMAX_API_KEY"),
+    "8": ("minimax-anthropic", "MINIMAX_API_KEY"),
+    "9": ("minimax-anthropic-cn", "MINIMAX_API_KEY"),
 }
 
 _PROVIDER_URLS = {
@@ -783,8 +786,16 @@ _PROVIDER_URLS = {
     "openrouter": "https://openrouter.ai/api/v1",
     "deepseek": "https://api.deepseek.com/v1",
     "minimax": "https://api.minimaxi.com/v1",
+    "minimax-global": "https://api.minimax.io/v1",
+    "minimax-anthropic": "https://api.minimax.io/anthropic",
+    "minimax-anthropic-cn": "https://api.minimaxi.com/anthropic",
     "ollama": "http://localhost:11434/v1",
 }
+
+_MINIMAX_MODELS = (
+    "MiniMax-M3",
+    ["MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
+)
 
 _PROVIDER_MODELS = {
     "openai": ("gpt-4o", ["gpt-4.1", "gpt-4o-mini"]),
@@ -793,7 +804,10 @@ _PROVIDER_MODELS = {
         ["google/gemini-pro-1.5", "meta-llama/llama-3.1-70b-instruct"],
     ),
     "deepseek": ("deepseek-chat", ["deepseek-reasoner"]),
-    "minimax": ("MiniMax-M3", ["MiniMax-M2.7", "MiniMax-M2.7-highspeed"]),
+    "minimax": _MINIMAX_MODELS,
+    "minimax-global": _MINIMAX_MODELS,
+    "minimax-anthropic": _MINIMAX_MODELS,
+    "minimax-anthropic-cn": _MINIMAX_MODELS,
     "ollama": ("llama3.2", ["mistral", "qwen2.5:7b"]),
 }
 
@@ -829,9 +843,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("  1) openai       (requires OPENAI_API_KEY)")
         print("  2) openrouter   (requires OPENROUTER_API_KEY)")
         print("  3) deepseek     (requires DEEPSEEK_API_KEY)")
-        print("  4) minimax      (requires MINIMAX_API_KEY)")
+        print("  4) minimax-cn-openai        (requires MINIMAX_API_KEY)")
         print("  5) acp          (local AI agent — no API key needed)")
         print("  6) ollama       (local Ollama server — no API key needed)")
+        print("  7) minimax-global-openai    (requires MINIMAX_API_KEY)")
+        print("  8) minimax-global-anthropic (requires MINIMAX_API_KEY)")
+        print("  9) minimax-cn-anthropic     (requires MINIMAX_API_KEY)")
         try:
             raw = input("Choice [1]: ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -900,6 +917,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("  1. Ensure Ollama is running: ollama serve")
         print("  2. Pull your model: ollama pull llama3.2")
         print("  3. Edit config.arc.yaml to set llm.primary_model to your model name")
+        print("  4. Run: researchclaw doctor")
+    elif provider in ("minimax-anthropic", "minimax-anthropic-cn"):
+        print("\nNext steps:")
+        print('  1. Install the adapter: pip install "researchclaw[anthropic]"')
+        print("  2. Export your API key: export MINIMAX_API_KEY=...")
+        print("  3. Edit config.arc.yaml to customize your settings")
         print("  4. Run: researchclaw doctor")
     else:
         env_var = api_key_env or "OPENAI_API_KEY"

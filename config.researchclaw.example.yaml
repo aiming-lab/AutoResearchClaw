@@ -44,13 +44,19 @@ llm:
   fallback_models:
     - "gpt-4.1"
     - "gpt-4o-mini"
-  # --- MiniMax provider example ---
-  # provider: "minimax"
+  # --- MiniMax provider example (global OpenAI-compatible endpoint) ---
+  # provider: "minimax-global"
+  # base_url: "https://api.minimax.io/v1"
   # api_key_env: "MINIMAX_API_KEY"
   # primary_model: "MiniMax-M3"
   # fallback_models:
   #   - "MiniMax-M2.7"
   #   - "MiniMax-M2.7-highspeed"
+  # Other endpoint presets:
+  #   minimax: https://api.minimaxi.com/v1
+  #   minimax-anthropic: https://api.minimax.io/anthropic
+  #   minimax-anthropic-cn: https://api.minimaxi.com/anthropic
+  # Anthropic-compatible presets require: pip install "researchclaw[anthropic]"
   # --- Ollama (local) example ---
   # provider: "ollama"
   # base_url: "http://localhost:11434/v1"

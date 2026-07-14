@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
@@ -67,6 +68,33 @@ class TestMiniMaxPreset:
     def test_minimax_base_url(self):
         assert PROVIDER_PRESETS["minimax"]["base_url"] == "https://api.minimaxi.com/v1"
 
+    @pytest.mark.parametrize(
+        ("provider", "base_url", "adapter"),
+        [
+            ("minimax-global", "https://api.minimax.io/v1", None),
+            ("minimax", "https://api.minimaxi.com/v1", None),
+            (
+                "minimax-anthropic",
+                "https://api.minimax.io/anthropic",
+                "anthropic",
+            ),
+            (
+                "minimax-anthropic-cn",
+                "https://api.minimaxi.com/anthropic",
+                "anthropic",
+            ),
+        ],
+    )
+    def test_minimax_endpoint_presets(
+        self,
+        provider: str,
+        base_url: str,
+        adapter: str | None,
+    ) -> None:
+        preset = PROVIDER_PRESETS[provider]
+        assert preset["base_url"] == base_url
+        assert preset.get("adapter") == adapter
+
 
 # ---------------------------------------------------------------------------
 # Unit tests — from_rc_config wiring
@@ -121,6 +149,76 @@ class TestMiniMaxFromRCConfig:
         )
         client = LLMClient.from_rc_config(rc_config)
         assert client.config.base_url == "https://custom-proxy.example/v1"
+
+    @pytest.mark.parametrize(
+        ("provider", "base_url", "request_url"),
+        [
+            (
+                "minimax-anthropic",
+                "https://api.minimax.io/anthropic",
+                "https://api.minimax.io/anthropic/v1/messages",
+            ),
+            (
+                "minimax-anthropic-cn",
+                "https://api.minimaxi.com/anthropic",
+                "https://api.minimaxi.com/anthropic/v1/messages",
+            ),
+        ],
+    )
+    def test_anthropic_presets_append_messages_path(
+        self,
+        provider: str,
+        base_url: str,
+        request_url: str,
+    ) -> None:
+        rc_config = SimpleNamespace(
+            llm=SimpleNamespace(
+                provider=provider,
+                base_url="",
+                api_key="mk-test",
+                api_key_env="",
+                primary_model="MiniMax-M3",
+                fallback_models=("MiniMax-M2.7",),
+            ),
+        )
+        client = LLMClient.from_rc_config(rc_config)
+        captured: dict[str, Any] = {}
+
+        class _Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return {
+                    "type": "message",
+                    "model": "MiniMax-M3",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+
+        class _Client:
+            def post(
+                self,
+                url: str,
+                headers: dict[str, str],
+                json: dict[str, Any],
+            ) -> _Response:
+                captured["url"] = url
+                return _Response()
+
+        assert client.config.base_url == base_url
+        assert client._anthropic is not None
+        client._anthropic._client = _Client()
+        response = client._raw_call(
+            "MiniMax-M3",
+            [{"role": "user", "content": "ping"}],
+            64,
+            0.5,
+            False,
+        )
+        assert captured["url"] == request_url
+        assert response.content == "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -300,21 +398,88 @@ class TestMiniMaxCLI:
     def test_minimax_in_provider_choices(self):
         from researchclaw.cli import _PROVIDER_CHOICES
 
-        found = any(v[0] == "minimax" for v in _PROVIDER_CHOICES.values())
-        assert found, "minimax not found in _PROVIDER_CHOICES"
+        providers = {value[0] for value in _PROVIDER_CHOICES.values()}
+        assert {
+            "minimax-global",
+            "minimax",
+            "minimax-anthropic",
+            "minimax-anthropic-cn",
+        } <= providers
 
-    def test_minimax_in_provider_urls(self):
+    @pytest.mark.parametrize(
+        ("provider", "base_url"),
+        [
+            ("minimax-global", "https://api.minimax.io/v1"),
+            ("minimax", "https://api.minimaxi.com/v1"),
+            ("minimax-anthropic", "https://api.minimax.io/anthropic"),
+            ("minimax-anthropic-cn", "https://api.minimaxi.com/anthropic"),
+        ],
+    )
+    def test_minimax_in_provider_urls(
+        self,
+        provider: str,
+        base_url: str,
+    ) -> None:
         from researchclaw.cli import _PROVIDER_URLS
 
-        assert _PROVIDER_URLS["minimax"] == "https://api.minimaxi.com/v1"
+        assert _PROVIDER_URLS[provider] == base_url
 
     def test_minimax_in_provider_models(self):
         from researchclaw.cli import _PROVIDER_MODELS
 
-        primary, fallbacks = _PROVIDER_MODELS["minimax"]
-        assert primary == "MiniMax-M3"
-        assert "MiniMax-M2.7" in fallbacks
-        assert "MiniMax-M2.7-highspeed" in fallbacks
+        for provider in (
+            "minimax-global",
+            "minimax",
+            "minimax-anthropic",
+            "minimax-anthropic-cn",
+        ):
+            primary, fallbacks = _PROVIDER_MODELS[provider]
+            assert primary == "MiniMax-M3"
+            assert "MiniMax-M2.7" in fallbacks
+            assert "MiniMax-M2.7-highspeed" in fallbacks
+
+    @pytest.mark.parametrize(
+        ("choice", "provider", "base_url"),
+        [
+            ("4", "minimax", "https://api.minimaxi.com/v1"),
+            ("7", "minimax-global", "https://api.minimax.io/v1"),
+            (
+                "8",
+                "minimax-anthropic",
+                "https://api.minimax.io/anthropic",
+            ),
+            (
+                "9",
+                "minimax-anthropic-cn",
+                "https://api.minimaxi.com/anthropic",
+            ),
+        ],
+    )
+    def test_init_generates_minimax_endpoint_config(
+        self,
+        choice: str,
+        provider: str,
+        base_url: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from researchclaw import cli as rc_cli
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "sys.stdin",
+            type("FakeStdin", (), {"isatty": lambda self: True})(),
+        )
+        monkeypatch.setattr("builtins.input", lambda _prompt: choice)
+        monkeypatch.setattr(rc_cli, "_prompt_opencode_install", lambda: None)
+
+        assert rc_cli.cmd_init(SimpleNamespace(force=False)) == 0
+        config = (tmp_path / "config.arc.yaml").read_text(encoding="utf-8")
+        assert f'provider: "{provider}"' in config
+        assert f'base_url: "{base_url}"' in config
+        assert 'api_key_env: "MINIMAX_API_KEY"' in config
+        assert 'primary_model: "MiniMax-M3"' in config
+        assert '    - "MiniMax-M2.7"' in config
 
 
 # ---------------------------------------------------------------------------
