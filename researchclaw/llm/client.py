@@ -291,7 +291,9 @@ class LLMClient:
         json_mode: bool,
     ) -> LLMResponse:
         """Call with exponential backoff retry."""
+        last_exc: Exception | None = None
         for attempt in range(self.config.max_retries):
+            is_last_attempt = attempt >= self.config.max_retries - 1
             try:
                 return self._raw_call(
                     model, messages, max_tokens, temperature, json_mode
@@ -331,6 +333,9 @@ class LLMClient:
                 # Retryable: 429 (rate limit), transient 400, 500, 502, 503, 504,
                 # 529 (Anthropic overloaded)
                 if status in (400, 429, 500, 502, 503, 504, 529):
+                    last_exc = e
+                    if is_last_attempt:
+                        raise
                     delay = min(
                         self.config.retry_base_delay * (2**attempt),
                         _MAX_BACKOFF_SEC,
@@ -351,35 +356,41 @@ class LLMClient:
                     continue
 
                 raise  # Other HTTP errors
-            except urllib.error.URLError:
-                if attempt < self.config.max_retries - 1:
-                    delay = min(
-                        self.config.retry_base_delay * (2**attempt),
-                        _MAX_BACKOFF_SEC,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise
+            except urllib.error.URLError as e:
+                last_exc = e
+                if is_last_attempt:
+                    raise
+                delay = min(
+                    self.config.retry_base_delay * (2**attempt),
+                    _MAX_BACKOFF_SEC,
+                )
+                time.sleep(delay)
+                continue
             except (TimeoutError, OSError) as exc:
                 # Covers TimeoutError, ConnectionResetError, IncompleteRead, etc.
-                if attempt < self.config.max_retries - 1:
-                    delay = self.config.retry_base_delay * (2**attempt)
-                    logger.info(
-                        "Retry %d/%d for %s (%s). Waiting %.1fs.",
-                        attempt + 1,
-                        self.config.max_retries,
-                        model,
-                        type(exc).__name__,
-                        delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise
+                last_exc = exc
+                if is_last_attempt:
+                    raise
+                delay = min(
+                    self.config.retry_base_delay * (2**attempt),
+                    _MAX_BACKOFF_SEC,
+                )
+                logger.info(
+                    "Retry %d/%d for %s (%s). Waiting %.1fs.",
+                    attempt + 1,
+                    self.config.max_retries,
+                    model,
+                    type(exc).__name__,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
 
-        # All retries exhausted
+        # Unreachable when max_retries >= 1: the final attempt either returns
+        # or re-raises. Guards against a non-positive max_retries config.
         raise RuntimeError(
             f"LLM call failed after {self.config.max_retries} retries for model {model}"
-        )
+        ) from last_exc
 
     def _raw_call(
         self,

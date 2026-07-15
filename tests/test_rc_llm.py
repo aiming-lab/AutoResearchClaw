@@ -13,6 +13,7 @@ from researchclaw.llm.client import (
     LLMClient,
     LLMConfig,
     LLMResponse,
+    _MAX_BACKOFF_SEC,
     _NEW_PARAM_MODELS,
     _NO_TEMPERATURE_MODELS,
 )
@@ -525,3 +526,112 @@ def test_chat_uses_fallback_after_first_model_error(monkeypatch: pytest.MonkeyPa
     response = client.chat([{"role": "user", "content": "x"}])
     assert calls == ["gpt-5.2", "gpt-5.1"]
     assert response.model == "gpt-5.1"
+
+
+def _retry_client(*, max_retries: int, retry_base_delay: float = 1.0) -> LLMClient:
+    return LLMClient(
+        LLMConfig(
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            primary_model="gpt-test",
+            fallback_models=[],
+            max_retries=max_retries,
+            retry_base_delay=retry_base_delay,
+        )
+    )
+
+
+def _record_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    delays: list[float] = []
+    monkeypatch.setattr(
+        "researchclaw.llm.client.time.sleep", lambda d: delays.append(d)
+    )
+    return delays
+
+
+def _http_error(status: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("url", status, "err", HTTPMessage(), None)
+
+
+def test_retry_reraises_original_http_error_when_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Exhausted retries must surface the HTTPError, not mask it.
+
+    preflight() classifies failures via RuntimeError.__cause__, so the
+    original error has to survive the retry loop.
+    """
+    _record_sleeps(monkeypatch)
+    client = _retry_client(max_retries=3)
+    monkeypatch.setattr(
+        LLMClient,
+        "_raw_call",
+        lambda *a, **k: (_ for _ in ()).throw(_http_error(429)),
+    )
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        client._call_with_retry("gpt-test", [], 10, 0.0, False)
+    assert exc_info.value.code == 429
+
+
+def test_preflight_reports_rate_limit_through_retry_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A persistent 429 should still be reported as a rate limit."""
+    _record_sleeps(monkeypatch)
+    client = _retry_client(max_retries=3)
+    monkeypatch.setattr(
+        LLMClient,
+        "_raw_call",
+        lambda *a, **k: (_ for _ in ()).throw(_http_error(429)),
+    )
+
+    ok, msg = client.preflight()
+    assert ok is False
+    assert "Rate limited" in msg
+
+
+def test_retry_does_not_sleep_after_final_attempt(monkeypatch: pytest.MonkeyPatch):
+    """N attempts means N-1 backoff sleeps; the last one is pure waste."""
+    delays = _record_sleeps(monkeypatch)
+    client = _retry_client(max_retries=3)
+    monkeypatch.setattr(
+        LLMClient,
+        "_raw_call",
+        lambda *a, **k: (_ for _ in ()).throw(_http_error(503)),
+    )
+
+    with pytest.raises(urllib.error.HTTPError):
+        client._call_with_retry("gpt-test", [], 10, 0.0, False)
+    assert len(delays) == 2
+
+
+def test_retry_backoff_is_capped_for_os_errors(monkeypatch: pytest.MonkeyPatch):
+    """Connection errors must honour the same 300s ceiling as HTTP errors."""
+    delays = _record_sleeps(monkeypatch)
+    client = _retry_client(max_retries=12)
+    monkeypatch.setattr(
+        LLMClient,
+        "_raw_call",
+        lambda *a, **k: (_ for _ in ()).throw(ConnectionResetError("boom")),
+    )
+
+    with pytest.raises(ConnectionResetError):
+        client._call_with_retry("gpt-test", [], 10, 0.0, False)
+    assert delays, "expected retry sleeps"
+    assert max(delays) <= _MAX_BACKOFF_SEC
+
+
+def test_retry_reraises_original_url_error_when_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _record_sleeps(monkeypatch)
+    client = _retry_client(max_retries=2)
+    monkeypatch.setattr(
+        LLMClient,
+        "_raw_call",
+        lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("no route")),
+    )
+
+    with pytest.raises(urllib.error.URLError):
+        client._call_with_retry("gpt-test", [], 10, 0.0, False)
