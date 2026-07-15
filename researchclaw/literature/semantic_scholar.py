@@ -226,6 +226,7 @@ def _request_with_retry(
         return None
 
     for attempt in range(_MAX_RETRIES):
+        is_last_attempt = attempt >= _MAX_RETRIES - 1
         try:
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=_TIMEOUT_SEC) as resp:
@@ -236,6 +237,8 @@ def _request_with_retry(
             if exc.code == 429:
                 if _cb_on_429():
                     return None  # breaker tripped
+                if is_last_attempt:
+                    break
                 delay = min(2 ** (attempt + 1), _MAX_WAIT_SEC)
                 jitter = random.uniform(0, delay * 0.3)
                 wait = delay + jitter
@@ -250,16 +253,19 @@ def _request_with_retry(
             logger.warning("S2 HTTP %d for %s", exc.code, url)
             return None
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            if is_last_attempt:
+                logger.warning("S2 request failed (%s) on final attempt", exc)
+                break
             wait = min(2**attempt, _MAX_WAIT_SEC)
-            jitter = random.uniform(0, wait * 0.2)
+            wait += random.uniform(0, wait * 0.2)
             logger.warning(
-                "S2 request failed (%s). Retry %d/%d in %ds \u2026",
+                "S2 request failed (%s). Retry %d/%d in %.1fs \u2026",
                 exc,
                 attempt + 1,
                 _MAX_RETRIES,
                 wait,
             )
-            time.sleep(wait + jitter)
+            time.sleep(wait)
     logger.error("S2 request exhausted retries for: %s", url)
     return None
 
@@ -343,6 +349,7 @@ def _post_with_retry(
         return None
 
     for attempt in range(_MAX_RETRIES):
+        is_last_attempt = attempt >= _MAX_RETRIES - 1
         try:
             req = urllib.request.Request(url, data=body, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=_TIMEOUT_SEC) as resp:
@@ -353,6 +360,8 @@ def _post_with_retry(
             if exc.code == 429:
                 if _cb_on_429():
                     return None
+                if is_last_attempt:
+                    break
                 delay = min(2 ** (attempt + 1), _MAX_WAIT_SEC)
                 jitter = random.uniform(0, delay * 0.3)
                 logger.warning(
@@ -366,16 +375,19 @@ def _post_with_retry(
             logger.warning("S2 batch HTTP %d", exc.code)
             return None
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            if is_last_attempt:
+                logger.warning("S2 batch request failed (%s) on final attempt", exc)
+                break
             wait = min(2**attempt, _MAX_WAIT_SEC)
-            jitter = random.uniform(0, wait * 0.2)
+            wait += random.uniform(0, wait * 0.2)
             logger.warning(
-                "S2 batch request failed (%s). Retry %d/%d in %ds…",
+                "S2 batch request failed (%s). Retry %d/%d in %.1fs…",
                 exc,
                 attempt + 1,
                 _MAX_RETRIES,
                 wait,
             )
-            time.sleep(wait + jitter)
+            time.sleep(wait)
 
     logger.error("S2 batch request exhausted retries")
     return None

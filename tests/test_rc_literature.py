@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import textwrap
+from email.message import Message
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -882,3 +883,74 @@ class TestCacheTTL:
 
 
 import urllib.error
+
+
+class TestS2RetrySleepBudget:
+    """The retry loops must not sleep after their final attempt."""
+
+    def _run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        exc: Exception,
+        call: str,
+    ) -> list[float]:
+        import researchclaw.literature.semantic_scholar as s2
+
+        s2._reset_circuit_breaker()
+        delays: list[float] = []
+        monkeypatch.setattr(
+            "researchclaw.literature.semantic_scholar.urllib.request.urlopen",
+            lambda *a, **kw: (_ for _ in ()).throw(exc),
+        )
+        monkeypatch.setattr(
+            "researchclaw.literature.semantic_scholar.time.sleep",
+            lambda d: delays.append(d),
+        )
+        if call == "get":
+            assert s2._request_with_retry("https://x/y", {}) is None
+        else:
+            assert s2._post_with_retry("https://x/y", {}, b"{}") is None
+        return delays
+
+    def test_get_connection_error_does_not_sleep_after_final_attempt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from researchclaw.literature.semantic_scholar import _MAX_RETRIES
+
+        delays = self._run(monkeypatch, ConnectionResetError("boom"), "get")
+        assert len(delays) == _MAX_RETRIES - 1
+
+    def test_post_connection_error_does_not_sleep_after_final_attempt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from researchclaw.literature.semantic_scholar import _MAX_RETRIES
+
+        delays = self._run(monkeypatch, ConnectionResetError("boom"), "post")
+        assert len(delays) == _MAX_RETRIES - 1
+
+    def test_get_429_does_not_sleep_after_final_attempt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from researchclaw.literature.semantic_scholar import _MAX_RETRIES
+
+        err = urllib.error.HTTPError("url", 429, "Too Many", Message(), None)
+        delays = self._run(monkeypatch, err, "get")
+        assert len(delays) <= _MAX_RETRIES - 1
+
+    def test_post_429_does_not_sleep_after_final_attempt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from researchclaw.literature.semantic_scholar import _MAX_RETRIES
+
+        err = urllib.error.HTTPError("url", 429, "Too Many", Message(), None)
+        delays = self._run(monkeypatch, err, "post")
+        assert len(delays) <= _MAX_RETRIES - 1
+
+    def test_retries_still_back_off_between_attempts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guard against 'fixing' the sleep by removing backoff entirely."""
+        delays = self._run(monkeypatch, ConnectionResetError("boom"), "get")
+        assert delays, "expected backoff sleeps between attempts"
+        assert delays == sorted(delays), "backoff should be non-decreasing"
+        assert all(d > 0 for d in delays)
