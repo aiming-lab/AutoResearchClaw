@@ -112,6 +112,23 @@ class TestPromptManagerDefaults:
         assert "ml" in sp.user
         assert sp.system
 
+    def test_topic_init_no_sota_hallucination(self) -> None:
+        """topic_init prompt must not ask for specific SOTA numbers (issue #238)."""
+        pm = PromptManager()
+        sp = pm.for_stage(
+            "topic_init",
+            topic="graph neural networks",
+            domains="ml",
+            project_name="test",
+            quality_threshold="4.0",
+        )
+        user = sp.user
+        # Must explicitly block paper citations and SOTA figures
+        assert "Do NOT fabricate" in user or "do NOT state specific" in user
+        # Must not ask the model to produce exact SOTA performance numbers
+        assert "what they are" not in user
+        assert "current SOTA (if known)" not in user
+
     def test_json_mode_stages(self) -> None:
         pm = PromptManager()
         json_stages = [

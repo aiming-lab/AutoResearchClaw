@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import socket
 import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import NamedTuple, cast
 from unittest.mock import patch
@@ -604,3 +605,23 @@ def test_print_doctor_report_ascii_fallback(monkeypatch: pytest.MonkeyPatch) -> 
     out = "".join(fake_stdout.parts)
     assert "[OK] python_version: ok" in out
     assert "Result: PASS" in out
+
+
+def test_check_llm_connectivity_probes_with_get_not_head() -> None:
+    """Some OpenAI-compatible gateways reject HEAD on /models (see #292, #241).
+
+    Probing with HEAD makes `doctor` report a false failure for endpoints
+    that serve normal GET traffic fine.
+    """
+    captured: list[urllib.request.Request] = []
+
+    def _capture(req, timeout=None):  # type: ignore[no-untyped-def]
+        captured.append(req)
+        return _DummyHTTPResponse(status=200)
+
+    with patch("urllib.request.urlopen", _capture):
+        result = health.check_llm_connectivity("https://api.example.com/v1")
+
+    assert result.status == "pass"
+    assert captured, "expected a probe request"
+    assert captured[0].get_method() == "GET"

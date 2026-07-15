@@ -320,11 +320,10 @@ def test_execute_stage_creates_stage_dir_writes_artifacts_and_meta(
     assert "goal.md" in result.artifacts
     assert "hardware_profile.json" in result.artifacts
     assert (run_dir / "stage-01").is_dir()
-    assert (
-        (run_dir / "stage-01" / "goal.md")
-        .read_text(encoding="utf-8")
-        .startswith("# Goal")
-    )
+    goal_text = (run_dir / "stage-01" / "goal.md").read_text(encoding="utf-8")
+    # goal.md now starts with a disclaimer blockquote; the original content follows
+    assert "# Goal" in goal_text
+    assert "unverified draft" in goal_text  # disclaimer is present
     assert (run_dir / "stage-01" / "hardware_profile.json").exists()
     assert len(fake_llm.calls) == 1
 

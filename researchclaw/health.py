@@ -174,7 +174,9 @@ def check_llm_connectivity(base_url: str, api_key: str = "") -> CheckResult:
     headers: dict[str, str] = {}
     if api_key.strip():
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(url, headers=headers, method="HEAD")
+    # Use GET instead of HEAD because some OpenAI-compatible gateways
+    # reject HEAD probes on `/models` even though normal GET/model calls work.
+    req = urllib.request.Request(url, headers=headers)
 
     try:
         with urllib.request.urlopen(req, timeout=5):
@@ -186,7 +188,7 @@ def check_llm_connectivity(base_url: str, api_key: str = "") -> CheckResult:
     except urllib.error.HTTPError as exc:
         if exc.code in (404, 405):
             # /models not available (e.g. MiniMax, some proxies) — try
-            # /chat/completions with HEAD/GET as a fallback probe.
+            # /chat/completions as a fallback probe.
             fallback_url = f"{base_url.rstrip('/')}/chat/completions"
             probe_urls = [url, fallback_url] if exc.code == 405 else [fallback_url]
             for probe in probe_urls:

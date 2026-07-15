@@ -183,9 +183,11 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
             "will be retrieved in the literature search stage.\n"
             "- Name the specific benchmark/dataset that will be used for evaluation.\n"
             "- If no standard benchmark exists, explain how results will be measured.\n"
-            "- State whether SOTA results exist on this benchmark and what they are.\n"
-            "- Add a 'Benchmark' subsection listing: name, source, metrics, "
-            "current SOTA (if known)."
+            "- Note whether SOTA results are commonly tracked on this benchmark "
+            "(do NOT state specific model names or performance numbers — these "
+            "will be verified in the literature search stage).\n"
+            "- Add a 'Benchmark' subsection listing: name, source, and typical "
+            "metrics — omit unverified performance numbers."
         ),
     },
     "problem_decompose": {

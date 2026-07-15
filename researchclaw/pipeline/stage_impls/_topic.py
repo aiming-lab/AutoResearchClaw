@@ -54,6 +54,15 @@ def _execute_topic_init(
             system=sp.system,
         )
         goal_md = resp.content
+        # Prepend a disclaimer so downstream stages treat any benchmark/SOTA
+        # figures in this file as provisional estimates, not verified facts.
+        # Actual citation and SOTA verification happens in later stages.
+        disclaimer = (
+            "> **Note (Stage 01 — unverified draft):** Benchmark names and SOTA "
+            "claims in this file are LLM-generated estimates. "
+            "They will be verified during the literature search stage.\n\n"
+        )
+        goal_md = disclaimer + goal_md
     else:
         goal_md = f"""# Research Goal
 
