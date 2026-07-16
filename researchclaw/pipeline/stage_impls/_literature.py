@@ -481,7 +481,6 @@ def _execute_literature_collect(
     if config.web_search.enabled:
         try:
             from researchclaw.web.agent import WebSearchAgent
-            import os
 
             tavily_key = config.web_search.tavily_api_key or os.environ.get(
                 config.web_search.tavily_api_key_env, ""
@@ -645,7 +644,7 @@ def _execute_literature_collect(
 
 
 _MAX_ABSTRACT_LEN = 800  # Truncate long abstracts to reduce token usage
-_MAX_CANDIDATES_CHARS = 30_000  # Cap total candidates text sent to LLM
+_MAX_CANDIDATES_CHARS = 100_000  # Cap total candidates text sent to LLM
 
 
 def _execute_literature_screen(
@@ -686,6 +685,13 @@ def _execute_literature_screen(
     # If pre-filter dropped everything, fall back to original (safety valve)
     if not filtered_rows:
         filtered_rows = _parse_jsonl_rows(candidates_text)
+    # Sort by keyword overlap (descending) before the char cap below drops
+    # anything — candidates arrive in raw search order (whichever query/
+    # source happened to return them), not relevance order. Without this,
+    # the _MAX_CANDIDATES_CHARS truncation can silently drop every relevant
+    # paper while keeping only whatever off-topic results came first, and
+    # the LLM correctly (but uselessly) rejects the truncated set it saw.
+    filtered_rows.sort(key=lambda r: r.get("keyword_overlap", 0), reverse=True)
     # Truncate abstracts and strip authors to reduce token usage
     for row in filtered_rows:
         abstract = row.get("abstract", "")
