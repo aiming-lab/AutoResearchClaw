@@ -100,6 +100,55 @@ class TestBenchmarkKnowledge:
 
 
 # ---------------------------------------------------------------------------
+# biology_singlecell domain tests
+# ---------------------------------------------------------------------------
+
+
+class TestBiologySingleCellDomain:
+    """Regression tests for the biology_singlecell benchmark entry."""
+
+    def _domain(self) -> dict[str, Any]:
+        from researchclaw.agents.benchmark_agent.surveyor import _KNOWLEDGE_PATH
+        data = yaml.safe_load(_KNOWLEDGE_PATH.read_text(encoding="utf-8"))
+        return data["domains"]["biology_singlecell"]
+
+    def test_domain_present(self) -> None:
+        from researchclaw.agents.benchmark_agent.surveyor import _KNOWLEDGE_PATH
+        data = yaml.safe_load(_KNOWLEDGE_PATH.read_text(encoding="utf-8"))
+        assert "biology_singlecell" in data["domains"]
+
+    def test_keywords_match_expected_topics(self) -> None:
+        domain = self._domain()
+        keywords = [k.lower() for k in domain["keywords"]]
+        for topic in ["single-cell RNA-seq clustering", "PBMC transcriptomics analysis"]:
+            topic_lower = topic.lower()
+            assert any(kw in topic_lower for kw in keywords), (
+                f"No keyword in {keywords} matches topic {topic!r}"
+            )
+
+    def test_benchmarks_are_tier_1_and_network_free(self) -> None:
+        # All three entries are self-caching scanpy calls (<6MB each), so
+        # they should not require a separate setup-phase download step.
+        domain = self._domain()
+        names = {b["name"] for b in domain["standard_benchmarks"]}
+        assert names == {"PBMC3k", "PBMC3k-processed", "PBMC68k-reduced"}
+        for b in domain["standard_benchmarks"]:
+            assert b["tier"] == 1, f"{b['name']} expected tier 1, got {b['tier']}"
+            assert b["api"].startswith("scanpy.datasets.")
+
+    def test_baselines_use_preinstalled_packages_only(self) -> None:
+        # Dockerfile.biology installs scanpy/anndata/leidenalg/biopython on
+        # top of the numpy/scipy/sklearn base image — no baseline here
+        # should declare an extra pip dependency.
+        domain = self._domain()
+        for bl in domain["common_baselines"]:
+            assert bl["pip"] == [], (
+                f"{bl['name']} declares pip deps {bl['pip']}, but "
+                "Dockerfile.biology has no extra install step for them"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Surveyor tests
 # ---------------------------------------------------------------------------
 
