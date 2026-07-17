@@ -853,3 +853,48 @@ domains:
         source: "sklearn.neural_network.MLPClassifier(hidden_layer_sizes=(256, 128))"
         paper: "Standard neural network baseline"
         pip: []
+
+  biology_singlecell:
+    keywords:
+      - single-cell
+      - single cell
+      - scrna-seq
+      - transcriptomics
+      - cell clustering
+      - pbmc
+    standard_benchmarks:
+      - name: PBMC3k
+        tier: 1
+        domain: biology_singlecell
+        size_mb: 5.9
+        samples: 2700
+        metrics: [ARI, NMI]
+        api: "scanpy.datasets.pbmc3k()"
+      - name: PBMC3k-processed
+        tier: 1
+        domain: biology_singlecell
+        samples: 2638
+        metrics: [ARI, NMI]
+        api: "scanpy.datasets.pbmc3k_processed()"
+      # NOTE: despite the "68k" name, scanpy ships only a ~700-cell reduced
+      # subsample of the original 68k-cell dataset (verified against current
+      # scanpy docs) — not the full 68,000 cells.
+      - name: PBMC68k-reduced
+        tier: 1
+        domain: biology_singlecell
+        samples: 700
+        metrics: [ARI, NMI]
+        api: "scanpy.datasets.pbmc68k_reduced()"
+    common_baselines:
+      - name: Leiden Clustering
+        source: "scanpy.tl.leiden(adata)"
+        paper: "Traag et al., From Louvain to Leiden, Scientific Reports 2019"
+        pip: []
+      - name: K-Means (PCA-reduced)
+        source: "sklearn.cluster.KMeans(n_clusters=k).fit(adata.obsm['X_pca'])"
+        paper: "MacQueen, Some methods for classification and analysis of multivariate observations, 1967"
+        pip: []
+      - name: Agglomerative Clustering
+        source: "sklearn.cluster.AgglomerativeClustering(n_clusters=k)"
+        paper: "Ward, Hierarchical grouping to optimize an objective function, JASA 1963"
+        pip: []
