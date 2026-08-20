@@ -40,6 +40,11 @@ llm:
   wire_api: "chat_completions"  # Set to "responses" for Responses-only gateways
   api_key_env: "OPENAI_API_KEY"
   api_key: ""
+  # Reasoning effort for reasoning models (o-series, gpt-5.x) reached through
+  # OpenAI or OpenRouter: xhigh | high | medium | low | minimal | none.
+  # Empty = provider default. Models that are not reasoning models never see
+  # the parameter, so this is safe to leave set when switching models.
+  reasoning_effort: ""
   primary_model: "gpt-4o"
   fallback_models:
     - "gpt-4.1"

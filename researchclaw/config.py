@@ -215,6 +215,10 @@ class LlmConfig:
     reviewer_base_url: str = ""
     reviewer_api_key: str = ""
     reviewer_api_key_env: str = ""
+    # Reasoning effort for reasoning models (o-series, gpt-5.x) reached through
+    # OpenAI or OpenRouter: xhigh | high | medium | low | minimal | none.
+    # Empty = provider default. Non-reasoning models never see the parameter.
+    reasoning_effort: str = ""
     # Multi-model debate engine. Opt-in; the debate panel reuses existing models
     # (primary_model + reviewer_model + fallback_models, deduped), each role
     # bound to a different model. The judge reuses reviewer_model.
@@ -1195,6 +1199,7 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
         reviewer_provider=data.get("reviewer_provider", ""),
         reviewer_base_url=data.get("reviewer_base_url", ""),
         reviewer_api_key=data.get("reviewer_api_key", ""),
+        reasoning_effort=str(data.get("reasoning_effort", "") or ""),
         reviewer_api_key_env=data.get("reviewer_api_key_env", ""),
         debate_enabled=bool(data.get("debate_enabled", False)),
         debate_rounds=_safe_int(data.get("debate_rounds"), 1),

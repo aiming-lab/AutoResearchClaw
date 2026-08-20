@@ -44,6 +44,23 @@ _NO_TEMPERATURE_MODELS = frozenset(
     }
 )
 
+
+def _strip_provider(model: str) -> str:
+    """Strip an OpenRouter-style provider prefix: 'openai/gpt-5.4' -> 'gpt-5.4'."""
+    return model.split("/", 1)[1] if model and "/" in model else (model or "")
+
+
+def _supports_reasoning_effort(model: str) -> bool:
+    """True for models that accept a ``reasoning.effort`` parameter.
+
+    Reuses ``_NEW_PARAM_MODELS`` rather than keeping a second list: the models
+    that need ``max_completion_tokens`` are the same reasoning family. Tolerates
+    a provider prefix so the check also works through OpenRouter.
+    """
+    m = _strip_provider(model).lower()
+    return any(m.startswith(prefix) for prefix in _NEW_PARAM_MODELS)
+
+
 _DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -83,6 +100,8 @@ class LLMConfig:
     retry_base_delay: float = 2.0
     timeout_sec: int = 300
     user_agent: str = _DEFAULT_USER_AGENT
+    # Reasoning effort for reasoning models; empty = provider default.
+    reasoning_effort: str = ""
     # MetaClaw bridge: extra headers for proxy requests
     extra_headers: dict[str, str] = field(default_factory=dict)
     # MetaClaw bridge: fallback URL if primary (proxy) is unreachable
@@ -163,6 +182,7 @@ class LLMClient:
             fallback_url=fallback_url,
             fallback_api_key=fallback_api_key,
             timeout_sec=getattr(rc_config.llm, "timeout_sec", 600),
+            reasoning_effort=getattr(rc_config.llm, "reasoning_effort", "") or "",
         )
         client = cls(config)
 
@@ -225,6 +245,7 @@ class LLMClient:
             primary_model=reviewer_model,
             fallback_models=[],
             timeout_sec=getattr(llm, "timeout_sec", 600),
+            reasoning_effort=getattr(llm, "reasoning_effort", "") or "",
         )
         client = cls(config)
 
@@ -498,6 +519,13 @@ class LLMClient:
                     body["max_completion_tokens"] = max(max_tokens, reasoning_min)
                 else:
                     body["max_tokens"] = max_tokens
+
+                # Pass reasoning effort through to reasoning models when it is
+                # configured. Gated on the model so non-reasoning models, which
+                # reject an unknown `reasoning` field with HTTP 400, never see it.
+                _effort = (self.config.reasoning_effort or "").strip()
+                if _effort and _supports_reasoning_effort(model):
+                    body["reasoning"] = {"effort": _effort}
 
             if json_mode:
                 # Many OpenAI-compatible providers don't support the
