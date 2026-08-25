@@ -686,6 +686,7 @@ experiment:
 web_search:
   enabled: true                      # Enable web-augmented literature search
   tavily_api_key_env: "TAVILY_API_KEY"  # Tavily API key env var (optional)
+  serply_api_key_env: "SERPLY_API_KEY"  # Serply API key env var (optional): Google web + Scholar via REST
   enable_scholar: true               # Google Scholar search
   enable_pdf_extraction: true        # Extract text from PDFs
   max_web_results: 10                # Max web results per query
