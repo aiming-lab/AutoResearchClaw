@@ -650,6 +650,8 @@ class WebSearchConfig:
     enabled: bool = True
     tavily_api_key: str = ""
     tavily_api_key_env: str = "TAVILY_API_KEY"
+    serply_api_key: str = ""
+    serply_api_key_env: str = "SERPLY_API_KEY"
     enable_scholar: bool = True
     enable_crawling: bool = True
     enable_pdf_extraction: bool = True
@@ -1020,6 +1022,10 @@ class RCConfig:
                 tavily_api_key=str(web_search.get("tavily_api_key", "")),
                 tavily_api_key_env=str(
                     web_search.get("tavily_api_key_env", "TAVILY_API_KEY")
+                ),
+                serply_api_key=str(web_search.get("serply_api_key", "")),
+                serply_api_key_env=str(
+                    web_search.get("serply_api_key_env", "SERPLY_API_KEY")
                 ),
                 enable_scholar=bool(web_search.get("enable_scholar", True)),
                 enable_crawling=bool(web_search.get("enable_crawling", True)),

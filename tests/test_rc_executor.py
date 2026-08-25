@@ -2268,7 +2268,9 @@ class TestLiteratureCollectConfiguration:
                 return FakeWebResult()
 
         monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        monkeypatch.delenv("SERPLY_API_KEY", raising=False)
         monkeypatch.setenv("CUSTOM_TAVILY_KEY", "tavily-env-key")
+        monkeypatch.setenv("CUSTOM_SERPLY_KEY", "serply-env-key")
         monkeypatch.setattr(
             "researchclaw.web.agent.WebSearchAgent",
             FakeWebSearchAgent,
@@ -2280,6 +2282,8 @@ class TestLiteratureCollectConfiguration:
                 enabled=True,
                 tavily_api_key="",
                 tavily_api_key_env="CUSTOM_TAVILY_KEY",
+                serply_api_key="",
+                serply_api_key_env="CUSTOM_SERPLY_KEY",
                 enable_scholar=False,
                 enable_crawling=False,
                 enable_pdf_extraction=False,
@@ -2300,6 +2304,7 @@ class TestLiteratureCollectConfiguration:
         assert result.status == StageStatus.DONE
         assert captured["web_agent_kwargs"] == {
             "tavily_api_key": "tavily-env-key",
+            "serply_api_key": "serply-env-key",
             "enable_scholar": False,
             "enable_crawling": False,
             "enable_pdf": False,

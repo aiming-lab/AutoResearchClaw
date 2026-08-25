@@ -155,3 +155,100 @@ class TestWebSearchClient:
                 r.url != responses[0].results[0].url
                 for r in responses[1].results
             )
+
+
+# ---------------------------------------------------------------------------
+# Serply backend
+# ---------------------------------------------------------------------------
+
+
+def _serply_response(payload: dict) -> MagicMock:
+    import json
+
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps(payload).encode("utf-8")
+    return mock_resp
+
+
+class TestSerplyBackend:
+    @patch("researchclaw.web.search.urlopen")
+    def test_search_serply_parses_results(self, mock_urlopen):
+        mock_urlopen.return_value = _serply_response({
+            "results": [
+                {
+                    "title": "Knowledge Distillation: A Survey",
+                    "link": "https://arxiv.org/abs/2503.12067",
+                    "description": "We provide a survey of knowledge distillation methods.",
+                },
+                {"title": "No link here", "description": "dropped"},
+            ],
+        })
+
+        client = WebSearchClient(api_key="", serply_api_key="serply-key")
+        import time
+        response = client._search_serply("knowledge distillation survey", 10, time.monotonic())
+
+        assert response.source == "serply"
+        assert len(response.results) == 1
+        assert response.results[0].title == "Knowledge Distillation: A Survey"
+        assert response.results[0].url == "https://arxiv.org/abs/2503.12067"
+        assert response.results[0].snippet.startswith("We provide a survey")
+        assert response.results[0].source == "serply"
+
+        request = mock_urlopen.call_args.args[0]
+        assert request.full_url.startswith("https://api.serply.io/v1/search/?")
+        assert "q=knowledge+distillation+survey" in request.full_url
+        assert "num=10" in request.full_url
+        assert request.get_header("X-api-key") == "serply-key"
+        assert request.get_header("User-agent")
+
+    @patch("researchclaw.web.search.urlopen")
+    def test_search_uses_serply_when_only_serply_key_set(self, mock_urlopen, monkeypatch):
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        mock_urlopen.return_value = _serply_response({
+            "results": [{"title": "R", "link": "https://ex.com/r", "description": "d"}],
+        })
+
+        client = WebSearchClient(api_key="", serply_api_key="serply-key")
+        response = client.search("test query")
+
+        assert response.source == "serply"
+        assert len(response.results) == 1
+
+    @patch("researchclaw.web.search.urlopen")
+    def test_search_serply_error_falls_back_to_ddg(self, mock_urlopen, monkeypatch):
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        ddg_resp = MagicMock()
+        ddg_resp.read.return_value = b'''
+        <a class="result__a" href="https://paper.com">Paper Title</a>
+        <a class="result__snippet">About the paper</a>
+        '''
+        mock_urlopen.side_effect = [Exception("HTTP 403"), ddg_resp]
+
+        client = WebSearchClient(api_key="", serply_api_key="serply-key")
+        response = client.search("test query")
+
+        assert response.source == "duckduckgo"
+        assert len(response.results) == 1
+
+    def test_tavily_preferred_over_serply_when_both_keys_set(self):
+        mock_client_instance = MagicMock()
+        mock_client_instance.search.return_value = {"results": [], "answer": ""}
+        mock_tavily_module = MagicMock()
+        mock_tavily_module.TavilyClient.return_value = mock_client_instance
+
+        with patch.dict("sys.modules", {"tavily": mock_tavily_module}), patch(
+            "researchclaw.web.search.urlopen"
+        ) as mock_urlopen:
+            client = WebSearchClient(api_key="tvly-key", serply_api_key="serply-key")
+            response = client.search("test query")
+
+        assert response.source == "tavily"
+        mock_urlopen.assert_not_called()
+
+    def test_no_keys_leaves_serply_disabled(self, monkeypatch):
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        monkeypatch.delenv("SERPLY_API_KEY", raising=False)
+        client = WebSearchClient()
+        assert client.api_key == ""
+        assert client.serply_api_key == ""

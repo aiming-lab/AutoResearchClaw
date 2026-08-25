@@ -1,6 +1,6 @@
 """Unified Web Search Agent.
 
-Orchestrates all web capabilities (Tavily, Google Scholar, Crawl4AI,
+Orchestrates all web capabilities (Tavily/Serply, Google Scholar, Crawl4AI,
 PDF extraction) into a single search-and-extract pipeline.
 
 Usage::
@@ -11,7 +11,7 @@ Usage::
         search_queries=["knowledge distillation survey", "ViT compression"],
     )
     # result.papers — Google Scholar papers
-    # result.web_results — Tavily/DDG web search results
+    # result.web_results — Tavily/Serply/DDG web search results
     # result.crawled_pages — full-text from crawled URLs
 """
 
@@ -138,6 +138,9 @@ class WebSearchAgent:
     ----------
     tavily_api_key:
         Tavily API key (optional, falls back to env var or DuckDuckGo).
+    serply_api_key:
+        Serply API key (optional, falls back to ``SERPLY_API_KEY``). Used for
+        web search when no Tavily key is set and for Google Scholar search.
     enable_scholar:
         Whether to include Google Scholar search.
     enable_crawling:
@@ -156,6 +159,7 @@ class WebSearchAgent:
         self,
         *,
         tavily_api_key: str = "",
+        serply_api_key: str = "",
         enable_scholar: bool = True,
         enable_crawling: bool = True,
         enable_pdf: bool = True,
@@ -163,9 +167,11 @@ class WebSearchAgent:
         max_scholar_results: int = 10,
         max_crawl_urls: int = 5,
     ) -> None:
-        self.web_client = WebSearchClient(api_key=tavily_api_key)
+        self.web_client = WebSearchClient(
+            api_key=tavily_api_key, serply_api_key=serply_api_key,
+        )
         try:
-            self.scholar_client = GoogleScholarClient()
+            self.scholar_client = GoogleScholarClient(serply_api_key=serply_api_key)
         except ImportError:
             self.scholar_client = None  # type: ignore[assignment]
         self.crawler = WebCrawler()
@@ -205,7 +211,7 @@ class WebSearchAgent:
         if search_queries is None:
             search_queries = self._generate_queries(topic)
 
-        # 2. Web search (Tavily / DuckDuckGo)
+        # 2. Web search (Tavily / Serply / DuckDuckGo)
         self._run_web_search(result, search_queries)
 
         # 3. Google Scholar search

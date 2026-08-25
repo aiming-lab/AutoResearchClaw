@@ -3,20 +3,32 @@
 scholarly is installed as a dependency and provides direct access to
 Google Scholar search, citation graph traversal, and author lookup.
 
+When a Serply API key is configured, paper search goes through Serply's
+Scholar endpoint (a keyed REST API, https://serply.io/docs) first and
+only falls back to scholarly scraping if that call fails.
+
 Usage::
 
     client = GoogleScholarClient()
     papers = client.search("attention is all you need", limit=5)
     citing = client.get_citations(papers[0].scholar_id, limit=10)
+
+    client = GoogleScholarClient(serply_api_key="...")
+    papers = client.search("attention is all you need", limit=5)
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 try:
     from scholarly import scholarly, ProxyGenerator
@@ -27,6 +39,12 @@ except ImportError:
     HAS_SCHOLARLY = False
 
 logger = logging.getLogger(__name__)
+
+SERPLY_SCHOLAR_URL = "https://api.serply.io/v1/scholar/"
+# Serply sits behind Cloudflare and rejects requests without a User-Agent.
+SERPLY_USER_AGENT = "researchclaw (+https://github.com/aiming-lab/AutoResearchClaw)"
+_YEAR_PATTERN = re.compile(r"\b(?:19|20)\d{2}\b")
+_TRAILING_YEAR_PATTERN = re.compile(r",?\s*\b((?:19|20)\d{2})\s*$")
 
 
 @dataclass
@@ -82,6 +100,9 @@ class GoogleScholarClient:
         Seconds between requests to avoid rate limiting.
     use_proxy:
         Whether to set up a free proxy to reduce blocking risk.
+    serply_api_key:
+        Serply API key. Falls back to ``SERPLY_API_KEY`` env var. When
+        set, ``search()`` uses Serply's Scholar endpoint before scholarly.
     """
 
     def __init__(
@@ -89,16 +110,19 @@ class GoogleScholarClient:
         *,
         inter_request_delay: float = 2.0,
         use_proxy: bool = False,
+        serply_api_key: str = "",
     ) -> None:
-        if not HAS_SCHOLARLY:
+        self.serply_api_key = serply_api_key or os.environ.get("SERPLY_API_KEY", "")
+        if not HAS_SCHOLARLY and not self.serply_api_key:
             raise ImportError(
                 "scholarly is required for Google Scholar search. "
-                "Install: pip install 'researchclaw[web]'"
+                "Install: pip install 'researchclaw[web]' "
+                "(or set SERPLY_API_KEY to use Serply's Scholar API instead)"
             )
         self.delay = inter_request_delay
         self._last_request_time: float = 0.0
 
-        if use_proxy:
+        if use_proxy and HAS_SCHOLARLY:
             try:
                 pg = ProxyGenerator()
                 pg.FreeProxies()
@@ -114,6 +138,14 @@ class GoogleScholarClient:
 
     def search(self, query: str, *, limit: int = 10) -> list[ScholarPaper]:
         """Search Google Scholar for papers matching query."""
+        if self.serply_api_key:
+            try:
+                return self._search_serply(query, limit=limit)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Serply Scholar search failed: %s", exc)
+                if not HAS_SCHOLARLY:
+                    return []
+
         self._rate_limit()
         results: list[ScholarPaper] = []
         try:
@@ -171,6 +203,80 @@ class GoogleScholarClient:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Author search failed for %s: %s", name, exc)
             return []
+
+    # ------------------------------------------------------------------
+    # Serply Scholar backend (keyed REST API, stdlib only)
+    # ------------------------------------------------------------------
+
+    def _search_serply(self, query: str, *, limit: int = 10) -> list[ScholarPaper]:
+        """Search via Serply's Scholar endpoint."""
+        params = {"q": query, "num": max(1, min(limit, 100))}
+        req = Request(f"{SERPLY_SCHOLAR_URL}?{urlencode(params)}", headers={
+            "X-Api-Key": self.serply_api_key,
+            "Accept": "application/json",
+            "User-Agent": SERPLY_USER_AGENT,
+        })
+        resp = urlopen(req, timeout=15)  # noqa: S310
+        payload = json.loads(resp.read().decode("utf-8"))
+
+        results: list[ScholarPaper] = []
+        for article in payload.get("articles", [])[:limit]:
+            paper = self._parse_serply_article(article)
+            if paper.title:
+                results.append(paper)
+
+        logger.info("Serply Scholar: found %d papers for %r", len(results), query)
+        return results
+
+    @staticmethod
+    def _parse_serply_article(article: dict[str, Any]) -> ScholarPaper:
+        """Parse one Serply ``articles[]`` entry into a ScholarPaper.
+
+        Serply returns ``author.authors[]`` plus a ``description`` line of
+        the form ``"A Author, B Author - Venue, 2021"``; venue and year are
+        recovered from that line.
+        """
+        author_info = article.get("author") or {}
+        authors = [
+            str(a.get("name", "")).strip()
+            for a in author_info.get("authors", [])
+            if isinstance(a, dict) and a.get("name")
+        ]
+        description = str(article.get("description") or author_info.get("names") or "")
+
+        venue = ""
+        year = 0
+        meta = description.rsplit(" - ", 1)[1] if " - " in description else ""
+        if meta:
+            trailing_year = _TRAILING_YEAR_PATTERN.search(meta)
+            if trailing_year:
+                year = int(trailing_year.group(1))
+                venue = meta[: trailing_year.start()].strip(" ,")
+            else:
+                venue = meta.strip(" ,")
+                any_year = _YEAR_PATTERN.search(meta)
+                if any_year:
+                    year = int(any_year.group(0))
+        if not authors and " - " in description:
+            authors = [a.strip() for a in description.rsplit(" - ", 1)[0].split(",") if a.strip()]
+
+        doc = article.get("doc") or {}
+        citations = (article.get("extras") or {}).get("citations") or {}
+        try:
+            citation_count = int(citations.get("count", 0))
+        except (TypeError, ValueError):
+            citation_count = 0
+
+        return ScholarPaper(
+            title=str(article.get("title", "")).strip(),
+            authors=authors,
+            year=year,
+            abstract=str(article.get("snippet", "")),
+            citation_count=citation_count,
+            url=str(article.get("link") or doc.get("link") or ""),
+            scholar_id=str(article.get("id", "")),
+            venue=venue,
+        )
 
     # ------------------------------------------------------------------
     # Internals

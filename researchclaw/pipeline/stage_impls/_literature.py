@@ -501,7 +501,7 @@ def _execute_literature_collect(
         if isinstance(payload, dict) and isinstance(payload.get("candidates"), list):
             candidates = [row for row in payload["candidates"] if isinstance(row, dict)]
 
-    # --- Web search augmentation (Tavily/DDG + Google Scholar + Crawl4AI) ---
+    # --- Web search augmentation (Tavily/Serply/DDG + Google Scholar + Crawl4AI) ---
     web_context_parts: list[str] = []
     if config.web_search.enabled:
         try:
@@ -510,8 +510,12 @@ def _execute_literature_collect(
             tavily_key = config.web_search.tavily_api_key or os.environ.get(
                 config.web_search.tavily_api_key_env, ""
             )
+            serply_key = config.web_search.serply_api_key or os.environ.get(
+                config.web_search.serply_api_key_env, ""
+            )
             web_agent = WebSearchAgent(
                 tavily_api_key=tavily_key,
+                serply_api_key=serply_key,
                 enable_scholar=config.web_search.enable_scholar,
                 enable_crawling=config.web_search.enable_crawling,
                 enable_pdf=config.web_search.enable_pdf_extraction,

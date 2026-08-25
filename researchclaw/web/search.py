@@ -1,16 +1,22 @@
 """Web search powered by Tavily AI Search API.
 
 Tavily is the primary search engine (installed as a dependency).
-A DuckDuckGo HTML scrape fallback exists for when no API key is set.
+Serply (Google results via REST, no SDK needed) is used when a Serply
+API key is set. A DuckDuckGo HTML scrape fallback exists for when no
+API key is set at all.
 
 Usage::
 
     client = WebSearchClient(api_key="tvly-...")
     results = client.search("knowledge distillation survey 2024")
+
+    client = WebSearchClient(serply_api_key="...")
+    results = client.search("knowledge distillation survey 2024")
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -18,9 +24,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.request import Request, urlopen
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode
 
 logger = logging.getLogger(__name__)
+
+SERPLY_SEARCH_URL = "https://api.serply.io/v1/search/"
+# Serply sits behind Cloudflare and rejects requests without a User-Agent.
+SERPLY_USER_AGENT = "researchclaw (+https://github.com/aiming-lab/AutoResearchClaw)"
 
 
 @dataclass
@@ -32,7 +42,7 @@ class SearchResult:
     snippet: str = ""
     content: str = ""
     score: float = 0.0
-    source: str = ""  # "tavily" | "duckduckgo"
+    source: str = ""  # "tavily" | "serply" | "duckduckgo"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,7 +63,7 @@ class WebSearchResponse:
     results: list[SearchResult] = field(default_factory=list)
     answer: str = ""  # Tavily can provide a direct AI answer
     elapsed_seconds: float = 0.0
-    source: str = ""  # "tavily" | "duckduckgo"
+    source: str = ""  # "tavily" | "serply" | "duckduckgo"
 
     @property
     def has_results(self) -> bool:
@@ -63,13 +73,16 @@ class WebSearchResponse:
 class WebSearchClient:
     """General-purpose web search client.
 
-    Uses Tavily (installed) as primary engine. Falls back to DuckDuckGo
-    HTML scraping only if no Tavily API key is available.
+    Uses Tavily (installed) as primary engine, then Serply when a Serply
+    API key is available. Falls back to DuckDuckGo HTML scraping only if
+    neither key is set (or both keyed backends fail).
 
     Parameters
     ----------
     api_key:
         Tavily API key. Falls back to ``TAVILY_API_KEY`` env var.
+    serply_api_key:
+        Serply API key. Falls back to ``SERPLY_API_KEY`` env var.
     max_results:
         Default number of results per query.
     search_depth:
@@ -82,11 +95,13 @@ class WebSearchClient:
         self,
         *,
         api_key: str = "",
+        serply_api_key: str = "",
         max_results: int = 10,
         search_depth: str = "advanced",
         include_answer: bool = True,
     ) -> None:
         self.api_key = api_key or os.environ.get("TAVILY_API_KEY", "")
+        self.serply_api_key = serply_api_key or os.environ.get("SERPLY_API_KEY", "")
         self.max_results = max_results
         self.search_depth = search_depth
         self.include_answer = include_answer
@@ -108,7 +123,14 @@ class WebSearchClient:
             try:
                 return self._search_tavily(query, limit, include_domains, exclude_domains, t0)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Tavily search failed, falling back to DuckDuckGo: %s", exc)
+                logger.warning("Tavily search failed, trying next backend: %s", exc)
+
+        # Serply (Google results) when a key is configured
+        if self.serply_api_key:
+            try:
+                return self._search_serply(query, limit, t0)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Serply search failed, falling back to DuckDuckGo: %s", exc)
 
         return self._search_duckduckgo(query, limit, t0)
 
@@ -182,6 +204,43 @@ class WebSearchClient:
             answer=response.get("answer", ""),
             elapsed_seconds=elapsed,
             source="tavily",
+        )
+
+    # ------------------------------------------------------------------
+    # Serply backend (Google results over REST, stdlib only)
+    # ------------------------------------------------------------------
+
+    def _search_serply(self, query: str, limit: int, t0: float) -> WebSearchResponse:
+        """Search using the Serply API (https://serply.io/docs)."""
+        params = {"q": query, "num": max(1, min(limit, 100))}
+        req = Request(f"{SERPLY_SEARCH_URL}?{urlencode(params)}", headers={
+            "X-Api-Key": self.serply_api_key,
+            "Accept": "application/json",
+            "User-Agent": SERPLY_USER_AGENT,
+        })
+        resp = urlopen(req, timeout=15)  # noqa: S310
+        payload = json.loads(resp.read().decode("utf-8"))
+        elapsed = time.monotonic() - t0
+
+        results = []
+        for item in payload.get("results", [])[:limit]:
+            url = item.get("link", "")
+            if not url:
+                continue
+            description = item.get("description", "")
+            results.append(SearchResult(
+                title=item.get("title", ""),
+                url=url,
+                snippet=description[:500],
+                content=description,
+                source="serply",
+            ))
+
+        return WebSearchResponse(
+            query=query,
+            results=results,
+            elapsed_seconds=elapsed,
+            source="serply",
         )
 
     # ------------------------------------------------------------------

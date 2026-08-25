@@ -254,6 +254,33 @@ def test_rcconfig_from_dict_uses_default_literature_search(tmp_path: Path):
     assert config.literature_search.s2_api_key_env == "S2_API_KEY"
 
 
+def test_rcconfig_from_dict_uses_default_web_search_keys(tmp_path: Path):
+    config = RCConfig.from_dict(
+        _valid_config_data(),
+        project_root=tmp_path,
+        check_paths=False,
+    )
+
+    assert config.web_search.tavily_api_key == ""
+    assert config.web_search.tavily_api_key_env == "TAVILY_API_KEY"
+    assert config.web_search.serply_api_key == ""
+    assert config.web_search.serply_api_key_env == "SERPLY_API_KEY"
+
+
+def test_rcconfig_from_dict_parses_web_search_serply_keys(tmp_path: Path):
+    data = _valid_config_data()
+    data["web_search"] = {
+        "serply_api_key_env": "CUSTOM_SERPLY_KEY",
+        "serply_api_key": "serply-test-key",
+    }
+
+    config = RCConfig.from_dict(data, project_root=tmp_path, check_paths=False)
+
+    assert config.web_search.serply_api_key_env == "CUSTOM_SERPLY_KEY"
+    assert config.web_search.serply_api_key == "serply-test-key"
+    assert config.web_search.tavily_api_key_env == "TAVILY_API_KEY"
+
+
 def test_rcconfig_from_dict_parses_literature_search(tmp_path: Path):
     data = _valid_config_data()
     data["literature_search"] = {
