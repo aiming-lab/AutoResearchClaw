@@ -455,11 +455,12 @@ def execute_pipeline(
     skip_noncritical: bool = False,
     kb_root: Path | None = None,
     cancel_event: "threading.Event | None" = None,
+    degradations: list[dict[str, str]] | None = None,
 ) -> list[StageResult]:
     """Execute pipeline stages sequentially from *from_stage* to *to_stage* (inclusive)."""
 
     results: list[StageResult] = []
-    degradations: list[dict[str, str]] = []
+    degradations = [] if degradations is None else degradations
     started = False
     total_stages = len(STAGE_SEQUENCE)
 
@@ -748,6 +749,7 @@ def execute_pipeline(
                     skip_noncritical=skip_noncritical,
                     kb_root=kb_root,
                     cancel_event=cancel_event,
+                    degradations=degradations,
                 )
                 results.extend(pivot_results)
                 # BUG-211: Promote best stage-14 after REFINE completes so

@@ -1319,3 +1319,59 @@ def test_kb_export_failure_is_recorded_once(
             "message": "Knowledge base export failed: kb offline",
         }
     ]
+
+
+def test_recursive_kb_export_degradation_reaches_final_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    tmp_path: Path,
+) -> None:
+    refine_visits = 0
+    decision_visits = 0
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        nonlocal refine_visits, decision_visits
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "out.md").write_text(f"stage {int(stage)}", encoding="utf-8")
+        if stage == Stage.ITERATIVE_REFINE:
+            refine_visits += 1
+        if stage == Stage.RESEARCH_DECISION and decision_visits == 0:
+            decision_visits += 1
+            return _refine_result(stage)
+        return _done(stage)
+
+    def inner_only_write_stage_to_kb(
+        *args: object, **kwargs: object
+    ) -> list[object]:
+        _ = args
+        if (
+            kwargs["stage_id"] == int(Stage.ITERATIVE_REFINE)
+            and refine_visits == 2
+        ):
+            raise RuntimeError("inner kb offline")
+        return []
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    monkeypatch.setattr(rc_runner, "write_stage_to_kb", inner_only_write_stage_to_kb)
+
+    rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-recursive-kb-fail",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.ITERATIVE_REFINE,
+        kb_root=tmp_path / "recursive-kb-fail",
+    )
+
+    assert refine_visits == 2
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "knowledge_base_export",
+            "message": "Knowledge base export failed: inner kb offline",
+        }
+    ]
