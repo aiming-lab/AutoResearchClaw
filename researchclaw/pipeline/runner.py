@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time as _time
 from pathlib import Path
+from typing import Any
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
@@ -164,6 +165,255 @@ def resume_from_checkpoint(
     """Resolve the stage to resume from using checkpoint metadata."""
     next_stage = read_checkpoint(run_dir)
     return next_stage if next_stage is not None else default_stage
+
+
+def _with_artifact_once(artifacts: tuple[str, ...], artifact: str) -> tuple[str, ...]:
+    if artifact in artifacts:
+        return artifacts
+    return (*artifacts, artifact)
+
+
+def _with_evidence_once(
+    evidence_refs: tuple[str, ...],
+    evidence_ref: str,
+) -> tuple[str, ...]:
+    if evidence_ref in evidence_refs:
+        return evidence_refs
+    return (*evidence_refs, evidence_ref)
+
+
+def _write_spec_violations(stage_dir: Path, violations: list[str]) -> Path:
+    path = stage_dir / "spec_violations.json"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(violations, indent=2), encoding="utf-8")
+    return path
+
+
+def _fail_with_spec_violations(
+    result: StageResult,
+    stage_dir: Path,
+    violations: list[str],
+) -> StageResult:
+    violations_path = _write_spec_violations(stage_dir, violations)
+    logger.warning(
+        "Experiment spec validation failed for %s: %s",
+        result.stage.name,
+        violations,
+    )
+    return StageResult(
+        stage=result.stage,
+        status=StageStatus.FAILED,
+        artifacts=_with_artifact_once(result.artifacts, violations_path.name),
+        error="Experiment spec validation failed: " + "; ".join(violations),
+        decision="retry",
+        evidence_refs=_with_evidence_once(
+            result.evidence_refs,
+            f"{stage_dir.name}/{violations_path.name}",
+        ),
+    )
+
+
+def _post_experiment_design_spec_gate(
+    result: StageResult,
+    run_dir: Path,
+    config: RCConfig,
+) -> StageResult:
+    from researchclaw.domains.experiment_schema import (
+        SpecValidationError,
+        from_legacy_exp_plan,
+    )
+
+    stage_dir = run_dir / f"stage-{int(Stage.EXPERIMENT_DESIGN):02d}"
+    plan_path = stage_dir / "exp_plan.yaml"
+    if not plan_path.exists():
+        if "exp_plan.yaml" in result.artifacts:
+            return _fail_with_spec_violations(
+                result,
+                stage_dir,
+                ["missing exp_plan.yaml"],
+            )
+        return result
+
+    domain_id = str(getattr(getattr(config, "project", None), "profile", "") or "")
+    try:
+        plan_text = plan_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"could not read exp_plan.yaml: {exc}"],
+        )
+    try:
+        spec = from_legacy_exp_plan(
+            plan_text,
+            domain_id=domain_id,
+        )
+    except SpecValidationError as exc:
+        return _fail_with_spec_violations(result, stage_dir, exc.violations)
+    violations = spec.validate(strict=False)
+    if violations:
+        return _fail_with_spec_violations(result, stage_dir, violations)
+
+    spec_path = stage_dir / "experiment_spec.yaml"
+    spec_path.write_text(spec.to_yaml_v1(), encoding="utf-8")
+    logger.info("Experiment spec generated: %s", spec_path)
+    return StageResult(
+        stage=result.stage,
+        status=result.status,
+        artifacts=_with_artifact_once(result.artifacts, spec_path.name),
+        error=result.error,
+        decision=result.decision,
+        evidence_refs=_with_evidence_once(
+            result.evidence_refs,
+            f"{stage_dir.name}/{spec_path.name}",
+        ),
+    )
+
+
+def _metric_contract_names(spec: object) -> list[str]:
+    evaluation = getattr(spec, "evaluation")
+    names = [evaluation.primary_metric.name]
+    names.extend(metric.name for metric in evaluation.secondary_metrics)
+    return [name for name in names if name]
+
+
+def _result_metric_mapping(
+    spec: object,
+    metrics_summary: dict[str, Any],
+) -> dict[str, list[Any]]:
+    return {
+        metric_name: [
+            value
+            for key, value in metrics_summary.items()
+            if key == metric_name or key.endswith(f"/{metric_name}")
+        ]
+        for metric_name in _metric_contract_names(spec)
+    }
+
+
+def _validate_results_against_metric_contract(
+    spec: object,
+    metrics_summary: dict[str, Any],
+) -> list[str]:
+    result_metrics = _result_metric_mapping(spec, metrics_summary)
+    violations: list[str] = []
+    for metric_name, matched_values in result_metrics.items():
+        if not matched_values:
+            violations.append(f"missing result metric: {metric_name}")
+            continue
+        values = [
+            value.get("mean") if isinstance(value, dict) else value
+            for value in matched_values
+        ]
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in values
+        ):
+            violations.append(f"non-numeric result metric: {metric_name}")
+    return violations
+
+
+def _post_result_analysis_spec_gate(
+    result: StageResult,
+    run_dir: Path,
+    degradations: list[dict[str, str]],
+) -> StageResult:
+    from researchclaw.domains.experiment_schema import (
+        SpecValidationError,
+        UniversalExperimentPlan,
+    )
+
+    stage_dir = run_dir / f"stage-{int(Stage.RESULT_ANALYSIS):02d}"
+    spec_path = run_dir / "stage-09" / "experiment_spec.yaml"
+    if not spec_path.exists():
+        logger.warning(
+            "Experiment spec validation skipped: %s is missing, likely from a pre-v1 stage 9 run",
+            spec_path,
+        )
+        return result
+
+    try:
+        spec_text = spec_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"could not read experiment_spec.yaml: {exc}"],
+        )
+    try:
+        spec = UniversalExperimentPlan.from_yaml_v1(spec_text)
+    except SpecValidationError as exc:
+        return _fail_with_spec_violations(result, stage_dir, exc.violations)
+
+    spec_violations = spec.validate(strict=False)
+    if spec_violations:
+        return _fail_with_spec_violations(result, stage_dir, spec_violations)
+
+    summary_path = stage_dir / "experiment_summary.json"
+    if not summary_path.exists():
+        message = (
+            f"Experiment spec result gate deferred: no artifact found at "
+            f"{summary_path}; enforcement skipped"
+        )
+        if _record_degradation(degradations, "result_gate_deferred", message):
+            logger.warning(message)
+        return result
+
+    try:
+        summary_text = summary_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"could not read {summary_path}: {exc}"],
+        )
+    try:
+        loaded = json.loads(summary_text)
+    except json.JSONDecodeError as exc:
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"{summary_path} is invalid JSON: {exc}"],
+        )
+    if not isinstance(loaded, dict):
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"{summary_path} must contain a JSON object"],
+        )
+
+    if "metrics_summary" not in loaded:
+        message = (
+            f"Experiment spec result gate deferred: {summary_path} "
+            "metrics_summary is missing; enforcement skipped"
+        )
+        if _record_degradation(degradations, "result_gate_deferred", message):
+            logger.warning(message)
+        return result
+
+    metrics_summary = loaded["metrics_summary"]
+    if not isinstance(metrics_summary, dict):
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"{summary_path} metrics_summary must be a JSON object"],
+        )
+    if not metrics_summary:
+        message = (
+            f"Experiment spec result gate deferred: {summary_path} "
+            "metrics_summary is empty; "
+            "enforcement skipped"
+        )
+        if _record_degradation(degradations, "result_gate_deferred", message):
+            logger.warning(message)
+        return result
+
+    violations = _validate_results_against_metric_contract(spec, metrics_summary)
+    if violations:
+        return _fail_with_spec_violations(result, stage_dir, violations)
+    return result
 
 
 def _collect_content_metrics(run_dir: Path | None) -> dict[str, object]:
@@ -542,33 +792,10 @@ def execute_pipeline(
 
         # ── ExperimentSpec: generate after design, validate after analysis ──
         if stage == Stage.EXPERIMENT_DESIGN and result.status == StageStatus.DONE:
-            try:
-                from researchclaw.pipeline.experiment_spec import ExperimentSpec, MetricDef, generate_spec
-                spec_text = generate_spec(config.research.topic, "")
-                spec_path = run_dir / f"stage-{int(stage):02d}" / "experiment_spec.md"
-                spec_path.write_text(spec_text, encoding="utf-8")
-                logger.info("Experiment spec generated: %s", spec_path)
-            except Exception:
-                logger.debug("Experiment spec generation skipped")
+            result = _post_experiment_design_spec_gate(result, run_dir, config)
 
         if stage == Stage.RESULT_ANALYSIS and result.status == StageStatus.DONE:
-            try:
-                from researchclaw.pipeline.experiment_spec import parse_spec, validate_results_against_spec
-                spec_path = run_dir / "stage-09" / "experiment_spec.md"
-                if spec_path.exists():
-                    spec = parse_spec(spec_path.read_text(encoding="utf-8"))
-                    results_path = run_dir / "results.json"
-                    exp_results = {}
-                    if results_path.exists():
-                        exp_results = json.loads(results_path.read_text(encoding="utf-8"))
-                    violations = validate_results_against_spec(spec, exp_results)
-                    if violations:
-                        logger.warning("Spec violations: %s", violations)
-                        (run_dir / f"stage-{int(stage):02d}" / "spec_violations.json").write_text(
-                            json.dumps(violations, indent=2), encoding="utf-8"
-                        )
-            except Exception:
-                logger.debug("Experiment spec validation skipped")
+            result = _post_result_analysis_spec_gate(result, run_dir, degradations)
 
         # ── Experiment memory: record outcome after experiment stages ──
         if stage in (Stage.EXPERIMENT_RUN, Stage.ITERATIVE_REFINE) and result.status == StageStatus.DONE and exp_memory:

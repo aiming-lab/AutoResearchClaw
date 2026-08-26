@@ -362,6 +362,388 @@ def test_execute_pipeline_passes_auto_approve_flag_to_execute_stage(
     assert all(received)
 
 
+def test_experiment_design_spec_violations_fail_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "exp_plan.yaml").write_text(
+            "metrics:\n  accuracy:\n    direction: maximize\n",
+            encoding="utf-8",
+        )
+        return _done(stage, artifacts=("exp_plan.yaml",))
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-exp-spec-gate",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.EXPERIMENT_DESIGN,
+        to_stage=Stage.EXPERIMENT_DESIGN,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-09" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "at least one condition is required" in violations
+
+
+def _write_experiment_spec(
+    run_dir: Path,
+    *,
+    secondary_metric_names: tuple[str, ...] = (),
+) -> None:
+    from researchclaw.domains.experiment_schema import (
+        Condition,
+        EvaluationSpec,
+        MetricSpec,
+        PreregisteredPrediction,
+        UniversalExperimentPlan,
+    )
+
+    spec_dir = run_dir / "stage-09"
+    spec_dir.mkdir(parents=True)
+    spec = UniversalExperimentPlan(
+        domain_id="ml_vision",
+        conditions=[
+            Condition(name="baseline", role="reference"),
+            Condition(name="proposed", role="proposed"),
+        ],
+        evaluation=EvaluationSpec(
+            primary_metric=MetricSpec(name="accuracy", direction="maximize"),
+            secondary_metrics=[
+                MetricSpec(name=name, direction="minimize")
+                for name in secondary_metric_names
+            ],
+        ),
+        seeds=[1],
+        prediction=PreregisteredPrediction(
+            statement="Proposed improves accuracy",
+            metric="accuracy",
+            condition="proposed",
+            baseline="baseline",
+            comparison="greater_than",
+            min_effect_size=0.01,
+        ),
+    )
+    (spec_dir / "experiment_spec.yaml").write_text(
+        spec.to_yaml_v1(),
+        encoding="utf-8",
+    )
+
+
+def _metric_summary(mean: float) -> dict[str, float | int]:
+    return {"min": mean, "max": mean, "mean": mean, "count": 1}
+
+
+def _write_experiment_summary(
+    run_dir: Path,
+    metrics_summary: Any,
+    *,
+    suffix: str = "",
+) -> Path:
+    stage_dir = run_dir / f"stage-14{suffix}"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = stage_dir / "experiment_summary.json"
+    summary_path.write_text(
+        json.dumps({"metrics_summary": metrics_summary}),
+        encoding="utf-8",
+    )
+    return summary_path
+
+
+def test_result_analysis_condition_prefixed_metric_contract_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+    stage_result = _done(Stage.RESULT_ANALYSIS)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(
+            run_dir,
+            {"ppo/accuracy": _metric_summary(0.82)},
+        )
+        return stage_result
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-prefixed",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1] is stage_result
+    assert not (run_dir / "stage-14" / "spec_violations.json").exists()
+
+
+def test_result_analysis_exact_metric_contract_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(
+            run_dir,
+            {"accuracy": _metric_summary(0.82)},
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-exact",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.DONE
+    assert not (run_dir / "stage-14" / "spec_violations.json").exists()
+
+
+def test_result_analysis_missing_metric_contract_fails_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir, secondary_metric_names=("loss",))
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(
+            run_dir,
+            {"ppo/accuracy": _metric_summary(0.82)},
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-missing",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-14" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "missing result metric: loss" in violations
+
+
+def test_result_analysis_non_finite_metric_contract_fails_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(
+            run_dir,
+            {
+                "ppo/accuracy": _metric_summary(0.82),
+                "baseline/accuracy": _metric_summary(float("nan")),
+            },
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-nonfinite",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-14" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "non-numeric result metric: accuracy" in violations
+
+
+def test_result_analysis_empty_metrics_summary_defers_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+    stage_result = _done(Stage.RESULT_ANALYSIS)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = stage, kwargs
+        _write_experiment_summary(run_dir, {})
+        return stage_result
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-empty",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1] is stage_result
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "result_gate_deferred",
+            "message": (
+                f"Experiment spec result gate deferred: {run_dir / 'stage-14' / 'experiment_summary.json'} "
+                "metrics_summary is empty; enforcement skipped"
+            ),
+        }
+    ]
+
+
+def test_result_analysis_non_object_metrics_summary_fails_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(run_dir, [])
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-non-object",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-14" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert any("metrics_summary must be a JSON object" in item for item in violations)
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert not any(
+        item["key"] == "result_gate_deferred"
+        for item in summary.get("degradations", [])
+    )
+
+
+def test_result_analysis_missing_experiment_summary_defers_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+    stage_result = _done(Stage.RESULT_ANALYSIS)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = stage, kwargs
+        return stage_result
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-no-summary",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1] is stage_result
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "result_gate_deferred",
+            "message": (
+                f"Experiment spec result gate deferred: no artifact found at "
+                f"{run_dir / 'stage-14' / 'experiment_summary.json'}; enforcement skipped"
+            ),
+        }
+    ]
+
+
+def test_result_analysis_uses_current_stage_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(
+            run_dir,
+            {"accuracy": _metric_summary(float("nan"))},
+        )
+        _write_experiment_summary(
+            run_dir,
+            {"accuracy": _metric_summary(0.82)},
+            suffix="_v2",
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-latest",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-14" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "non-numeric result metric: accuracy" in violations
+
+
 @pytest.mark.parametrize(
     ("stage", "started", "expected"),
     [
