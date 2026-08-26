@@ -742,6 +742,9 @@ def execute_pipeline(
             logger.warning(message)
 
     cost_budget = getattr(config.experiment.cli_agent, "max_budget_usd", 0.0) or 0.0
+    cli_agent_provider = (
+        getattr(config.experiment.cli_agent, "provider", "llm") or "llm"
+    ).strip().lower()
 
     for stage in STAGE_SEQUENCE:
         started = _should_start(stage, from_stage, started)
@@ -762,12 +765,26 @@ def execute_pipeline(
         if cost_budget > 0:
             try:
                 from researchclaw.cost_tracker import get_global_tracker
-                if not get_global_tracker().check_budget(cost_budget):
-                    logger.warning("Cost budget $%.2f exceeded — pausing pipeline", cost_budget)
-                    print(f"{prefix} BUDGET EXCEEDED (${cost_budget:.2f}) — stopping")
-                    break
-            except Exception:
-                pass
+            except ImportError:
+                if cli_agent_provider != "llm":
+                    message = (
+                        f"max_budget_usd={cost_budget:.2f} configured but "
+                        "researchclaw.cost_tracker is unavailable; budget not enforced"
+                    )
+                    if _record_degradation(
+                        degradations, "cost_budget_unenforced", message
+                    ):
+                        logger.warning(message)
+            else:
+                try:
+                    if not get_global_tracker().check_budget(cost_budget):
+                        logger.warning("Cost budget $%.2f exceeded — pausing pipeline", cost_budget)
+                        print(f"{prefix} BUDGET EXCEEDED (${cost_budget:.2f}) — stopping")
+                        break
+                except Exception as exc:
+                    message = f"cost budget check failed: {exc}"
+                    if _record_degradation(degradations, "cost_budget_error", message):
+                        logger.warning(message)
 
         # BUG-218: Ensure the best stage-14 experiment data is promoted
         # BEFORE paper writing begins.  Without this, the recursive REFINE

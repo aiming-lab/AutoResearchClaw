@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any, cast
 
 import pytest
@@ -1554,6 +1556,123 @@ def test_experiment_memory_initialization_failure_is_recorded_once(
             "message": "Experiment memory initialization failed: memory offline",
         }
     ]
+
+
+def test_missing_cost_tracker_for_cli_agent_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs: object) -> StageResult:
+        _ = kwargs
+        return _done(stage)
+
+    object.__setattr__(rc_config.experiment.cli_agent, "provider", "claude_code")
+    assert rc_config.experiment.cli_agent.max_budget_usd > 0
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        results = rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-cost-budget-unenforced",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.TOPIC_INIT,
+            to_stage=Stage.PROBLEM_DECOMPOSE,
+        )
+
+    assert len(results) == 2
+    warnings = [
+        record
+        for record in caplog.records
+        if "researchclaw.cost_tracker is unavailable" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "cost_budget_unenforced",
+            "message": (
+                "max_budget_usd=5.00 configured but researchclaw.cost_tracker "
+                "is unavailable; budget not enforced"
+            ),
+        }
+    ]
+
+
+def test_missing_cost_tracker_for_llm_provider_is_silent(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs: object) -> StageResult:
+        _ = kwargs
+        return _done(stage)
+
+    assert rc_config.experiment.cli_agent.provider == "llm"
+    assert rc_config.experiment.cli_agent.max_budget_usd > 0
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-cost-budget-llm",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.TOPIC_INIT,
+        to_stage=Stage.PROBLEM_DECOMPOSE,
+    )
+
+    assert len(results) == 2
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert not any(
+        item["key"] == "cost_budget_unenforced"
+        for item in summary.get("degradations", [])
+    )
+
+
+def test_cost_tracker_budget_exceeded_stops_pipeline_without_degradation(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    seen: list[Stage] = []
+    checked_budgets: list[float] = []
+
+    class FakeTracker:
+        def check_budget(self, budget: float) -> bool:
+            checked_budgets.append(budget)
+            return False
+
+    fake_module = ModuleType("researchclaw.cost_tracker")
+    fake_module.get_global_tracker = lambda: FakeTracker()  # type: ignore[attr-defined]
+
+    def mock_execute_stage(stage: Stage, **kwargs: object) -> StageResult:
+        _ = kwargs
+        seen.append(stage)
+        return _done(stage)
+
+    monkeypatch.setitem(sys.modules, "researchclaw.cost_tracker", fake_module)
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-cost-budget-exceeded",
+        config=rc_config,
+        adapters=adapters,
+    )
+
+    assert checked_budgets == [rc_config.experiment.cli_agent.max_budget_usd]
+    assert len(results) < len(STAGE_SEQUENCE)
+    assert seen == []
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert not any(
+        item["key"] in {"cost_budget_unenforced", "cost_budget_error"}
+        for item in summary.get("degradations", [])
+    )
 
 
 def test_experiment_memory_records_outcome_after_experiment_stage(
