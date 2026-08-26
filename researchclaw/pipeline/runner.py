@@ -15,6 +15,7 @@ from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.evolution import EvolutionStore, extract_lessons
 from researchclaw.knowledge.base import write_stage_to_kb
+from researchclaw.pipeline._helpers import _collect_experiment_results
 from researchclaw.pipeline.executor import StageResult, execute_stage
 from researchclaw.pipeline.stages import (
     DECISION_ROLLBACK,
@@ -574,11 +575,18 @@ def execute_pipeline(
             try:
                 from researchclaw.memory.experiment_memory import ExperimentOutcome
                 import time as _time_mod
-                results_path = run_dir / "results.json"
+                experiment_results = _collect_experiment_results(
+                    run_dir,
+                    metric_key=config.experiment.metric_key,
+                    metric_direction=config.experiment.metric_direction,
+                )
                 metric_val = 0.0
-                if results_path.exists():
-                    rdata = json.loads(results_path.read_text(encoding="utf-8"))
-                    metric_val = rdata.get(config.experiment.metric_key, 0.0)
+                for key, summary in experiment_results["metrics_summary"].items():
+                    if key == config.experiment.metric_key or key.endswith(
+                        "/" + config.experiment.metric_key
+                    ):
+                        metric_val = summary["mean"]
+                        break
                 exp_memory.record_outcome(ExperimentOutcome(
                     run_id=run_id, stage=stage.name,
                     hypothesis=config.research.topic, config={},

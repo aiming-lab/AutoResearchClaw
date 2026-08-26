@@ -1182,8 +1182,10 @@ def test_experiment_memory_records_outcome_after_experiment_stage(
 ) -> None:
     def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
         _ = kwargs
-        (run_dir / "results.json").write_text(
-            json.dumps({"primary_metric": 0.42}),
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "run_01.json").write_text(
+            json.dumps({"metrics": {"primary_metric": 0.42}}),
             encoding="utf-8",
         )
         return _done(stage)
@@ -1236,10 +1238,6 @@ def test_experiment_memory_recording_failure_is_recorded_once(
 
     def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
         _ = stage, kwargs
-        (run_dir / "results.json").write_text(
-            json.dumps({"primary_metric": 0.42}),
-            encoding="utf-8",
-        )
         return _done(stage)
 
     monkeypatch.setattr(memory_module, "ExperimentMemory", BrokenExperimentMemory)
