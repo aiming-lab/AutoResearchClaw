@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any, cast
 
 import pytest
@@ -360,6 +362,388 @@ def test_execute_pipeline_passes_auto_approve_flag_to_execute_stage(
     )
     assert received
     assert all(received)
+
+
+def test_experiment_design_spec_violations_fail_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "exp_plan.yaml").write_text(
+            "metrics:\n  accuracy:\n    direction: maximize\n",
+            encoding="utf-8",
+        )
+        return _done(stage, artifacts=("exp_plan.yaml",))
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-exp-spec-gate",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.EXPERIMENT_DESIGN,
+        to_stage=Stage.EXPERIMENT_DESIGN,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-09" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "at least one condition is required" in violations
+
+
+def _write_experiment_spec(
+    run_dir: Path,
+    *,
+    secondary_metric_names: tuple[str, ...] = (),
+) -> None:
+    from researchclaw.domains.experiment_schema import (
+        Condition,
+        EvaluationSpec,
+        MetricSpec,
+        PreregisteredPrediction,
+        UniversalExperimentPlan,
+    )
+
+    spec_dir = run_dir / "stage-09"
+    spec_dir.mkdir(parents=True)
+    spec = UniversalExperimentPlan(
+        domain_id="ml_vision",
+        conditions=[
+            Condition(name="baseline", role="reference"),
+            Condition(name="proposed", role="proposed"),
+        ],
+        evaluation=EvaluationSpec(
+            primary_metric=MetricSpec(name="accuracy", direction="maximize"),
+            secondary_metrics=[
+                MetricSpec(name=name, direction="minimize")
+                for name in secondary_metric_names
+            ],
+        ),
+        seeds=[1],
+        prediction=PreregisteredPrediction(
+            statement="Proposed improves accuracy",
+            metric="accuracy",
+            condition="proposed",
+            baseline="baseline",
+            comparison="greater_than",
+            min_effect_size=0.01,
+        ),
+    )
+    (spec_dir / "experiment_spec.yaml").write_text(
+        spec.to_yaml_v1(),
+        encoding="utf-8",
+    )
+
+
+def _metric_summary(mean: float) -> dict[str, float | int]:
+    return {"min": mean, "max": mean, "mean": mean, "count": 1}
+
+
+def _write_experiment_summary(
+    run_dir: Path,
+    metrics_summary: Any,
+    *,
+    suffix: str = "",
+) -> Path:
+    stage_dir = run_dir / f"stage-14{suffix}"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = stage_dir / "experiment_summary.json"
+    summary_path.write_text(
+        json.dumps({"metrics_summary": metrics_summary}),
+        encoding="utf-8",
+    )
+    return summary_path
+
+
+def test_result_analysis_condition_prefixed_metric_contract_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+    stage_result = _done(Stage.RESULT_ANALYSIS)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(
+            run_dir,
+            {"ppo/accuracy": _metric_summary(0.82)},
+        )
+        return stage_result
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-prefixed",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1] is stage_result
+    assert not (run_dir / "stage-14" / "spec_violations.json").exists()
+
+
+def test_result_analysis_exact_metric_contract_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(
+            run_dir,
+            {"accuracy": _metric_summary(0.82)},
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-exact",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.DONE
+    assert not (run_dir / "stage-14" / "spec_violations.json").exists()
+
+
+def test_result_analysis_missing_metric_contract_fails_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir, secondary_metric_names=("loss",))
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(
+            run_dir,
+            {"ppo/accuracy": _metric_summary(0.82)},
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-missing",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-14" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "missing result metric: loss" in violations
+
+
+def test_result_analysis_non_finite_metric_contract_fails_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(
+            run_dir,
+            {
+                "ppo/accuracy": _metric_summary(0.82),
+                "baseline/accuracy": _metric_summary(float("nan")),
+            },
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-nonfinite",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-14" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "non-numeric result metric: accuracy" in violations
+
+
+def test_result_analysis_empty_metrics_summary_defers_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+    stage_result = _done(Stage.RESULT_ANALYSIS)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = stage, kwargs
+        _write_experiment_summary(run_dir, {})
+        return stage_result
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-empty",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1] is stage_result
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "result_gate_deferred",
+            "message": (
+                f"Experiment spec result gate deferred: {run_dir / 'stage-14' / 'experiment_summary.json'} "
+                "metrics_summary is empty; enforcement skipped"
+            ),
+        }
+    ]
+
+
+def test_result_analysis_non_object_metrics_summary_fails_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(run_dir, [])
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-non-object",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-14" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert any("metrics_summary must be a JSON object" in item for item in violations)
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert not any(
+        item["key"] == "result_gate_deferred"
+        for item in summary.get("degradations", [])
+    )
+
+
+def test_result_analysis_missing_experiment_summary_defers_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+    stage_result = _done(Stage.RESULT_ANALYSIS)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = stage, kwargs
+        return stage_result
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-no-summary",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1] is stage_result
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "result_gate_deferred",
+            "message": (
+                f"Experiment spec result gate deferred: no artifact found at "
+                f"{run_dir / 'stage-14' / 'experiment_summary.json'}; enforcement skipped"
+            ),
+        }
+    ]
+
+
+def test_result_analysis_uses_current_stage_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    _write_experiment_spec(run_dir)
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        _write_experiment_summary(
+            run_dir,
+            {"accuracy": _metric_summary(float("nan"))},
+        )
+        _write_experiment_summary(
+            run_dir,
+            {"accuracy": _metric_summary(0.82)},
+            suffix="_v2",
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-results-spec-latest",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.RESULT_ANALYSIS,
+        to_stage=Stage.RESULT_ANALYSIS,
+    )
+
+    assert results[-1].status == StageStatus.FAILED
+    violations_path = run_dir / "stage-14" / "spec_violations.json"
+    assert violations_path.exists()
+    violations = json.loads(violations_path.read_text(encoding="utf-8"))
+    assert "non-numeric result metric: accuracy" in violations
 
 
 @pytest.mark.parametrize(
@@ -1126,3 +1510,367 @@ def test_imp21_stage6_empty_shortlist_gate_halts_pipeline_under_auto_approve(
     )
     assert summary["final_status"] == "paused"
     assert summary["stages_paused"] == 1
+
+
+def test_experiment_memory_initialization_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import researchclaw.memory.experiment_memory as memory_module
+
+    class BrokenExperimentMemory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args, kwargs
+            raise RuntimeError("memory offline")
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        return _done(stage)
+
+    monkeypatch.setattr(memory_module, "ExperimentMemory", BrokenExperimentMemory)
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-memory-init",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.EXPERIMENT_RUN,
+            to_stage=Stage.ITERATIVE_REFINE,
+        )
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Experiment memory initialization failed" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "experiment_memory_init",
+            "message": "Experiment memory initialization failed: memory offline",
+        }
+    ]
+
+
+def test_missing_cost_tracker_for_cli_agent_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs: object) -> StageResult:
+        _ = kwargs
+        return _done(stage)
+
+    object.__setattr__(rc_config.experiment.cli_agent, "provider", "claude_code")
+    assert rc_config.experiment.cli_agent.max_budget_usd > 0
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        results = rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-cost-budget-unenforced",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.TOPIC_INIT,
+            to_stage=Stage.PROBLEM_DECOMPOSE,
+        )
+
+    assert len(results) == 2
+    warnings = [
+        record
+        for record in caplog.records
+        if "researchclaw.cost_tracker is unavailable" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "cost_budget_unenforced",
+            "message": (
+                "max_budget_usd=5.00 configured but researchclaw.cost_tracker "
+                "is unavailable; budget not enforced"
+            ),
+        }
+    ]
+
+
+def test_missing_cost_tracker_for_llm_provider_is_silent(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs: object) -> StageResult:
+        _ = kwargs
+        return _done(stage)
+
+    assert rc_config.experiment.cli_agent.provider == "llm"
+    assert rc_config.experiment.cli_agent.max_budget_usd > 0
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-cost-budget-llm",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.TOPIC_INIT,
+        to_stage=Stage.PROBLEM_DECOMPOSE,
+    )
+
+    assert len(results) == 2
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert not any(
+        item["key"] == "cost_budget_unenforced"
+        for item in summary.get("degradations", [])
+    )
+
+
+def test_cost_tracker_budget_exceeded_stops_pipeline_without_degradation(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    seen: list[Stage] = []
+    checked_budgets: list[float] = []
+
+    class FakeTracker:
+        def check_budget(self, budget: float) -> bool:
+            checked_budgets.append(budget)
+            return False
+
+    fake_module = ModuleType("researchclaw.cost_tracker")
+    fake_module.get_global_tracker = lambda: FakeTracker()  # type: ignore[attr-defined]
+
+    def mock_execute_stage(stage: Stage, **kwargs: object) -> StageResult:
+        _ = kwargs
+        seen.append(stage)
+        return _done(stage)
+
+    monkeypatch.setitem(sys.modules, "researchclaw.cost_tracker", fake_module)
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    results = rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-cost-budget-exceeded",
+        config=rc_config,
+        adapters=adapters,
+    )
+
+    assert checked_budgets == [rc_config.experiment.cli_agent.max_budget_usd]
+    assert len(results) < len(STAGE_SEQUENCE)
+    assert seen == []
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert not any(
+        item["key"] in {"cost_budget_unenforced", "cost_budget_error"}
+        for item in summary.get("degradations", [])
+    )
+
+
+def test_experiment_memory_records_outcome_after_experiment_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "run_01.json").write_text(
+            json.dumps({"metrics": {"primary_metric": 0.42}}),
+            encoding="utf-8",
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-memory-record",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.EXPERIMENT_RUN,
+        to_stage=Stage.EXPERIMENT_RUN,
+    )
+
+    memory_path = run_dir / "experiment_memory" / "experiment.jsonl"
+    assert memory_path.exists()
+    entries = [
+        json.loads(line)
+        for line in memory_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(entries) == 1
+    metadata = entries[0]["metadata"]
+    assert metadata["run_id"] == "run-memory-record"
+    assert metadata["stage"] == "EXPERIMENT_RUN"
+    assert metadata["metric_name"] == "primary_metric"
+    assert metadata["metric_value"] == 0.42
+
+
+def test_experiment_memory_recording_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import researchclaw.memory.experiment_memory as memory_module
+
+    class DummyOutcome:
+        def __init__(self, **kwargs: object) -> None:
+            self.__dict__.update(kwargs)
+
+    class BrokenExperimentMemory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args, kwargs
+
+        def record_outcome(self, outcome: object) -> str:
+            _ = outcome
+            raise RuntimeError("memory write failed")
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = stage, kwargs
+        return _done(stage)
+
+    monkeypatch.setattr(memory_module, "ExperimentMemory", BrokenExperimentMemory)
+    monkeypatch.setattr(memory_module, "ExperimentOutcome", DummyOutcome, raising=False)
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-memory-record-fail",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.EXPERIMENT_RUN,
+            to_stage=Stage.ITERATIVE_REFINE,
+        )
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Experiment memory recording failed" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "experiment_memory_record",
+            "message": "Experiment memory recording failed: memory write failed",
+        }
+    ]
+
+
+def test_kb_export_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "out.md").write_text(f"stage {int(stage)}", encoding="utf-8")
+        return _done(stage)
+
+    def broken_write_stage_to_kb(*args: object, **kwargs: object) -> list[object]:
+        _ = args, kwargs
+        raise RuntimeError("kb offline")
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    monkeypatch.setattr(rc_runner, "write_stage_to_kb", broken_write_stage_to_kb)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        results = rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-kb-fail",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.EXPERIMENT_DESIGN,
+            to_stage=Stage.RESULT_ANALYSIS,
+            kb_root=tmp_path / "kb-fail",
+        )
+
+    assert len(results) == 6
+    assert all(result.status == StageStatus.DONE for result in results)
+    warnings = [
+        record
+        for record in caplog.records
+        if "Knowledge base export failed" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "knowledge_base_export",
+            "message": "Knowledge base export failed: kb offline",
+        }
+    ]
+
+
+def test_recursive_kb_export_degradation_reaches_final_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    tmp_path: Path,
+) -> None:
+    refine_visits = 0
+    decision_visits = 0
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        nonlocal refine_visits, decision_visits
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "out.md").write_text(f"stage {int(stage)}", encoding="utf-8")
+        if stage == Stage.ITERATIVE_REFINE:
+            refine_visits += 1
+        if stage == Stage.RESEARCH_DECISION and decision_visits == 0:
+            decision_visits += 1
+            return _refine_result(stage)
+        return _done(stage)
+
+    def inner_only_write_stage_to_kb(
+        *args: object, **kwargs: object
+    ) -> list[object]:
+        _ = args
+        if (
+            kwargs["stage_id"] == int(Stage.ITERATIVE_REFINE)
+            and refine_visits == 2
+        ):
+            raise RuntimeError("inner kb offline")
+        return []
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    monkeypatch.setattr(rc_runner, "write_stage_to_kb", inner_only_write_stage_to_kb)
+
+    rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-recursive-kb-fail",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.ITERATIVE_REFINE,
+        kb_root=tmp_path / "recursive-kb-fail",
+    )
+
+    assert refine_visits == 2
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "knowledge_base_export",
+            "message": "Knowledge base export failed: inner kb offline",
+        }
+    ]

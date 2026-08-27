@@ -10,11 +10,13 @@ import tempfile
 import threading
 import time as _time
 from pathlib import Path
+from typing import Any
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.evolution import EvolutionStore, extract_lessons
 from researchclaw.knowledge.base import write_stage_to_kb
+from researchclaw.pipeline._helpers import _collect_experiment_results
 from researchclaw.pipeline.executor import StageResult, execute_stage
 from researchclaw.pipeline.stages import (
     DECISION_ROLLBACK,
@@ -44,6 +46,7 @@ def _build_pipeline_summary(
     results: list[StageResult],
     from_stage: Stage,
     run_dir: Path | None = None,
+    degradations: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
     summary: dict[str, object] = {
         "run_id": run_id,
@@ -65,6 +68,8 @@ def _build_pipeline_summary(
         "generated": _utcnow_iso(),
         "content_metrics": _collect_content_metrics(run_dir),
     }
+    if degradations:
+        summary["degradations"] = list(degradations)
     return summary
 
 
@@ -73,6 +78,17 @@ def _write_pipeline_summary(run_dir: Path, summary: dict[str, object]) -> None:
         json.dumps(summary, indent=2),
         encoding="utf-8",
     )
+
+
+def _record_degradation(
+    degradations: list[dict[str, str]],
+    key: str,
+    message: str,
+) -> bool:
+    if any(item.get("key") == key for item in degradations):
+        return False
+    degradations.append({"key": key, "message": message})
+    return True
 
 
 def _write_checkpoint(
@@ -149,6 +165,255 @@ def resume_from_checkpoint(
     """Resolve the stage to resume from using checkpoint metadata."""
     next_stage = read_checkpoint(run_dir)
     return next_stage if next_stage is not None else default_stage
+
+
+def _with_artifact_once(artifacts: tuple[str, ...], artifact: str) -> tuple[str, ...]:
+    if artifact in artifacts:
+        return artifacts
+    return (*artifacts, artifact)
+
+
+def _with_evidence_once(
+    evidence_refs: tuple[str, ...],
+    evidence_ref: str,
+) -> tuple[str, ...]:
+    if evidence_ref in evidence_refs:
+        return evidence_refs
+    return (*evidence_refs, evidence_ref)
+
+
+def _write_spec_violations(stage_dir: Path, violations: list[str]) -> Path:
+    path = stage_dir / "spec_violations.json"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(violations, indent=2), encoding="utf-8")
+    return path
+
+
+def _fail_with_spec_violations(
+    result: StageResult,
+    stage_dir: Path,
+    violations: list[str],
+) -> StageResult:
+    violations_path = _write_spec_violations(stage_dir, violations)
+    logger.warning(
+        "Experiment spec validation failed for %s: %s",
+        result.stage.name,
+        violations,
+    )
+    return StageResult(
+        stage=result.stage,
+        status=StageStatus.FAILED,
+        artifacts=_with_artifact_once(result.artifacts, violations_path.name),
+        error="Experiment spec validation failed: " + "; ".join(violations),
+        decision="retry",
+        evidence_refs=_with_evidence_once(
+            result.evidence_refs,
+            f"{stage_dir.name}/{violations_path.name}",
+        ),
+    )
+
+
+def _post_experiment_design_spec_gate(
+    result: StageResult,
+    run_dir: Path,
+    config: RCConfig,
+) -> StageResult:
+    from researchclaw.domains.experiment_schema import (
+        SpecValidationError,
+        from_legacy_exp_plan,
+    )
+
+    stage_dir = run_dir / f"stage-{int(Stage.EXPERIMENT_DESIGN):02d}"
+    plan_path = stage_dir / "exp_plan.yaml"
+    if not plan_path.exists():
+        if "exp_plan.yaml" in result.artifacts:
+            return _fail_with_spec_violations(
+                result,
+                stage_dir,
+                ["missing exp_plan.yaml"],
+            )
+        return result
+
+    domain_id = str(getattr(getattr(config, "project", None), "profile", "") or "")
+    try:
+        plan_text = plan_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"could not read exp_plan.yaml: {exc}"],
+        )
+    try:
+        spec = from_legacy_exp_plan(
+            plan_text,
+            domain_id=domain_id,
+        )
+    except SpecValidationError as exc:
+        return _fail_with_spec_violations(result, stage_dir, exc.violations)
+    violations = spec.validate(strict=False)
+    if violations:
+        return _fail_with_spec_violations(result, stage_dir, violations)
+
+    spec_path = stage_dir / "experiment_spec.yaml"
+    spec_path.write_text(spec.to_yaml_v1(), encoding="utf-8")
+    logger.info("Experiment spec generated: %s", spec_path)
+    return StageResult(
+        stage=result.stage,
+        status=result.status,
+        artifacts=_with_artifact_once(result.artifacts, spec_path.name),
+        error=result.error,
+        decision=result.decision,
+        evidence_refs=_with_evidence_once(
+            result.evidence_refs,
+            f"{stage_dir.name}/{spec_path.name}",
+        ),
+    )
+
+
+def _metric_contract_names(spec: object) -> list[str]:
+    evaluation = getattr(spec, "evaluation")
+    names = [evaluation.primary_metric.name]
+    names.extend(metric.name for metric in evaluation.secondary_metrics)
+    return [name for name in names if name]
+
+
+def _result_metric_mapping(
+    spec: object,
+    metrics_summary: dict[str, Any],
+) -> dict[str, list[Any]]:
+    return {
+        metric_name: [
+            value
+            for key, value in metrics_summary.items()
+            if key == metric_name or key.endswith(f"/{metric_name}")
+        ]
+        for metric_name in _metric_contract_names(spec)
+    }
+
+
+def _validate_results_against_metric_contract(
+    spec: object,
+    metrics_summary: dict[str, Any],
+) -> list[str]:
+    result_metrics = _result_metric_mapping(spec, metrics_summary)
+    violations: list[str] = []
+    for metric_name, matched_values in result_metrics.items():
+        if not matched_values:
+            violations.append(f"missing result metric: {metric_name}")
+            continue
+        values = [
+            value.get("mean") if isinstance(value, dict) else value
+            for value in matched_values
+        ]
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in values
+        ):
+            violations.append(f"non-numeric result metric: {metric_name}")
+    return violations
+
+
+def _post_result_analysis_spec_gate(
+    result: StageResult,
+    run_dir: Path,
+    degradations: list[dict[str, str]],
+) -> StageResult:
+    from researchclaw.domains.experiment_schema import (
+        SpecValidationError,
+        UniversalExperimentPlan,
+    )
+
+    stage_dir = run_dir / f"stage-{int(Stage.RESULT_ANALYSIS):02d}"
+    spec_path = run_dir / "stage-09" / "experiment_spec.yaml"
+    if not spec_path.exists():
+        logger.warning(
+            "Experiment spec validation skipped: %s is missing, likely from a pre-v1 stage 9 run",
+            spec_path,
+        )
+        return result
+
+    try:
+        spec_text = spec_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"could not read experiment_spec.yaml: {exc}"],
+        )
+    try:
+        spec = UniversalExperimentPlan.from_yaml_v1(spec_text)
+    except SpecValidationError as exc:
+        return _fail_with_spec_violations(result, stage_dir, exc.violations)
+
+    spec_violations = spec.validate(strict=False)
+    if spec_violations:
+        return _fail_with_spec_violations(result, stage_dir, spec_violations)
+
+    summary_path = stage_dir / "experiment_summary.json"
+    if not summary_path.exists():
+        message = (
+            f"Experiment spec result gate deferred: no artifact found at "
+            f"{summary_path}; enforcement skipped"
+        )
+        if _record_degradation(degradations, "result_gate_deferred", message):
+            logger.warning(message)
+        return result
+
+    try:
+        summary_text = summary_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"could not read {summary_path}: {exc}"],
+        )
+    try:
+        loaded = json.loads(summary_text)
+    except json.JSONDecodeError as exc:
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"{summary_path} is invalid JSON: {exc}"],
+        )
+    if not isinstance(loaded, dict):
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"{summary_path} must contain a JSON object"],
+        )
+
+    if "metrics_summary" not in loaded:
+        message = (
+            f"Experiment spec result gate deferred: {summary_path} "
+            "metrics_summary is missing; enforcement skipped"
+        )
+        if _record_degradation(degradations, "result_gate_deferred", message):
+            logger.warning(message)
+        return result
+
+    metrics_summary = loaded["metrics_summary"]
+    if not isinstance(metrics_summary, dict):
+        return _fail_with_spec_violations(
+            result,
+            stage_dir,
+            [f"{summary_path} metrics_summary must be a JSON object"],
+        )
+    if not metrics_summary:
+        message = (
+            f"Experiment spec result gate deferred: {summary_path} "
+            "metrics_summary is empty; "
+            "enforcement skipped"
+        )
+        if _record_degradation(degradations, "result_gate_deferred", message):
+            logger.warning(message)
+        return result
+
+    violations = _validate_results_against_metric_contract(spec, metrics_summary)
+    if violations:
+        return _fail_with_spec_violations(result, stage_dir, violations)
+    return result
 
 
 def _collect_content_metrics(run_dir: Path | None) -> dict[str, object]:
@@ -441,10 +706,12 @@ def execute_pipeline(
     skip_noncritical: bool = False,
     kb_root: Path | None = None,
     cancel_event: "threading.Event | None" = None,
+    degradations: list[dict[str, str]] | None = None,
 ) -> list[StageResult]:
     """Execute pipeline stages sequentially from *from_stage* to *to_stage* (inclusive)."""
 
     results: list[StageResult] = []
+    degradations = [] if degradations is None else degradations
     started = False
     total_stages = len(STAGE_SEQUENCE)
 
@@ -457,28 +724,27 @@ def execute_pipeline(
     except Exception:  # noqa: BLE001
         pass
 
-    # ── Integration hooks: EventLog, ExperimentMemory, CostTracker ──
-    event_log = None
-    try:
-        from researchclaw.pipeline.event_log import EventLog, EventType, create_event
-        event_log = EventLog(log_dir=run_dir)
-        event_log.append(create_event(
-            EventType.PIPELINE_START, run_id=run_id,
-            stages=total_stages, from_stage=int(from_stage),
-        ))
-    except Exception:
-        logger.debug("Event log initialisation skipped")
-
+    # ── Integration hooks: ExperimentMemory, CostTracker ──
     exp_memory = None
     try:
         from researchclaw.memory.experiment_memory import ExperimentMemory
+        from researchclaw.memory.retriever import MemoryRetriever
+        from researchclaw.memory.store import MemoryStore
+
         _mem_dir = run_dir / "experiment_memory"
         _mem_dir.mkdir(parents=True, exist_ok=True)
-        exp_memory = ExperimentMemory(store_dir=str(_mem_dir))
-    except Exception:
-        logger.debug("Experiment memory initialisation skipped")
+        _mem_store = MemoryStore(_mem_dir)
+        _mem_store.load()
+        exp_memory = ExperimentMemory(_mem_store, MemoryRetriever(_mem_store))
+    except Exception as exc:
+        message = f"Experiment memory initialization failed: {exc}"
+        if _record_degradation(degradations, "experiment_memory_init", message):
+            logger.warning(message)
 
     cost_budget = getattr(config.experiment.cli_agent, "max_budget_usd", 0.0) or 0.0
+    cli_agent_provider = (
+        getattr(config.experiment.cli_agent, "provider", "llm") or "llm"
+    ).strip().lower()
 
     for stage in STAGE_SEQUENCE:
         started = _should_start(stage, from_stage, started)
@@ -495,25 +761,30 @@ def execute_pipeline(
         prefix = f"[{run_id}] Stage {stage_num:02d}/{total_stages}"
         print(f"{prefix} {stage.name} — running...")
 
-        # ── Event log: stage start ──
-        if event_log:
-            try:
-                event_log.append(create_event(
-                    EventType.STAGE_START, run_id=run_id, stage=stage.name,
-                ))
-            except Exception:
-                pass
-
         # ── Cost budget check ──
         if cost_budget > 0:
             try:
                 from researchclaw.cost_tracker import get_global_tracker
-                if not get_global_tracker().check_budget(cost_budget):
-                    logger.warning("Cost budget $%.2f exceeded — pausing pipeline", cost_budget)
-                    print(f"{prefix} BUDGET EXCEEDED (${cost_budget:.2f}) — stopping")
-                    break
-            except Exception:
-                pass
+            except ImportError:
+                if cli_agent_provider != "llm":
+                    message = (
+                        f"max_budget_usd={cost_budget:.2f} configured but "
+                        "researchclaw.cost_tracker is unavailable; budget not enforced"
+                    )
+                    if _record_degradation(
+                        degradations, "cost_budget_unenforced", message
+                    ):
+                        logger.warning(message)
+            else:
+                try:
+                    if not get_global_tracker().check_budget(cost_budget):
+                        logger.warning("Cost budget $%.2f exceeded — pausing pipeline", cost_budget)
+                        print(f"{prefix} BUDGET EXCEEDED (${cost_budget:.2f}) — stopping")
+                        break
+                except Exception as exc:
+                    message = f"cost budget check failed: {exc}"
+                    if _record_degradation(degradations, "cost_budget_error", message):
+                        logger.warning(message)
 
         # BUG-218: Ensure the best stage-14 experiment data is promoted
         # BEFORE paper writing begins.  Without this, the recursive REFINE
@@ -536,78 +807,30 @@ def execute_pipeline(
         )
         elapsed = _time.monotonic() - t0
 
-        # ── Event log: stage end ──
-        if event_log:
-            try:
-                etype = EventType.STAGE_END if result.status == StageStatus.DONE else EventType.STAGE_FAIL
-                event_log.append(create_event(
-                    etype, run_id=run_id, stage=stage.name,
-                    status=result.status.value, elapsed_sec=round(elapsed, 1),
-                    error=result.error,
-                ))
-            except Exception:
-                pass
-
         # ── ExperimentSpec: generate after design, validate after analysis ──
         if stage == Stage.EXPERIMENT_DESIGN and result.status == StageStatus.DONE:
-            try:
-                from researchclaw.pipeline.experiment_spec import ExperimentSpec, MetricDef, generate_spec
-                spec_text = generate_spec(config.research.topic, "")
-                spec_path = run_dir / f"stage-{int(stage):02d}" / "experiment_spec.md"
-                spec_path.write_text(spec_text, encoding="utf-8")
-                logger.info("Experiment spec generated: %s", spec_path)
-            except Exception:
-                logger.debug("Experiment spec generation skipped")
+            result = _post_experiment_design_spec_gate(result, run_dir, config)
 
         if stage == Stage.RESULT_ANALYSIS and result.status == StageStatus.DONE:
-            try:
-                from researchclaw.pipeline.experiment_spec import parse_spec, validate_results_against_spec
-                spec_path = run_dir / "stage-09" / "experiment_spec.md"
-                if spec_path.exists():
-                    spec = parse_spec(spec_path.read_text(encoding="utf-8"))
-                    results_path = run_dir / "results.json"
-                    exp_results = {}
-                    if results_path.exists():
-                        exp_results = json.loads(results_path.read_text(encoding="utf-8"))
-                    violations = validate_results_against_spec(spec, exp_results)
-                    if violations:
-                        logger.warning("Spec violations: %s", violations)
-                        (run_dir / f"stage-{int(stage):02d}" / "spec_violations.json").write_text(
-                            json.dumps(violations, indent=2), encoding="utf-8"
-                        )
-            except Exception:
-                logger.debug("Experiment spec validation skipped")
-
-        # ── Pitfall detection after code generation / experiment run ──
-        if stage in (Stage.CODE_GENERATION, Stage.EXPERIMENT_RUN) and result.status == StageStatus.DONE:
-            try:
-                from researchclaw.pipeline.pitfall_detector import PitfallDetector
-                detector = PitfallDetector()
-                code_path = run_dir / f"stage-{int(stage):02d}"
-                code_files = list(code_path.rglob("*.py"))
-                code_text = "\n".join(f.read_text(errors="ignore") for f in code_files[:5])
-                pitfalls = detector.detect_all(code=code_text, results={}, experiment_config={})
-                if pitfalls:
-                    critical = [p for p in pitfalls if p.severity == "critical"]
-                    if critical:
-                        logger.warning("CRITICAL pitfalls detected: %s", [p.description for p in critical])
-                    pitfall_report = [{"type": p.type.value, "severity": p.severity, "description": p.description} for p in pitfalls]
-                    (run_dir / f"stage-{int(stage):02d}" / "pitfall_report.json").write_text(
-                        json.dumps(pitfall_report, indent=2), encoding="utf-8"
-                    )
-            except Exception:
-                logger.debug("Pitfall detection skipped")
+            result = _post_result_analysis_spec_gate(result, run_dir, degradations)
 
         # ── Experiment memory: record outcome after experiment stages ──
         if stage in (Stage.EXPERIMENT_RUN, Stage.ITERATIVE_REFINE) and result.status == StageStatus.DONE and exp_memory:
             try:
                 from researchclaw.memory.experiment_memory import ExperimentOutcome
                 import time as _time_mod
-                results_path = run_dir / "results.json"
+                experiment_results = _collect_experiment_results(
+                    run_dir,
+                    metric_key=config.experiment.metric_key,
+                    metric_direction=config.experiment.metric_direction,
+                )
                 metric_val = 0.0
-                if results_path.exists():
-                    rdata = json.loads(results_path.read_text(encoding="utf-8"))
-                    metric_val = rdata.get(config.experiment.metric_key, 0.0)
+                for key, summary in experiment_results["metrics_summary"].items():
+                    if key == config.experiment.metric_key or key.endswith(
+                        "/" + config.experiment.metric_key
+                    ):
+                        metric_val = summary["mean"]
+                        break
                 exp_memory.record_outcome(ExperimentOutcome(
                     run_id=run_id, stage=stage.name,
                     hypothesis=config.research.topic, config={},
@@ -619,8 +842,12 @@ def execute_pipeline(
                     packages_used=[], hyperparameters={},
                     timestamp=_time_mod.time(), duration_sec=elapsed,
                 ))
-            except Exception:
-                logger.debug("Experiment memory recording skipped")
+            except Exception as exc:
+                message = f"Experiment memory recording failed: {exc}"
+                if _record_degradation(
+                    degradations, "experiment_memory_record", message
+                ):
+                    logger.warning(message)
 
         if result.status == StageStatus.DONE:
             arts = ", ".join(result.artifacts) if result.artifacts else "none"
@@ -654,8 +881,12 @@ def execute_pipeline(
                     backend=config.knowledge_base.backend,
                     topic=config.research.topic,
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                message = f"Knowledge base export failed: {exc}"
+                if _record_degradation(
+                    degradations, "knowledge_base_export", message
+                ):
+                    logger.warning(message)
 
         if result.status == StageStatus.DONE:
             _write_checkpoint(run_dir, stage, run_id, adapters=adapters)
@@ -770,6 +1001,7 @@ def execute_pipeline(
                     skip_noncritical=skip_noncritical,
                     kb_root=kb_root,
                     cancel_event=cancel_event,
+                    degradations=degradations,
                 )
                 results.extend(pivot_results)
                 # BUG-211: Promote best stage-14 after REFINE completes so
@@ -850,20 +1082,9 @@ def execute_pipeline(
         results=results,
         from_stage=from_stage,
         run_dir=run_dir,
+        degradations=degradations,
     )
     _write_pipeline_summary(run_dir, summary)
-
-    # ── Event log: pipeline end ──
-    if event_log:
-        try:
-            done_count = sum(1 for r in results if r.status == StageStatus.DONE)
-            failed_count = sum(1 for r in results if r.status == StageStatus.FAILED)
-            event_log.append(create_event(
-                EventType.PIPELINE_END, run_id=run_id,
-                stages_done=done_count, stages_failed=failed_count,
-            ))
-        except Exception:
-            pass
 
     # --- Evolution: extract and store lessons ---
     lessons: list[object] = []
