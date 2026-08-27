@@ -1126,3 +1126,250 @@ def test_imp21_stage6_empty_shortlist_gate_halts_pipeline_under_auto_approve(
     )
     assert summary["final_status"] == "paused"
     assert summary["stages_paused"] == 1
+
+
+def test_experiment_memory_initialization_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import researchclaw.memory.experiment_memory as memory_module
+
+    class BrokenExperimentMemory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args, kwargs
+            raise RuntimeError("memory offline")
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        return _done(stage)
+
+    monkeypatch.setattr(memory_module, "ExperimentMemory", BrokenExperimentMemory)
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-memory-init",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.EXPERIMENT_RUN,
+            to_stage=Stage.ITERATIVE_REFINE,
+        )
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Experiment memory initialization failed" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "experiment_memory_init",
+            "message": "Experiment memory initialization failed: memory offline",
+        }
+    ]
+
+
+def test_experiment_memory_records_outcome_after_experiment_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        runs_dir = run_dir / "stage-12" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "run_01.json").write_text(
+            json.dumps({"metrics": {"primary_metric": 0.42}}),
+            encoding="utf-8",
+        )
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-memory-record",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.EXPERIMENT_RUN,
+        to_stage=Stage.EXPERIMENT_RUN,
+    )
+
+    memory_path = run_dir / "experiment_memory" / "experiment.jsonl"
+    assert memory_path.exists()
+    entries = [
+        json.loads(line)
+        for line in memory_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(entries) == 1
+    metadata = entries[0]["metadata"]
+    assert metadata["run_id"] == "run-memory-record"
+    assert metadata["stage"] == "EXPERIMENT_RUN"
+    assert metadata["metric_name"] == "primary_metric"
+    assert metadata["metric_value"] == 0.42
+
+
+def test_experiment_memory_recording_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import researchclaw.memory.experiment_memory as memory_module
+
+    class DummyOutcome:
+        def __init__(self, **kwargs: object) -> None:
+            self.__dict__.update(kwargs)
+
+    class BrokenExperimentMemory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args, kwargs
+
+        def record_outcome(self, outcome: object) -> str:
+            _ = outcome
+            raise RuntimeError("memory write failed")
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = stage, kwargs
+        return _done(stage)
+
+    monkeypatch.setattr(memory_module, "ExperimentMemory", BrokenExperimentMemory)
+    monkeypatch.setattr(memory_module, "ExperimentOutcome", DummyOutcome, raising=False)
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-memory-record-fail",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.EXPERIMENT_RUN,
+            to_stage=Stage.ITERATIVE_REFINE,
+        )
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Experiment memory recording failed" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "experiment_memory_record",
+            "message": "Experiment memory recording failed: memory write failed",
+        }
+    ]
+
+
+def test_kb_export_failure_is_recorded_once(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "out.md").write_text(f"stage {int(stage)}", encoding="utf-8")
+        return _done(stage)
+
+    def broken_write_stage_to_kb(*args: object, **kwargs: object) -> list[object]:
+        _ = args, kwargs
+        raise RuntimeError("kb offline")
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    monkeypatch.setattr(rc_runner, "write_stage_to_kb", broken_write_stage_to_kb)
+
+    with caplog.at_level("WARNING", logger="researchclaw.pipeline.runner"):
+        results = rc_runner.execute_pipeline(
+            run_dir=run_dir,
+            run_id="run-kb-fail",
+            config=rc_config,
+            adapters=adapters,
+            from_stage=Stage.EXPERIMENT_DESIGN,
+            to_stage=Stage.RESULT_ANALYSIS,
+            kb_root=tmp_path / "kb-fail",
+        )
+
+    assert len(results) == 6
+    assert all(result.status == StageStatus.DONE for result in results)
+    warnings = [
+        record
+        for record in caplog.records
+        if "Knowledge base export failed" in record.message
+    ]
+    assert len(warnings) == 1
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "knowledge_base_export",
+            "message": "Knowledge base export failed: kb offline",
+        }
+    ]
+
+
+def test_recursive_kb_export_degradation_reaches_final_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+    tmp_path: Path,
+) -> None:
+    refine_visits = 0
+    decision_visits = 0
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        nonlocal refine_visits, decision_visits
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "out.md").write_text(f"stage {int(stage)}", encoding="utf-8")
+        if stage == Stage.ITERATIVE_REFINE:
+            refine_visits += 1
+        if stage == Stage.RESEARCH_DECISION and decision_visits == 0:
+            decision_visits += 1
+            return _refine_result(stage)
+        return _done(stage)
+
+    def inner_only_write_stage_to_kb(
+        *args: object, **kwargs: object
+    ) -> list[object]:
+        _ = args
+        if (
+            kwargs["stage_id"] == int(Stage.ITERATIVE_REFINE)
+            and refine_visits == 2
+        ):
+            raise RuntimeError("inner kb offline")
+        return []
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    monkeypatch.setattr(rc_runner, "write_stage_to_kb", inner_only_write_stage_to_kb)
+
+    rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-recursive-kb-fail",
+        config=rc_config,
+        adapters=adapters,
+        from_stage=Stage.ITERATIVE_REFINE,
+        kb_root=tmp_path / "recursive-kb-fail",
+    )
+
+    assert refine_visits == 2
+    summary = json.loads((run_dir / "pipeline_summary.json").read_text())
+    assert summary["degradations"] == [
+        {
+            "key": "knowledge_base_export",
+            "message": "Knowledge base export failed: inner kb offline",
+        }
+    ]
