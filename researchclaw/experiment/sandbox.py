@@ -76,6 +76,16 @@ _SUMMARY_PATTERN = re.compile(
 _CONDITION_MULTI_METRIC_RE = re.compile(
     r"(\w[\w.]*)\s*:\s*(" + _FLOAT_RE + r")"
 )
+# Compact SUMMARY lines emitted by the codegen harness (no condition=/metric=
+# keywords): "SUMMARY <Cond> <metric>=<mean> std=<std>"
+# e.g. "SUMMARY FullFinetune mean_acc=0.3472 std=0.0386"
+_COMPACT_SUMMARY_PATTERN = re.compile(
+    r"^SUMMARY\s+(\S+)\s+(\w[\w.]*)\s*=\s*("
+    + _FLOAT_RE
+    + r")\s+std\s*=\s*("
+    + _FLOAT_RE
+    + r")"
+)
 
 
 def _to_text(value: str | bytes | None) -> str:
@@ -93,7 +103,10 @@ def parse_metrics(stdout: str) -> dict[str, float]:
 
         # BUG-181: Parse SUMMARY lines first (most reliable, one metric per line)
         # Format: "SUMMARY condition=X metric=Y mean=M std=S [success_rate=R]"
+        # Also compact codegen format: "SUMMARY <Cond> <metric>=<M> std=<S>"
         summary_match = _SUMMARY_PATTERN.match(stripped)
+        if summary_match is None:
+            summary_match = _COMPACT_SUMMARY_PATTERN.match(stripped)
         if summary_match:
             cond_name, metric_name, mean_str, std_str = summary_match.groups()
             if is_metric_name(metric_name):

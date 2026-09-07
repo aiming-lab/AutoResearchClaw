@@ -309,10 +309,10 @@ class LLMClient:
         Distinguishes: 401 (bad key), 403 (model forbidden),
                        404 (bad endpoint), 429 (rate limited), timeout.
         """
-        is_reasoning = any(
-            self.config.primary_model.startswith(p) for p in _NEW_PARAM_MODELS
-        )
-        min_tokens = 64 if is_reasoning else 1
+        # NOTE (OpenRouter): reasoning models (e.g. meta/muse-spark-*)
+        # consume reasoning tokens from the max_tokens budget and Meta
+        # requires max_output_tokens >= 16. Always preflight with 64.
+        min_tokens = 64
         try:
             _ = self.chat(
                 [{"role": "user", "content": "ping"}],
