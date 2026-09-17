@@ -62,6 +62,12 @@ cost_log.jsonl
 # Playwright MCP logs
 .playwright-mcp/
 
+# OrcaRouter GUI evidence bundle: written into the working tree by
+# ``scripts/orcarouter_ui_evidence.py`` so the screenshots a reviewer opens come
+# from a run of the shipped code against the live catalogue. It is a build
+# product of that run, never repository content, so it stays out of the tree.
+orca-evidence/
+
 # Frontend (local dev only)
 frontend/
 

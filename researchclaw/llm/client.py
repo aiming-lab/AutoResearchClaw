@@ -127,6 +127,16 @@ class LLMClient:
         preset = PROVIDER_PRESETS.get(provider, {})
         preset_base_url = preset.get("base_url")
 
+        # OrcaRouter has two provider entries (pasted API key vs. PKCE-minted
+        # key) that share one endpoint, one model namespace and one catalogue.
+        # Both resolve through the same credential seam, so the reviewer,
+        # debate-panel and every other caller of this factory get whichever
+        # credential the user configured without duplicating auth logic.
+        if provider in ("orcarouter", "orcarouter-oauth"):
+            from researchclaw.llm.orcarouter import build_orcarouter_client
+
+            return build_orcarouter_client(rc_config, prefer=provider)
+
         api_key = str(
             rc_config.llm.api_key or os.environ.get(rc_config.llm.api_key_env, "") or ""
         )
@@ -203,6 +213,24 @@ class LLMClient:
         )
         preset = PROVIDER_PRESETS.get(provider, {})
         preset_base_url = preset.get("base_url")
+
+        if provider in ("orcarouter", "orcarouter-oauth"):
+            # The reviewer talks to the same gateway with the same credential
+            # seam; only the model differs. It keeps an empty fallback chain so
+            # its judgement stays decoupled from the generator.
+            from researchclaw.llm.orcarouter import build_orcarouter_client
+
+            base = build_orcarouter_client(rc_config, prefer=provider)
+            return cls(
+                LLMConfig(
+                    base_url=base.config.base_url,
+                    api_key=base.config.api_key,
+                    wire_api=getattr(llm, "wire_api", "chat_completions"),
+                    primary_model=reviewer_model,
+                    fallback_models=[],
+                    timeout_sec=getattr(llm, "timeout_sec", 600),
+                )
+            )
 
         base_url = (
             str(getattr(llm, "reviewer_base_url", "") or "").strip()

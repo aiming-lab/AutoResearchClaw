@@ -769,6 +769,26 @@ and `MiniMax-M2.7` in the fallback chain.
 | `minimax` | China | OpenAI-compatible | `https://api.minimaxi.com/v1` |
 | `minimax-anthropic` | Global | Anthropic-compatible | `https://api.minimax.io/anthropic` |
 | `minimax-anthropic-cn` | China | Anthropic-compatible | `https://api.minimaxi.com/anthropic` |
+| `orcarouter` | Global | OpenAI-compatible | `https://api.orcarouter.ai/v1` |
+| `orcarouter-oauth` | Global | OpenAI-compatible | `https://api.orcarouter.ai/v1` |
+
+The two `orcarouter` entries use the same gateway and the same model
+namespace; they differ only in how the key is obtained. `orcarouter` takes a
+pasted `sk-orca-…` key, and `orcarouter-oauth` takes the key minted by an
+OAuth 2.0 + PKCE login:
+
+```bash
+researchclaw orcarouter key --set          # paste an existing key
+researchclaw orcarouter login              # or authorize an account (browser callback)
+researchclaw orcarouter login --flow oob   # ...or paste a code, on a headless box
+researchclaw orcarouter models             # capability-filtered model list
+```
+
+The model dropdown for OrcaRouter is built from `GET
+https://api.orcarouter.ai/v1/models` with your own key, filtered per entry
+point — a text model cannot be selected once an image attachment makes the
+request multimodal. See [docs/ORCAROUTER.md](docs/ORCAROUTER.md) for the
+origins, the credential lifecycle, and the capability rules.
 
 Anthropic-compatible presets require `pip install "researchclaw[anthropic]"`.
 The global and China API references are available from the
