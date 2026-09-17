@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ResearchClaw — OrcaRouter provider settings</title>
+  <link rel="stylesheet" href="providers.css" />
+</head>
+<body>
+  <main class="wrap" id="providers-app">
+    <header class="page-header">
+      <div class="brand">
+        <!-- Official OrcaRouter mark. Source:
+             https://www.orcarouter.ai/orca-logo-classic.png (vendored, PNG,
+             matching website/assets/*.png), so the page also renders offline. -->
+        <img class="brand-mark" src="orca-logo-classic.png"
+             alt="OrcaRouter" width="28" height="28" />
+        <h1>OrcaRouter provider</h1>
+      </div>
+      <p class="subtitle">
+        Paste an API key, or connect an OrcaRouter account with OAuth 2.0 + PKCE.
+        Both produce the same kind of key, and either one can drive every AI stage.
+      </p>
+      <p class="endpoints" id="endpoints"></p>
+    </header>
+
+    <section class="grid">
+      <!-- ---------------- API key ---------------- -->
+      <article class="card" id="card-api-key">
+        <h2>OrcaRouter — API</h2>
+        <p class="card-note">
+          Use an existing <code>sk-orca-…</code> key. Stored server-side; it is
+          never sent to this page and never logged.
+        </p>
+        <label class="field">
+          <span class="field-label">API key</span>
+          <input id="api-key-input" data-testid="api-key-input" type="password"
+                 autocomplete="off" spellcheck="false" placeholder="sk-orca-…" />
+        </label>
+        <div class="row">
+          <button id="api-key-save" data-testid="api-key-save" class="btn primary">Save key</button>
+          <button id="api-key-clear" data-testid="api-key-clear" class="btn">Clear</button>
+          <a class="link" id="key-dashboard" href="#" target="_blank" rel="noreferrer noopener">Manage keys</a>
+        </div>
+        <p class="statusline" data-testid="secret-masked" id="api-key-status">No key stored</p>
+      </article>
+
+      <!-- ---------------- PKCE ---------------- -->
+      <article class="card" id="card-pkce">
+        <h2>OrcaRouter — Auth</h2>
+        <p class="card-note">
+          One click in your browser. The key is issued to your account, billed to
+          it, and revocable at any time. No client secret, no redirect URI to
+          pre-register.
+        </p>
+        <div class="row">
+          <label class="field compact">
+            <span class="field-label">Flow</span>
+            <select id="pkce-flow" data-testid="pkce-flow">
+              <option value="auto">Automatic</option>
+              <option value="loopback">Browser callback (loopback)</option>
+              <option value="oob">Show me a code</option>
+            </select>
+          </label>
+          <button id="pkce-connect" data-testid="pkce-connect" class="btn primary">
+            Connect with OrcaRouter
+          </button>
+          <button id="pkce-cancel" data-testid="pkce-cancel" class="btn" disabled>Cancel</button>
+        </div>
+        <p class="hint" id="pkce-hint" data-testid="pkce-hint"></p>
+        <p class="authurl" id="pkce-url" data-testid="pkce-authorize-url" hidden></p>
+        <div class="row" id="pkce-code-row" data-testid="pkce-code-row" hidden>
+          <label class="field compact grow">
+            <span class="field-label">Code from the consent screen</span>
+            <input id="pkce-code" data-testid="pkce-code" type="text" autocomplete="off" />
+          </label>
+          <button id="pkce-submit" data-testid="pkce-submit" class="btn">Submit code</button>
+        </div>
+        <p class="statusline" data-testid="pkce-state" id="pkce-state">Not connected</p>
+      </article>
+
+      <!-- ---------------- Models ---------------- -->
+      <article class="card wide" id="card-models">
+        <h2>Models</h2>
+        <p class="card-note">
+          The list comes from the configured origin's <code>/v1/models</code>. It is
+          filtered per entry point: chat models for text, and only models that
+          declare image input when an attachment is present.
+        </p>
+        <div class="row">
+          <label class="field compact">
+            <span class="field-label">Entry point</span>
+            <select id="model-capability" data-testid="model-capability">
+              <option value="chat">Text chat / agent</option>
+              <option value="embedding">Embedding</option>
+              <option value="image">Image generation</option>
+              <option value="video">Video generation</option>
+              <option value="rerank">Rerank</option>
+            </select>
+          </label>
+          <label class="check">
+            <input id="model-multimodal" data-testid="model-multimodal" type="checkbox" />
+            <span>Attach an image (requires declared image input)</span>
+          </label>
+          <button id="model-refresh" data-testid="model-refresh" class="btn">Refresh</button>
+        </div>
+        <label class="field-label" for="model-search">Model</label>
+        <div class="combo" id="model-combo">
+          <button type="button" id="model-trigger" data-testid="model-trigger"
+                  class="combo-trigger" aria-haspopup="listbox" aria-expanded="false">
+            <span id="model-trigger-label" data-testid="model-trigger-label">Loading…</span>
+            <span class="caret" aria-hidden="true">▾</span>
+          </button>
+          <div class="combo-panel" id="model-panel" data-testid="model-panel"
+               role="listbox" aria-label="OrcaRouter models" hidden>
+            <input id="model-search" data-testid="model-search" type="text"
+                   placeholder="Search models…" autocomplete="off" />
+            <ul class="combo-list" id="model-list" data-testid="model-list"></ul>
+            <p class="combo-empty" id="model-empty" data-testid="model-empty" hidden></p>
+          </div>
+        </div>
+        <p class="statusline" id="model-status" data-testid="model-status"></p>
+        <p class="banner warn" id="model-degraded" data-testid="model-degraded" hidden></p>
+        <p class="banner error" id="model-error" data-testid="model-error" hidden></p>
+      </article>
+    </section>
+
+    <p class="banner error" id="global-error" data-testid="global-error" hidden></p>
+  </main>
+
+  <script src="providers.js"></script>
+</body>
+</html>

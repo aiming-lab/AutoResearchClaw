@@ -62,6 +62,23 @@ llm:
   # primary_model: "deepseek-ai/deepseek-v4-pro"
   # fallback_models:
   #   - "deepseek-ai/deepseek-v4-flash"
+  # --- OrcaRouter example (api key) ---
+  # provider: "orcarouter"
+  # base_url: "https://api.orcarouter.ai/v1"
+  # api_key_env: "ORCAROUTER_API_KEY"     # paste sk-orca-... or run: researchclaw orcarouter key --set
+  # primary_model: "orcarouter/auto"
+  # fallback_models:
+  #   - "deepseek/deepseek-v4-pro"
+  #   - "deepseek/deepseek-v4-flash"
+  # --- OrcaRouter example (account login, OAuth 2.0 + PKCE) ---
+  # provider: "orcarouter-oauth"
+  # base_url: "https://api.orcarouter.ai/v1"
+  # api_key_env: ""                       # the key comes from: researchclaw orcarouter login
+  # primary_model: "orcarouter/auto"
+  # fallback_models:
+  #   - "deepseek/deepseek-v4-pro"
+  # Auth origin defaults to https://www.orcarouter.ai; override with
+  # ORCA_AUTH_BASE_URL / ORCA_API_BASE_URL (or a shared ORCA_BASE_URL).
   # --- Ollama (local) example ---
   # provider: "ollama"
   # base_url: "http://localhost:11434/v1"

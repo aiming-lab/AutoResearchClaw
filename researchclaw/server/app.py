@@ -86,9 +86,11 @@ def create_app(
     # --- Routes ---
     from researchclaw.server.routes.pipeline import router as pipeline_router
     from researchclaw.server.routes.projects import router as projects_router
+    from researchclaw.server.routes.providers import router as providers_router
 
     app.include_router(pipeline_router)
     app.include_router(projects_router)
+    app.include_router(providers_router)
 
     if not dashboard_only:
         from researchclaw.server.routes.chat import router as chat_router, set_chat_manager
@@ -128,6 +130,17 @@ def create_app(
         @app.get("/")
         async def index() -> FileResponse:
             return FileResponse(str(frontend_dir / "index.html"))
+
+    # --- Provider settings UI (self-contained, ships with the package) ---
+    provider_ui_dir = Path(__file__).resolve().parent / "static"
+    if provider_ui_dir.is_dir():
+        # html=True serves index.html at the mount root, so the page and its
+        # assets share one prefix and the page can use relative URLs.
+        app.mount(
+            "/providers",
+            StaticFiles(directory=str(provider_ui_dir), html=True),
+            name="provider-ui",
+        )
 
     # --- Background tasks ---
     @app.on_event("startup")

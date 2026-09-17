@@ -17,6 +17,16 @@ PROVIDER_PRESETS = {
     "openrouter": {
         "base_url": "https://openrouter.ai/api/v1",
     },
+    "orcarouter": {
+        "base_url": "https://api.orcarouter.ai/v1",
+        "label": "OrcaRouter — API",
+        "auth": "api_key",
+    },
+    "orcarouter-oauth": {
+        "base_url": "https://api.orcarouter.ai/v1",
+        "label": "OrcaRouter — Auth",
+        "auth": "pkce",
+    },
     "deepseek": {
         "base_url": "https://api.deepseek.com/v1",
     },
@@ -64,6 +74,10 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
     - providers with an ``"anthropic"`` adapter → :class:`LLMClient` with
       Anthropic Messages API support
     - ``"openrouter"`` → :class:`LLMClient` with OpenRouter base URL
+    - ``"orcarouter"`` → :class:`LLMClient` with the OrcaRouter base URL,
+      authenticating with a pasted ``sk-orca-…`` API key
+    - ``"orcarouter-oauth"`` → the same OrcaRouter endpoint, authenticating
+      with the durable key minted by the OAuth 2.0 + PKCE connect flow
     - ``"openai"`` → :class:`LLMClient` with OpenAI base URL
     - ``"deepseek"`` → :class:`LLMClient` with DeepSeek base URL
     - ``"atlascloud"`` → :class:`LLMClient` with Atlas Cloud base URL
@@ -78,6 +92,17 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
     if config.llm.provider == "acp":
         from researchclaw.llm.acp_client import ACPClient as _ACP
         return _ACP.from_rc_config(config)
+
+    if config.llm.provider in ("orcarouter", "orcarouter-oauth"):
+        # Both OrcaRouter entries share one endpoint, one model namespace and
+        # one catalogue; they differ only in which credential adapter on the
+        # shared seam is preferred. No authentication logic lives downstream
+        # of that seam.
+        from researchclaw.llm.orcarouter import build_orcarouter_client
+
+        return build_orcarouter_client(
+            config, prefer=str(config.llm.provider)
+        )
 
     from researchclaw.llm.client import LLMClient as _LLM
 
@@ -145,3 +170,11 @@ def build_panel_llms(config: RCConfig) -> list:
         return clients
     except Exception:  # noqa: BLE001 - never block the pipeline on panel setup
         return []
+
+
+__all__ = [
+    "PROVIDER_PRESETS",
+    "build_panel_llms",
+    "build_reviewer_llm",
+    "create_llm_client",
+]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -715,7 +716,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         import uvicorn
     except ImportError as exc:
         print(
-            f"Error: web dependencies not installed — pip install researchclaw[web]\n{exc}",
+            f"Error: server dependencies not installed — pip install researchclaw[server]\n{exc}",
             file=sys.stderr,
         )
         return 1
@@ -741,7 +742,7 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
         import uvicorn
     except ImportError as exc:
         print(
-            f"Error: web dependencies not installed — pip install researchclaw[web]\n{exc}",
+            f"Error: server dependencies not installed — pip install researchclaw[server]\n{exc}",
             file=sys.stderr,
         )
         return 1
@@ -780,6 +781,8 @@ _PROVIDER_CHOICES = {
     "8": ("minimax-anthropic", "MINIMAX_API_KEY"),
     "9": ("minimax-anthropic-cn", "MINIMAX_API_KEY"),
     "10": ("atlascloud", "ATLASCLOUD_API_KEY"),
+    "11": ("orcarouter", "ORCAROUTER_API_KEY"),
+    "12": ("orcarouter-oauth", ""),
 }
 
 _PROVIDER_URLS = {
@@ -792,6 +795,8 @@ _PROVIDER_URLS = {
     "minimax-anthropic-cn": "https://api.minimaxi.com/anthropic",
     "ollama": "http://localhost:11434/v1",
     "atlascloud": "https://api.atlascloud.ai/v1",
+    "orcarouter": "https://api.orcarouter.ai/v1",
+    "orcarouter-oauth": "https://api.orcarouter.ai/v1",
 }
 
 _MINIMAX_MODELS = (
@@ -814,6 +819,17 @@ _PROVIDER_MODELS = {
     "atlascloud": (
         "deepseek-ai/deepseek-v4-pro",
         ["deepseek-ai/deepseek-v4-flash"],
+    ),
+    # Cold-start seed for OrcaRouter. Live discovery replaces this list when
+    # GET https://api.orcarouter.ai/v1/models succeeds; these entries are the
+    # verified fallback only (see researchclaw/llm/orcarouter_catalog.py).
+    "orcarouter": (
+        "deepseek/deepseek-v4-pro",
+        ["deepseek/deepseek-v4-flash", "orcarouter/auto"],
+    ),
+    "orcarouter-oauth": (
+        "deepseek/deepseek-v4-pro",
+        ["deepseek/deepseek-v4-flash", "orcarouter/auto"],
     ),
 }
 
@@ -856,6 +872,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("  8) minimax-global-anthropic (requires MINIMAX_API_KEY)")
         print("  9) minimax-cn-anthropic     (requires MINIMAX_API_KEY)")
         print(" 10) atlascloud   (requires ATLASCLOUD_API_KEY)")
+        print(" 11) orcarouter   (requires ORCAROUTER_API_KEY — paste sk-orca-…)")
+        print(" 12) orcarouter-oauth (connect an OrcaRouter account via PKCE)")
         try:
             raw = input("Choice [1]: ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -900,6 +918,11 @@ def cmd_init(args: argparse.Namespace) -> int:
             content = content.replace(
                 'api_key_env: "OPENAI_API_KEY"', f'api_key_env: "{api_key_env}"'
             )
+        if provider == "orcarouter-oauth":
+            # No env var: the credential is the key the connect flow stores.
+            content = content.replace(
+                'api_key_env: "ORCAROUTER_API_KEY"', 'api_key_env: ""'
+            )
 
     if provider in _PROVIDER_MODELS:
         primary, fallbacks = _PROVIDER_MODELS[provider]
@@ -931,6 +954,19 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("  2. Export your API key: export MINIMAX_API_KEY=...")
         print("  3. Edit config.arc.yaml to customize your settings")
         print("  4. Run: researchclaw doctor")
+    elif provider == "orcarouter":
+        print("\nNext steps:")
+        print("  1. Paste an existing key: researchclaw orcarouter key --set")
+        print("  2. Or export one:          export ORCAROUTER_API_KEY=sk-orca-...")
+        print("  3. Or connect an account:  researchclaw orcarouter login")
+        print("  4. Check the connection:   researchclaw orcarouter status")
+        print("  5. Run: researchclaw doctor")
+    elif provider == "orcarouter-oauth":
+        print("\nNext steps:")
+        print("  1. Connect your OrcaRouter account: researchclaw orcarouter login")
+        print("     (add --flow oob on a machine with no browser callback)")
+        print("  2. List available models: researchclaw orcarouter models")
+        print("  3. Run: researchclaw doctor")
     else:
         env_var = api_key_env or "OPENAI_API_KEY"
         print(f"\nNext steps:")
@@ -1481,6 +1517,60 @@ def build_parser() -> argparse.ArgumentParser:
     _ = cal_p.add_argument("--plan", help="Generate submission timeline for a venue")
     _ = cal_p.add_argument("--domains", nargs="+", help="Filter by domain")
 
+    # OrcaRouter provider: credentials and model catalogue
+    orca_p = sub.add_parser(
+        "orcarouter",
+        help="OrcaRouter provider: log in, manage the API key, list models",
+    )
+    orca_sub = orca_p.add_subparsers(dest="orcarouter_command")
+
+    orca_login = orca_sub.add_parser(
+        "login", help="Connect an OrcaRouter account with OAuth 2.0 + PKCE"
+    )
+    _ = orca_login.add_argument(
+        "--flow",
+        choices=("auto", "loopback", "oob"),
+        default="auto",
+        help="loopback = local browser callback (default when possible); "
+        "oob = show a code to paste (no browser callback)",
+    )
+    _ = orca_login.add_argument("--app-name", default="", help="Name shown on the consent screen")
+    _ = orca_login.add_argument("--scope", default="api", help="Requested scope (default: api)")
+    _ = orca_login.add_argument("--login-hint", default="", help="Pre-fill the account email")
+    _ = orca_login.add_argument("--no-browser", action="store_true", help="Print the URL instead of opening a browser")
+
+    orca_key = orca_sub.add_parser("key", help="Store, show, or clear the OrcaRouter API key")
+    _ = orca_key.add_argument("--set", action="store_true", help="Prompt for an sk-orca-… key and store it")
+    _ = orca_key.add_argument("--stdin", action="store_true", help="Read the key from stdin instead of prompting")
+    _ = orca_key.add_argument("--clear", action="store_true", help="Delete the stored key")
+
+    orca_status = orca_sub.add_parser("status", help="Show credential state for both OrcaRouter entries")
+    _ = orca_status.add_argument("--json", action="store_true", help="Emit JSON")
+
+    orca_models = orca_sub.add_parser(
+        "models", help="List models available to this OrcaRouter account"
+    )
+    _ = orca_models.add_argument(
+        "--capability",
+        choices=("chat", "embedding", "image", "video", "rerank"),
+        default="chat",
+        help="Which capability to list (default: chat)",
+    )
+    _ = orca_models.add_argument(
+        "--modality",
+        action="append",
+        default=[],
+        help="Require a declared input modality (e.g. --modality image); "
+        "undecided models are excluded",
+    )
+    _ = orca_models.add_argument("--json", action="store_true", help="Emit JSON")
+    _ = orca_models.add_argument("--refresh", action="store_true", help="Ignore the cached catalogue")
+
+    orca_logout = orca_sub.add_parser(
+        "logout", help="Forget the PKCE-issued credential (revoke it in the console)"
+    )
+    _ = orca_logout.add_argument("--yes", action="store_true", help="Do not ask for confirmation")
+
     # HITL: Attach to running pipeline
     attach_p = sub.add_parser("attach", help="Attach to a running/paused pipeline for HITL interaction")
     _ = attach_p.add_argument("run_dir", help="Path to run artifacts directory")
@@ -1548,6 +1638,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_skills(args)
     elif command == "profile":
         return cmd_profile(args)
+    elif command == "orcarouter":
+        return cmd_orcarouter(args)
     elif command == "attach":
         return cmd_attach(args)
     elif command == "status":
@@ -1566,6 +1658,335 @@ def main(argv: list[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 # Profile subcommand
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# OrcaRouter provider subcommand
+# ---------------------------------------------------------------------------
+
+
+def _orca_endpoints():
+    from researchclaw.llm.orcarouter import resolve_endpoints
+
+    return resolve_endpoints()
+
+
+def _orca_print_endpoints(endpoints) -> None:
+    print("OrcaRouter endpoints")
+    print(f"  auth (consent + exchange): {endpoints.auth_base}   [{endpoints.auth_source}]")
+    print(f"  inference + model list:    {endpoints.api_base}   [{endpoints.api_source}]")
+    print(
+        "  overrides: ORCA_AUTH_BASE_URL / ORCA_API_BASE_URL, or the shared "
+        "self-hosted ORCA_BASE_URL"
+    )
+
+
+def cmd_orcarouter(args: argparse.Namespace) -> int:
+    """OrcaRouter credential lifecycle and model catalogue."""
+    from researchclaw.llm import orcarouter as orca
+
+    sub = getattr(args, "orcarouter_command", None)
+    store = orca.CredentialStore()
+    endpoints = _orca_endpoints()
+
+    if sub == "key":
+        api_source = orca.ApiKeySource(store)
+        if getattr(args, "clear", False):
+            existed = store.status(orca.PROVIDER_ID).configured
+            api_source.clear()
+            print(
+                "Removed the stored OrcaRouter API key."
+                if existed
+                else "No stored OrcaRouter API key to remove."
+            )
+            env_key = os.environ.get(orca.DEFAULT_API_KEY_ENV, "")
+            if env_key:
+                print(
+                    f"Note: {orca.DEFAULT_API_KEY_ENV} is still set in this shell "
+                    "and takes precedence."
+                )
+            return 0
+        if getattr(args, "set", False) or getattr(args, "stdin", False):
+            if getattr(args, "stdin", False) or not sys.stdin.isatty():
+                raw = sys.stdin.readline() if not sys.stdin.isatty() else input(
+                    "OrcaRouter API key (sk-orca-…): "
+                )
+            else:
+                import getpass
+
+                raw = getpass.getpass("OrcaRouter API key (sk-orca-…): ")
+            try:
+                status = api_source.save(raw)
+            except orca.OrcaConfigError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            print(f"Stored OrcaRouter API key for provider '{orca.PROVIDER_ID}'.")
+            print(f"  {status.masked}")
+            print(
+                "  stored in "
+                f"{store.path} (mode 0600). Replaces any previous key; "
+                "never logged."
+            )
+            return 0
+        status = api_source.status()
+        if status.configured:
+            print(f"OrcaRouter API key: {status.masked}  (source: {status.grant_id or 'store'})")
+        else:
+            print("OrcaRouter API key: not configured")
+            print(f"  set one with: researchclaw orcarouter key --set")
+            print(f"  or export {orca.DEFAULT_API_KEY_ENV}=sk-orca-…")
+            print(f"  keys are managed at {orca.KEY_DASHBOARD_URL}")
+        return 0
+
+    if sub == "status":
+        api_source, pkce_source = orca.build_credential_sources(store=store)
+        api_status = api_source.status()
+        pkce_status = pkce_source.status()
+        if getattr(args, "json", False):
+            payload = {
+                "endpoints": endpoints.describe(),
+                "providers": {
+                    orca.PROVIDER_ID: api_status.as_dict(),
+                    orca.PROVIDER_ID_PKCE: pkce_status.as_dict(),
+                },
+            }
+            print(json.dumps(payload, indent=2))
+            return 0
+        _orca_print_endpoints(endpoints)
+        print()
+        print(f"{orca.PROVIDER_LABEL}  (provider id: {orca.PROVIDER_ID})")
+        if api_status.configured:
+            print(f"  key:        {api_status.masked}  (source: {api_status.grant_id or 'store'})")
+        else:
+            print("  key:        not configured — researchclaw orcarouter key --set")
+        print()
+        print(f"{orca.PROVIDER_LABEL_PKCE}  (provider id: {orca.PROVIDER_ID_PKCE})")
+        if pkce_status.configured:
+            print(f"  key:        {pkce_status.masked}")
+            print(f"  account:    {pkce_status.grant_id or 'unknown'}")
+            print(f"  scope:      {pkce_status.scope or 'api'}")
+            if pkce_status.needs_reauth:
+                print(
+                    "  state:      needs reauthorization — the relay rejected this "
+                    "credential (401). Run: researchclaw orcarouter login"
+                )
+            else:
+                print("  state:      connected (durable key; reused until revoked)")
+        else:
+            print("  state:      not connected — researchclaw orcarouter login")
+        print()
+        print(f"  revoke access at {orca.REVOCATION_URL}")
+        return 0
+
+    if sub == "logout":
+        status = store.status(orca.PROVIDER_ID_PKCE)
+        if not status.configured:
+            print("No PKCE-issued OrcaRouter credential is stored.")
+            return 0
+        if not getattr(args, "yes", False) and sys.stdin.isatty():
+            answer = input("Forget the stored OrcaRouter credential? [y/N] ").strip()
+            if answer.lower() not in ("y", "yes"):
+                print("Left in place.")
+                return 0
+        store.clear(orca.PROVIDER_ID_PKCE)
+        print("Forgot the stored OrcaRouter credential.")
+        print(f"To revoke the key itself, use {orca.REVOCATION_URL}")
+        return 0
+
+    if sub == "models":
+        return _cmd_orcarouter_models(args, store=store, endpoints=endpoints)
+
+    if sub in ("login", None):
+        return _cmd_orcarouter_login(args, store=store, endpoints=endpoints)
+
+    print(f"Unknown orcarouter subcommand: {sub}", file=sys.stderr)
+    return 2
+
+
+def _cmd_orcarouter_login(
+    args: argparse.Namespace, *, store, endpoints
+) -> int:
+    from researchclaw.llm import orcarouter as orca
+    from researchclaw.llm.orcarouter_pkce import (
+        PkceCancelled,
+        PkceDenied,
+        PkceError,
+        PkceStateMismatch,
+        PkceTimeout,
+        build_exchange_url,
+    )
+
+    existing = store.status(orca.PROVIDER_ID_PKCE)
+    if existing.configured and not existing.needs_reauth:
+        print(
+            "Already connected to OrcaRouter "
+            f"({existing.masked}, account {existing.grant_id or 'unknown'})."
+        )
+        print(
+            "The stored key is durable and is reused until revoked; it is not "
+            "re-issued on every start (OrcaRouter allows 10 PKCE keys per user "
+            "per day)."
+        )
+        print("Use --force on a future release to reauthorize, or revoke at "
+              f"{orca.REVOCATION_URL}")
+        return 0
+
+    flow = getattr(args, "flow", "auto")
+    try:
+        # Fail before the user is sent to a browser if the configured auth
+        # origin is really an inference base — that mistake only surfaces at
+        # exchange time as a confusing 404.
+        build_exchange_url(endpoints.auth_base)
+        pending = orca.start_connect(
+            flow=flow,
+            app_name=(getattr(args, "app_name", "") or orca.DEFAULT_APP_NAME),
+            scope=getattr(args, "scope", "api") or "api",
+            endpoints=endpoints,
+            login_hint=getattr(args, "login_hint", "") or "",
+        )
+    except (ValueError, orca.OrcaConfigError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"OrcaRouter login ({pending.flow} flow, S256 PKCE)")
+    print(f"  auth origin: {endpoints.auth_base}")
+    print()
+    print("Open this URL to authorize:")
+    print(f"  {pending.authorize_url}")
+    print()
+
+    if pending.flow == "loopback":
+        if not getattr(args, "no_browser", False):
+            _open_browser(pending.authorize_url)
+        print(f"Waiting for the browser callback on {pending.callback_url} …")
+        try:
+            code = pending.receiver.wait(timeout=300.0)
+        except PkceTimeout:
+            pending.close()
+            print("Error: timed out waiting for the callback.", file=sys.stderr)
+            return 1
+        except PkceStateMismatch as exc:
+            pending.close()
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        except PkceDenied as exc:
+            pending.close()
+            print(f"Authorization denied: {exc}", file=sys.stderr)
+            return 1
+        except PkceCancelled as exc:
+            pending.close()
+            print(f"Cancelled: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            if pending.receiver is not None:
+                pending.close()
+    else:
+        print("Approve in the browser, then paste the code shown on the consent screen.")
+        try:
+            code = input("Code: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.", file=sys.stderr)
+            return 1
+
+    try:
+        credential = orca.complete_connect(pending, code, store=store, endpoints=endpoints)
+    except PkceError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except orca.OrcaConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print()
+    print("Connected to OrcaRouter.")
+    print(f"  credential: {credential.masked}  (durable, reused until revoked)")
+    print(f"  account:    {credential.grant_id or 'unknown'}")
+    print(f"  granted scope: {credential.scope}")
+    if credential.scope != "api":
+        print(
+            "  note: the workspace granted a scope other than 'api'; wider "
+            "operations may be unavailable."
+        )
+    print(f"  stored in {store.path} (mode 0600, never logged)")
+    print()
+    print("Set llm.provider to \"orcarouter-oauth\" (or use --provider) and run: "
+          "researchclaw orcarouter models")
+    return 0
+
+
+def _open_browser(url: str) -> None:
+    import webbrowser
+
+    try:
+        if webbrowser.open(url):
+            return
+    except Exception:  # noqa: BLE001 - never block the login on a browser
+        pass
+    print("(Could not open a browser automatically — use the URL above.)")
+
+
+def _cmd_orcarouter_models(args: argparse.Namespace, *, store, endpoints) -> int:
+    from researchclaw.llm import orcarouter as orca
+    from researchclaw.llm import orcarouter_catalog as catalog
+
+    capability = getattr(args, "capability", "chat") or "chat"
+    modalities = tuple(getattr(args, "modality", []) or ())
+    try:
+        credential = orca.resolve_credential(store=store)
+    except orca.OrcaAuthRequired as exc:
+        print(f"Not connected to OrcaRouter: {exc}", file=sys.stderr)
+        print(
+            "  researchclaw orcarouter key --set      # paste an sk-orca-… key",
+            file=sys.stderr,
+        )
+        print(
+            "  researchclaw orcarouter login          # authorize an account",
+            file=sys.stderr,
+        )
+        return 1
+
+    result = catalog.discover_models(
+        endpoints.api_base,
+        credential.api_key,
+        capability=capability,
+        required_input_modalities=modalities,
+        use_cache=not getattr(args, "refresh", False),
+    )
+
+    if getattr(args, "json", False):
+        print(json.dumps(result.as_dict(), indent=2))
+        return 0
+
+    _orca_print_endpoints(endpoints)
+    print()
+    source = {
+        "live": f"live catalogue ({result.live_model_count} models returned)",
+        "cache": "last-known-good catalogue (live discovery failed)",
+        "seed": "verified cold-start seed (live discovery failed)",
+    }.get(result.source, result.source)
+    print(f"Capability: {capability}" + (f", input modalities: {list(modalities)}" if modalities else ""))
+    print(f"Source: {source}")
+    if result.degraded and result.error:
+        print(f"  degraded: {result.error}")
+        print("  these entries are the verified fallback and are marked as such")
+    print()
+    if not result.models:
+        print("No models match this capability for this account.")
+        return 0
+    for model in result.models:
+        bits = []
+        if model.context_length:
+            bits.append(f"ctx {model.context_length}")
+        if model.input_modalities:
+            bits.append("in=" + "/".join(model.input_modalities))
+        if model.reasoning_efforts:
+            bits.append("effort=" + "/".join(model.reasoning_efforts))
+        suffix = ("  [" + ", ".join(bits) + "]") if bits else ""
+        print(f"  {model.id}{suffix}")
+    print()
+    print(f"{len(result.models)} model(s). The dropdown for this capability is built "
+          "from exactly this list.")
+    return 0
 
 
 # ---- Wizard helpers (TTY prompts + autocomplete pick-lists) ---------------
