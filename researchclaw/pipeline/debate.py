@@ -1,4 +1,4 @@
-"""Multi-model debate engine (Stage 8 / 14 / 18).
+"""Multi-model debate engine used by Stage 8 hypothesis generation.
 
 Upgrades the project's shallow "multi-perspective one-shot" pattern into a real
 debate:
@@ -6,7 +6,7 @@ debate:
   1. multiple *models* each play a distinct role (round-robin over the panel),
   2. an optional rebuttal round where every role sees the others' prior turn and
      pushes back, and
-  3. an independent judge that scores and ranks the perspectives; the final text
+  3. a judge that scores and ranks the perspectives; the final text
      is then synthesized either by that judge (legacy) or, when a distinct
      ``synthesizer`` is given, by the stronger model anchored to the ranking.
 
@@ -14,6 +14,9 @@ Opt-in: callers only route here when ``build_panel_llms(config)`` returns a
 non-empty panel (i.e. ``llm.debate_enabled`` is set). When the panel has a single
 model this degrades to single-model multi-role, matching the legacy behaviour
 plus a judging step.
+
+Independence requires known configured model identities and a judge distinct
+from the author and every successful participant.
 
 The engine is provider-agnostic and offline-testable: it only calls
 ``client.chat(messages, *, system=...)`` on whatever clients it is handed.
@@ -96,15 +99,14 @@ def run_debate(
     Args:
         panel: list of LLM clients (each exposes ``.chat`` and ``.config``).
             Empty list is not allowed — callers must pass at least one client.
-        judge: independent judge client (scores/ranks the perspectives). Falls
-            back to ``panel[0]`` if None.
+        judge: client that scores/ranks the perspectives. Falls back to
+            ``panel[0]`` if None. Independence depends on model identities.
         synthesizer: client that writes the final synthesis. When None (or the
             same object as the judge) the judge does scoring AND synthesis in one
             call (legacy). When a distinct client is given, scoring and synthesis
-            are split: the independent ``judge`` scores/ranks (anti
-            self-preference) and the (stronger) ``synthesizer`` writes the final
-            text, anchored to that ranking — keeps the judge independent while
-            letting the strong model produce concrete, falsifiable output.
+            are split: the ``judge`` scores/ranks and the ``synthesizer`` writes
+            the final text anchored to that ranking. Splitting these calls does
+            not by itself establish judge independence.
         roles: ``{role_name: {"system": ..., "user": ...}}`` (domain bank).
         variables: template variables for ``_render``.
         rounds: number of rebuttal rounds after the opening statements.
@@ -112,7 +114,8 @@ def run_debate(
             ``"hypothesis_synthesize"``).
         out_dir: directory for per-role / per-round transcripts + record.
         prompts: PromptManager (for ``sub_prompt`` rendering).
-        author_model: generator model name, for provenance.
+        author_model: original generator model name, for provenance. An empty
+            or unknown name prevents the judge from being marked independent.
 
     Returns:
         ``(final_text, record_dict)``. ``final_text`` is the synthesis produced
@@ -201,6 +204,19 @@ def run_debate(
     # --- Judge + synthesize ---
     judge_client = judge or panel[0]
     judge_model = _model_name(judge_client)
+    generator_models = {_model_name(role_model[name]) for name in current}
+    independent_judge = (
+        all(
+            model.strip() not in ("", "unknown")
+            for model in (judge_model, author_model, *generator_models)
+        )
+        and judge_model != author_model
+        and judge_model not in generator_models
+    )
+    judge_preamble = (
+        "You are an INDEPENDENT judge, distinct from the debating models. "
+        if independent_judge else "You are a judge evaluating the debating models. "
+    )
     synth_client = synthesizer or judge_client
     synth_model = _model_name(synth_client)
     split = synth_client is not judge_client
@@ -212,8 +228,7 @@ def run_debate(
 
     if not split:
         # Legacy single call: the judge scores, ranks, and synthesizes at once.
-        judge_system = (
-            "You are an INDEPENDENT judge, distinct from the debating models. "
+        judge_system = judge_preamble + (
             "First score each perspective 1-10 for rigor and evidence, rank them, "
             "then synthesize — take the strongest elements and preserve genuine "
             "disagreements.\n\n"
@@ -229,10 +244,8 @@ def run_debate(
             logger.warning("Debate judge failed: %s — falling back to concatenation", exc)
             final_text = combined
     else:
-        # Split: independent judge scores/ranks (anti self-preference), then the
-        # stronger synthesizer writes the final text anchored to that ranking.
-        # The judge no longer synthesizes, so a weak judge can't flatten the
-        # output into vague consensus; the strong model owns concreteness.
+        # Split: the judge scores/ranks, then the synthesizer writes the final
+        # text anchored to that ranking. Independence is checked above.
         ranking = ""
         try:
             score_resp = judge_client.chat(
@@ -242,10 +255,7 @@ def run_debate(
                     "falsifiability, then rank them best-first with a one-line "
                     "reason each. Be concise."
                 )}],
-                system=(
-                    "You are an INDEPENDENT judge, distinct from the debating "
-                    "models. Evaluate only — do not rewrite or merge them."
-                ),
+                system=judge_preamble + "Evaluate only — do not rewrite or merge them.",
                 max_tokens=gen_max_tokens,
             )
             ranking = score_resp.content or ""
@@ -253,8 +263,11 @@ def run_debate(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Debate scoring failed: %s — synthesizing without ranking", exc)
 
+        assessment_heading = (
+            "Independent reviewer assessment" if independent_judge else "Reviewer assessment"
+        )
         synth_input = (
-            f"## Independent reviewer assessment (scores + ranking)\n{ranking}\n\n"
+            f"## {assessment_heading} (scores + ranking)\n{ranking}\n\n"
             f"---\n\n{combined}"
         ) if ranking.strip() else combined
         sp2 = prompts.sub_prompt(synth_prompt, perspectives=synth_input)
@@ -283,7 +296,7 @@ def run_debate(
         "judge_model": judge_model,
         "synthesizer_model": synth_model,
         "split_judge_synthesis": split,
-        "independent_judge": bool(judge_model and judge_model != author_model),
+        "independent_judge": independent_judge,
         "perspectives_succeeded": sorted(current.keys()),
     }
     (out_dir / "debate_record.json").write_text(

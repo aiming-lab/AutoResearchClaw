@@ -1,7 +1,7 @@
 # Debate Engine 逻辑详解
 
 > 对应实现:`researchclaw/pipeline/debate.py`(`run_debate`)
-> 适用阶段:Stage 8(hypothesis)、Stage 14(analysis)、Stage 18(peer review)
+> 当前接入阶段:Stage 8(hypothesis)。Stage 14/18 的接入见待合并的 PR #318。
 
 debate engine 把项目原来"单模型多视角一次合成"的浅做法,升级成**多模型、多轮、评分/合成分离**的真辩论。
 
@@ -9,11 +9,10 @@ debate engine 把项目原来"单模型多视角一次合成"的浅做法,升级
 
 ## 0. 定位与触发条件
 
-- **opt-in**:只有当 `build_panel_llms(config)` 返回非空 panel(即 `debate_enabled=true`)时,调用方才路由到这里。
+- **opt-in**:Stage 8 未进入 tournament 分支,且 `build_panel_llms(config)` 返回非空 panel 时,才路由到这里。构建面板需要 `debate_enabled=true`；ACP 或构建失败时返回空面板。
 - **接入点**:
   - Stage 8(hypothesis,`_synthesis.py`)— 传 `synthesizer=llm`
-  - Stage 14(analysis,`_analysis.py`)— 传 `synthesizer=llm`
-  - Stage 18(peer review,`_review_publish.py`)— **不传** `synthesizer`(见 §4)
+  - PR #318 提议接入 Stage 14(analysis)和 Stage 18(peer review)；当前版本尚未接入。
 - **provider 无关**:引擎只调 `client.chat(messages, *, system=..., max_tokens=...)`,因此可离线 mock 测试。
 
 入口签名:
@@ -38,6 +37,8 @@ run_debate(panel, judge, roles, variables, *,
    ```
 
    panel 顺序由 `build_panel_llms` 给出:`[primary, reviewer, fallback...]` 去重。
+   primary 和 fallback 使用主服务配置；模型名不同于 primary 的 reviewer 成员通过 reviewer 工厂构建,使用自己的 `reviewer_*` 服务地址、凭据和适配器。按模型名去重时保留最先出现的成员,因此 reviewer 与 primary 同名时保留 primary。
+   只有一个模型时也会进入引擎,所有角色共用该模型；至少两个不同模型是形成多模型辩论的条件,不是进入引擎的门槛。
    典型配置下:innovator → claude-sonnet-4.6、pragmatist → gpt-4o、contrarian → gemini-2.5-pro。
    角色名与倾向来自 active prompt bank(ML bank = innovator / pragmatist / contrarian)。
 
@@ -94,7 +95,7 @@ for name in role_names:
 先 `if not current: raise RuntimeError`(全员失败才报错)。确定三个客户端:
 
 ```python
-judge_client = judge or panel[0]            # 评委(独立 reviewer_model,如 gpt-4o)
+judge_client = judge or panel[0]            # 评委；是否独立取决于实际参与模型
 synth_client = synthesizer or judge_client  # 合成者
 split        = synth_client is not judge_client
 ```
@@ -105,7 +106,7 @@ split        = synth_client is not judge_client
 
 未传 `synthesizer`、或传的就是 judge 本身时:**一次调用**让 judge 同时打分 + 排名 + 合成。保留以兼容未升级的调用方和现有测试。
 
-### (B) 拆分(`split=True`,Stage 8/14 现在走这条)
+### (B) 拆分(`split=True`,Stage 8 构建了单独的 reviewer 客户端时走这条)
 
 传入与 judge 不同的 `synthesizer` 时,拆成**两步两调用**:
 
@@ -113,16 +114,16 @@ split        = synth_client is not judge_client
    - system 明确"**只评估,不要改写或合并**"。
    - 给每个视角按 rigor / evidence / falsifiability 打 1–10 + best-first 排名 + 每条一句理由。
    - 结果写 `debate_scores.md`。
-   - 保证**评判独立性**(评委 ≠ 作者,防自偏)。
+   - **独立性单独判断**:评委模型需要与 `author_model` 及所有成功提供视角的角色模型不同。评委、作者或参与模型的名称未知时,不能判为独立。评分和合成拆开本身不保证独立。
 
 2. **合成(synthesizer / claude)**:
-   - 把 judge 的排名作为「## Independent reviewer assessment」**前置**到 perspectives 前,再渲染一遍 synth_prompt。
+   - 把 judge 的排名**前置**到 perspectives 前,再渲染一遍 synth_prompt。只有独立性判断为真时,提示词和评审标题才称其为独立评委。
    - synth system 额外强调:取各方最强要素、**保留真实分歧**、每条主张要**具体可证伪、带可测量预测和明确阈值**。
    - 由**强模型**(primary / claude)产出终稿。
 
-**设计要点**:之前 judge(gpt-4o)既评又合,合成被压成空泛共识;拆分后 → gpt-4o 只做独立评判,claude 做具体合成并锚定在 judge 排名上。实测把 "will outperform in validity" 变成 "AUROC ≥ 0.65 / ≥ 20pp cliff / 门控执行流程"。
+**设计要点**:之前 judge(gpt-4o)既评又合,合成被压成空泛共识;拆分后 → gpt-4o 负责评判,claude 做具体合成并锚定在 judge 排名上。实测把 "will outperform in validity" 变成 "AUROC ≥ 0.65 / ≥ 20pp cliff / 门控执行流程"。如果 gpt-4o 同时生成了一个视角,它仍是在参与评判自己的内容,记录会标记为非独立。
 
-**为什么 Stage 18 peer review 不拆分**:那里评审独立性是要点,作者不能合成对自己论文的评审,所以 `_review_publish.py` 不传 `synthesizer`,保持 judge 兼合成。
+**PR #318 的 Stage 18 设计**:该提案不把作者模型用作评审报告的合成者,而是由 reviewer 完成评审文本。当前 Stage 18 使用 #316 的独立 reviewer 路径,尚未调用 debate 引擎。
 
 每步都有 `try/except` 兜底:评分失败 → 无排名直接合成;合成失败 → 回退到 `combined`(原始拼接),绝不抛错中断流水线。
 
@@ -135,8 +136,10 @@ split        = synth_client is not judge_client
 ```
 panel_models, roles(角色→模型映射), rounds, author_model,
 judge_model, synthesizer_model, split_judge_synthesis,
-independent_judge(judge_model != author_model), perspectives_succeeded
+independent_judge, perspectives_succeeded
 ```
+
+`independent_judge` 同时比较作者与成功提供内容的角色模型,不把失败/空输出角色或未使用的面板成员算作被评审内容的作者。它基于客户端配置中的模型名称,不解析供应商模型别名,也不代表评审质量或调用成功状态。tournament 对存活候选的生成模型采用同样判断。
 
 返回 `(final_text, record)`。
 
@@ -150,7 +153,7 @@ independent_judge(judge_model != author_model), perspectives_succeeded
 | 瞬时 | 一次 API 抖动 → 丢整个视角 | `_chat_with_retry` 一次重试 |
 | 空内容 | 空白混进 rebuttal / 合成 | `text.strip()` 护栏:开场丢弃 / rebuttal 保留上一轮 / 合成回退 concat |
 | 质量 | 弱合成器把终稿压成空泛 | 评分 / 合成分离,强模型合成 |
-| 独立性 | 评委 == 作者自偏 | judge 用独立 reviewer_model;Stage 18 不让作者合成 |
+| 独立性记录 | 评委参与生成却被标成独立 | 比较作者与所有成功参与模型,重合时标为非独立 |
 
 ---
 
@@ -170,16 +173,16 @@ independent_judge(judge_model != author_model), perspectives_succeeded
 
 ```yaml
 llm:
-  # --- panel 成员:debate 角色从这里取,去重后需 >= 2 个不同模型 ---
+  # --- panel 成员:至少 2 个不同模型才形成多模型辩论；单模型也可运行 ---
   primary_model: "anthropic/claude-sonnet-4.6"   # innovator + 最终 synthesizer
-  reviewer_model: "openai/gpt-4o"                # independent judge(打分排名)
+  reviewer_model: "openai/gpt-4o"                # 同时作为 panel 成员和评委
   fallback_models:
     - "google/gemini-2.5-pro"                    # 第三个视角(contrarian)
 
   # --- 开关 ---
   debate_enabled: true        # ★ 必须 true,否则 build_panel_llms 返回空 -> 退回单模型
   debate_rounds: 1            # rebuttal 轮数(0 = 只有开场,无反驳)
-  tournament_enabled: false   # ★ 必须 false:Stage 8 上 tournament 优先,两者都开会走 tournament
+  tournament_enabled: false   # 明确选择 debate；启用且 tournament_candidates >= 2 时 tournament 优先
 ```
 
 ### 机制要点(决定怎么填)
@@ -187,8 +190,8 @@ llm:
 1. **panel 怎么来**:`build_panel_llms` 取 `primary_model + reviewer_model + fallback_models`,**按名字去重**。要真·多模型辩论,去重后需 **>= 2 个不同模型**。
    - 上例去重后 = 3 个,round-robin 绑定:innovator→claude、pragmatist→gpt-4o、contrarian→gemini。
    - 若 `reviewer_model` 空且 `fallback_models` 空 → panel 只剩 1 个模型 → debate 退化成"单模型多角色 + 评分"。
-2. **tournament 必须关**:Stage 8 分支是 `if tournament_enabled: 走tournament else: 走debate`,所以 debate 需 `tournament_enabled: false`。
-3. **判分独立性**:`reviewer_model` 应与 `primary_model` **不同**(独立打分防自偏)。拆分路径下合成由 `primary_model` 自动担任(代码里 Stage 8/14 传 `synthesizer=llm`,**无需配置**)。
+2. **tournament 优先**:Stage 8 在 `tournament_enabled=true` 且配置的 `tournament_candidates >= 2` 时进入 tournament；需要明确使用 debate 时设置 `tournament_enabled: false`。
+3. **判分独立性**:上例 gpt-4o 既是 pragmatist 又是评委,因此 `independent_judge=false`。仅与 `primary_model` 不同并不足以独立；评委还需要不同于所有成功生成视角的模型。拆分路径下合成由 `primary_model` 自动担任(Stage 8 传 `synthesizer=llm`,**无需配置**)。
 4. **角色倾向**来自 active prompt bank(ML bank = innovator/pragmatist/contrarian;HEP bank = theorist/phenomenologist/experimentalist),不在配置里改。
 
 ### 可选项 / 环境变量
