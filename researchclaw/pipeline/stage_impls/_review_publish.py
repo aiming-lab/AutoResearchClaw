@@ -14,8 +14,10 @@ import yaml  # noqa: F401 — available for downstream use
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.llm import build_panel_llms
 from researchclaw.llm.client import LLMClient
 from researchclaw.pipeline._domain import _detect_domain  # noqa: F401
+from researchclaw.pipeline.debate import run_debate
 from researchclaw.pipeline._helpers import (
     StageResult,
     _build_context_preamble,
@@ -161,6 +163,47 @@ def _build_reviewer_or_generator(config, generator_llm):
 # Stage 18: Peer Review
 # ---------------------------------------------------------------------------
 
+# Reviewer roles for the multi-model peer-review debate. Each is bound to a
+# different panel model so the three reviews are not one model's opinion
+# restated three times.
+_REVIEW_DEBATE_ROLES: dict[str, dict[str, str]] = {
+    "methodology_reviewer": {
+        "system": (
+            "You are a peer reviewer focused on METHODOLOGY and experimental "
+            "design rigor."
+        ),
+        "user": (
+            "Review this paper draft for methodological soundness, baselines, "
+            "ablations, and validity threats.\n\nTopic: {topic}\n\n"
+            "Evidence:\n{experiment_evidence}\n\nDraft:\n{draft}"
+        ),
+    },
+    "domain_reviewer": {
+        "system": (
+            "You are a peer reviewer who is a DOMAIN EXPERT judging novelty "
+            "and significance."
+        ),
+        "user": (
+            "Review this paper draft for novelty, related-work positioning, "
+            "and contribution significance.\n\nTopic: {topic}\n\n"
+            "Draft:\n{draft}"
+        ),
+    },
+    "rigor_reviewer": {
+        "system": (
+            "You are a peer reviewer focused on STATISTICS, reproducibility, "
+            "and claim-evidence consistency."
+        ),
+        "user": (
+            "Review this paper draft for statistical rigor, reproducibility, "
+            "and whether every claim is supported by the evidence. Flag "
+            "unsupported numbers.\n\nEvidence:\n{experiment_evidence}\n\n"
+            "Draft:\n{draft}"
+        ),
+    },
+}
+
+
 def _execute_peer_review(
     stage_dir: Path,
     run_dir: Path,
@@ -196,7 +239,31 @@ def _execute_peer_review(
         except Exception:  # noqa: BLE001
             pass
 
-    if _review_llm is not None:
+    _panel = build_panel_llms(config)
+    if _panel and _review_llm is not None:
+        # --- Multi-model peer-review debate: distinct models each play an
+        # independent reviewer role (methodology / domain / rigor) and rebut
+        # each other, then the independent reviewer synthesizes the report.
+        # No `synthesizer` is passed here on purpose: handing the write-up back
+        # to the author model would defeat the point of the stage. ---
+        _pm = prompts or PromptManager()
+        _variables = {
+            "topic": config.research.topic,
+            "draft": draft + _quality_suffix,
+            "experiment_evidence": experiment_evidence,
+        }
+        reviews, _ = run_debate(
+            _panel,
+            _review_llm,
+            _REVIEW_DEBATE_ROLES,
+            _variables,
+            rounds=config.llm.debate_rounds,
+            synth_prompt="review_synthesize",
+            out_dir=stage_dir / "debate",
+            prompts=_pm,
+            author_model=_author_model,
+        )
+    elif _review_llm is not None:
         _pm = prompts or PromptManager()
         _overlay = _get_evolution_overlay(run_dir, "peer_review")
         sp = _pm.for_stage(

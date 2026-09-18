@@ -29,6 +29,18 @@ from researchclaw.prompts import PromptManager
 
 logger = logging.getLogger(__name__)
 
+# Stances for the Stage 9 tournament. Candidates are asked for genuinely
+# different plans rather than N samples of the same one, so the judge has
+# something to choose between.
+_DESIGN_ANGLES = (
+    "Be ambitious: prioritize high-ceiling, novel methods that could yield a "
+    "strong result, accepting higher risk.",
+    "Be robust: prioritize strong, well-known baselines and a clean, defensible "
+    "comparison over novelty.",
+    "Be compute-efficient: design the most decisive experiment that fits a tight "
+    "compute budget — minimal but conclusive.",
+)
+
 
 def _normalize_plan_field(value: Any) -> list:
     """Normalize a plan field (baselines, proposed_methods, ablations, datasets)
@@ -212,13 +224,50 @@ def _execute_experiment_design(
             per_condition_budget_sec=_per_condition_sec,
             available_tier1_datasets=_tier1,
         )
-        resp = _chat_with_prompt(
-            llm,
-            sp.system,
-            sp.user,
-            json_mode=sp.json_mode,
-            max_tokens=sp.max_tokens,
-        )
+        if config.llm.tournament_enabled and config.llm.tournament_candidates >= 2:
+            # --- Best-of-N tournament: generate N candidate plans from diverse
+            # stances, then an independent judge picks the winner. Everything
+            # downstream (YAML parsing, normalization, caps) runs on the winner
+            # alone, so the stage still produces one canonical plan. ---
+            from types import SimpleNamespace
+
+            from researchclaw.llm import build_panel_llms, build_reviewer_llm
+            from researchclaw.pipeline.tournament import (
+                effective_candidates,
+                run_tournament,
+            )
+
+            _gens = build_panel_llms(config) or [llm]
+            _judge = build_reviewer_llm(config) or llm
+            _n = effective_candidates(config.llm.tournament_candidates)
+            _cps = [
+                (
+                    sp.system,
+                    sp.user
+                    + "\n\n## Exploration stance\n"
+                    + _DESIGN_ANGLES[i % len(_DESIGN_ANGLES)],
+                )
+                for i in range(_n)
+            ]
+            _winner, _ = run_tournament(
+                _gens,
+                _judge,
+                _cps,
+                rank_prompt="tournament_rank",
+                out_dir=stage_dir / "tournament",
+                prompts=_pm,
+                author_model=getattr(llm.config, "primary_model", ""),
+                label="plan",
+            )
+            resp = SimpleNamespace(content=_winner)
+        else:
+            resp = _chat_with_prompt(
+                llm,
+                sp.system,
+                sp.user,
+                json_mode=sp.json_mode,
+                max_tokens=sp.max_tokens,
+            )
         raw_yaml = _extract_yaml_block(resp.content)
         try:
             parsed = yaml.safe_load(raw_yaml)

@@ -10,8 +10,10 @@ from typing import Any
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.llm import build_panel_llms, build_reviewer_llm
 from researchclaw.llm.client import LLMClient
 from researchclaw.pipeline._domain import _detect_domain, _is_ml_domain
+from researchclaw.pipeline.debate import run_debate
 from researchclaw.pipeline._helpers import (
     StageResult,
     _build_context_preamble,
@@ -601,20 +603,39 @@ def _execute_result_analysis(
         # stays in the same vocabulary as the rest of the pipeline.
         _analysis_roles = _pm.debate_roles_analysis()
 
-        # --- Multi-perspective debate ---
         perspectives_dir = stage_dir / "perspectives"
         variables = {
             "preamble": preamble,
             "data_context": data_context,
             "context": context,
         }
-        perspectives = _multi_perspective_generate(
-            llm, _analysis_roles, variables, perspectives_dir
-        )
-        # --- Synthesize into unified analysis ---
-        analysis = _synthesize_perspectives(
-            llm, perspectives, "analysis_synthesize", _pm
-        )
+        _panel = build_panel_llms(config)
+        if _panel:
+            # --- Multi-model debate: distinct models argue per role, rebuttal
+            # round(s), then an independent judge ranks and the author model
+            # synthesizes the final analysis from that ranking. ---
+            _judge = build_reviewer_llm(config) or llm
+            analysis, _ = run_debate(
+                _panel,
+                _judge,
+                _analysis_roles,
+                variables,
+                rounds=config.llm.debate_rounds,
+                synth_prompt="analysis_synthesize",
+                out_dir=perspectives_dir,
+                prompts=_pm,
+                author_model=getattr(llm.config, "primary_model", ""),
+                synthesizer=llm,
+            )
+        else:
+            # --- Legacy multi-perspective (single model, no judge) ---
+            perspectives = _multi_perspective_generate(
+                llm, _analysis_roles, variables, perspectives_dir
+            )
+            # --- Synthesize into unified analysis ---
+            analysis = _synthesize_perspectives(
+                llm, perspectives, "analysis_synthesize", _pm
+            )
     else:
         # Template with real data if available
         ms = exp_data["metrics_summary"]

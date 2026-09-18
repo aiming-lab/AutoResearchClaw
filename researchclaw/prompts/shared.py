@@ -790,6 +790,25 @@ _DEFAULT_SUB_PROMPTS: dict[str, dict[str, Any]] = {
         ),
         "max_tokens": 8192,
     },
+    "review_synthesize": {
+        "system": (
+            "You are the area chair synthesizing several independent peer "
+            "reviews into one decision-oriented review report. Do not flatten "
+            "disagreement — surface the most serious concerns prominently and "
+            "do not soften them."
+        ),
+        "user": (
+            "Below are independent reviews of the paper from different "
+            "reviewers.\n"
+            "Synthesize them into a final review report with these sections:\n"
+            "## Summary\n## Strengths\n## Weaknesses (most serious first)\n"
+            "## Actionable Revisions (numbered, specific)\n"
+            "## Recommendation (ACCEPT / MINOR REVISION / MAJOR REVISION / "
+            "REJECT)\n\n"
+            "{perspectives}"
+        ),
+        "max_tokens": 6144,
+    },
     "tournament_rank": {
         "system": (
             "You score and rank competing research artifacts, distinct from the "
