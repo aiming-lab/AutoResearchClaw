@@ -88,19 +88,21 @@ llm:
 
   # --- Multi-model debate for Stage 8 hypothesis generation (opt-in) ---
   # Builds a panel from primary_model + reviewer_model + fallback_models
-  # (deduplicated) and binds each debate role to a different model, so the
-  # perspectives genuinely disagree instead of one model arguing with itself.
+  # (deduplicated by model name) and assigns roles round-robin. When there are
+  # fewer models than roles, multiple roles use the same model.
   # After `debate_rounds` rebuttal round(s), reviewer_model RANKS the positions
   # and primary_model writes the final text from that ranking — ranking and
   # writing are split so the disagreements are not averaged into consensus.
   # Records debate_record.json. Multiplies LLM calls.
   #
-  # To enable it you need BOTH of the following, plus a real panel:
+  # To select this path, enable debate and disable the competing tournament:
   #   debate_enabled: true       # otherwise Stage 8 uses the single-model path
   #   tournament_enabled: false  # the tournament takes priority on Stage 8
-  # and primary_model + reviewer_model + fallback_models must dedupe to >= 2
-  # distinct models. A reviewer_model different from primary_model keeps the
-  # ranking independent.
+  # At least two distinct models are needed for a multi-model debate. With only
+  # one model, the same engine still runs and every role uses that model.
+  # A different reviewer_model alone does not make the panel judge independent:
+  # reviewer_model is also a panel member and may author a judged perspective.
+  # Inspect the role assignments in debate_record.json when evaluating overlap.
   # Env overrides: ARC_DEBATE_ROUNDS=<n>, ARC_ABL_DISABLE_DEBATE=1 (ablation:
   # collapse the panel to a single role).
   # debate_enabled: false
@@ -113,7 +115,7 @@ llm:
   # canonical artifact per stage. Blank generations are dropped before judging,
   # so an empty candidate cannot be handed a fabricated score. Records
   # tournament_record.json. Multiplies LLM calls (~N generations + 1 judge).
-  # Takes priority over debate when both are enabled.
+  # Takes priority over debate when enabled with tournament_candidates >= 2.
   # Env overrides: ARC_TOURNAMENT_CANDIDATES=<n>, ARC_ABL_DISABLE_TOURNAMENT=1
   # (ablation: collapse to a single candidate).
   # tournament_enabled: false
