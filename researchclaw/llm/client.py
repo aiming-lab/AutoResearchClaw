@@ -228,7 +228,7 @@ class LLMClient:
         )
         client = cls(config)
 
-        if provider in ("anthropic", "kimi-anthropic"):
+        if preset.get("adapter") == "anthropic":
             from .anthropic_adapter import AnthropicAdapter
 
             client._anthropic = AnthropicAdapter(

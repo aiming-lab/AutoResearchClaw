@@ -86,7 +86,7 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
 
 
 def build_reviewer_llm(config: RCConfig):
-    """Build an independent reviewer/judge LLM client (P0-3) or None.
+    """Build a configured reviewer/judge LLM client (P0-3) or None.
 
     Returns None when ``llm.reviewer_model`` is empty so callers fall back to
     the generator client (backward-compatible). ACP-provider runs do not get a
@@ -103,12 +103,14 @@ def build_reviewer_llm(config: RCConfig):
 
 
 def build_panel_llms(config: RCConfig) -> list:
-    """Build the multi-model debate panel (Stage 8/14/18) or [] when disabled.
+    """Build the model panel used by Stage 8, or [] when disabled.
 
     Opt-in via ``llm.debate_enabled``. The panel reuses existing models —
     ``primary_model`` + ``reviewer_model`` (if set) + ``fallback_models`` —
-    deduplicated by model name, each cloned into its own single-model client
+    deduplicated by model name, each built as its own single-model client
     (no fallback chain) so each debate role can be bound to a distinct model.
+    The reviewer slot preserves its configured provider, endpoint, and key;
+    primary and fallback slots use the main provider.
     Returns [] for ACP runs, when debate is disabled, or on any error.
     """
     import dataclasses
@@ -121,11 +123,13 @@ def build_panel_llms(config: RCConfig) -> list:
 
     try:
         base = _LLM.from_rc_config(config)
+        primary_model = (config.llm.primary_model or "").strip()
+        reviewer_model = (getattr(config.llm, "reviewer_model", "") or "").strip()
         names: list[str] = []
         seen: set[str] = set()
         for m in (
-            config.llm.primary_model,
-            getattr(config.llm, "reviewer_model", "") or "",
+            primary_model,
+            reviewer_model,
             *(config.llm.fallback_models or ()),
         ):
             m = (m or "").strip()
@@ -134,13 +138,17 @@ def build_panel_llms(config: RCConfig) -> list:
                 names.append(m)
         clients = []
         for name in names:
-            cfg = dataclasses.replace(
-                base.config, primary_model=name, fallback_models=[]
-            )
-            client = _LLM(cfg)
-            # Preserve the Anthropic/Kimi adapter from the base client (panel
-            # members share the base endpoint).
-            client._anthropic = base._anthropic
+            if name == reviewer_model and name != primary_model:
+                client = _LLM.reviewer_from_rc_config(config)
+                if client is None:
+                    return []
+            else:
+                cfg = dataclasses.replace(
+                    base.config, primary_model=name, fallback_models=[]
+                )
+                client = _LLM(cfg)
+                # Primary and fallback slots share the main provider adapter.
+                client._anthropic = base._anthropic
             clients.append(client)
         return clients
     except Exception:  # noqa: BLE001 - never block the pipeline on panel setup

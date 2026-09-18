@@ -792,8 +792,8 @@ _DEFAULT_SUB_PROMPTS: dict[str, dict[str, Any]] = {
     },
     "tournament_rank": {
         "system": (
-            "You score and rank competing research artifacts, distinct from the "
-            "authors. Score each candidate 1-10 on novelty, feasibility, and "
+            "You score and rank competing research artifacts. "
+            "Score each candidate 1-10 on novelty, feasibility, and "
             "rigor, then pick the SINGLE best. Be decisive and critical — do not "
             "average or hedge."
         ),

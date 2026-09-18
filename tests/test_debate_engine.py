@@ -1,4 +1,4 @@
-"""Tests for the multi-model debate engine (Stage 8/14/18).
+"""Tests for the multi-model debate engine used by Stage 8.
 
 Covers panel construction (reuse of existing models) and the run_debate engine:
 role-to-model binding, rebuttal visibility, judge synthesis, provenance record,
@@ -7,6 +7,7 @@ and the rounds=0 / single-model degradation paths. All offline.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,13 +80,112 @@ def test_panel_empty_when_disabled():
 
 
 def test_panel_reuses_and_dedupes_models():
-    cfg = _cfg(reviewer_model="m-judge", fallback=("m-fb", "m-primary"))
+    cfg = _cfg(reviewer_model=" m-judge ", fallback=("m-fb", "m-primary", "m-judge"))
     panel = build_panel_llms(cfg)
     names = [c.config.primary_model for c in panel]
     # primary + reviewer + fallback, deduped (m-primary appears once)
     assert names == ["m-primary", "m-judge", "m-fb"]
     # each member is single-model (no fallback chain)
     assert all(list(c.config.fallback_models) == [] for c in panel)
+
+
+def test_panel_preserves_reviewer_endpoint_and_key():
+    cfg = _cfg(reviewer_model="m-judge", fallback=("m-fb",))
+    cfg.llm = replace(
+        cfg.llm, reviewer_provider="openai-compatible",
+        reviewer_base_url="https://reviewer/v1", reviewer_api_key="reviewer-key",
+    )
+
+    panel = build_panel_llms(cfg)
+
+    assert [
+        (c.config.primary_model, c.config.base_url, c.config.api_key) for c in panel
+    ] == [
+        ("m-primary", "https://x/v1", "k"),
+        ("m-judge", "https://reviewer/v1", "reviewer-key"),
+        ("m-fb", "https://x/v1", "k"),
+    ]
+    assert all(c.config.fallback_models == [] for c in panel)
+
+
+@pytest.mark.parametrize(
+    "main_provider,reviewer_provider",
+    [
+        pair
+        for provider in (
+            "anthropic", "kimi-anthropic", "minimax-anthropic", "minimax-anthropic-cn",
+        )
+        for pair in (
+            ("openai-compatible", provider),
+            (provider, "openai-compatible"),
+            (provider, provider),
+            (provider, ""),
+        )
+    ],
+)
+def test_panel_preserves_provider_adapters(monkeypatch, main_provider, reviewer_provider):
+    def adapter_stub(base_url, api_key, timeout_sec):
+        return SimpleNamespace(base_url=base_url, api_key=api_key, timeout_sec=timeout_sec)
+
+    monkeypatch.setattr(
+        "researchclaw.llm.anthropic_adapter.AnthropicAdapter", adapter_stub,
+    )
+    cfg = _cfg(reviewer_model="m-judge", fallback=("m-fb",))
+    cfg.llm = replace(
+        cfg.llm, provider=main_provider, reviewer_provider=reviewer_provider,
+        reviewer_base_url="https://reviewer/v1", reviewer_api_key="reviewer-key",
+    )
+
+    primary, reviewer, fallback = build_panel_llms(cfg)
+
+    if main_provider != "openai-compatible":
+        assert primary._anthropic.base_url == "https://x/v1"
+        assert primary._anthropic.api_key == "k"
+    else:
+        assert primary._anthropic is None
+    assert fallback._anthropic is primary._anthropic
+    if (reviewer_provider or main_provider) != "openai-compatible":
+        assert reviewer._anthropic is not None
+        assert reviewer._anthropic is not primary._anthropic
+        assert reviewer._anthropic.base_url == "https://reviewer/v1"
+        assert reviewer._anthropic.api_key == "reviewer-key"
+        assert reviewer._anthropic.timeout_sec == cfg.llm.timeout_sec
+    else:
+        assert reviewer._anthropic is None
+
+
+def test_panel_preserves_primary_when_reviewer_model_matches(monkeypatch):
+    def unexpected_reviewer(config):
+        raise AssertionError("duplicate reviewer slot should not be constructed")
+
+    monkeypatch.setattr(
+        "researchclaw.llm.client.LLMClient.reviewer_from_rc_config", unexpected_reviewer,
+    )
+    cfg = _cfg(reviewer_model=" m-primary ", fallback=("m-fb",))
+    cfg.llm = replace(
+        cfg.llm, reviewer_base_url="https://reviewer/v1", reviewer_api_key="reviewer-key",
+    )
+
+    panel = build_panel_llms(cfg)
+
+    assert [c.config.primary_model for c in panel] == ["m-primary", "m-fb"]
+    assert panel[0].config.base_url == "https://x/v1"
+    assert panel[0].config.api_key == "k"
+
+
+@pytest.mark.parametrize("raises", [True, False])
+def test_panel_does_not_route_failed_reviewer_to_main(monkeypatch, raises):
+    def failed_reviewer(config):
+        if raises:
+            raise RuntimeError("reviewer setup failed")
+        return None
+
+    monkeypatch.setattr(
+        "researchclaw.llm.client.LLMClient.reviewer_from_rc_config", failed_reviewer,
+    )
+    cfg = _cfg(reviewer_model="m-judge")
+
+    assert build_panel_llms(cfg) == []
 
 
 def test_panel_empty_for_acp():
@@ -113,6 +213,106 @@ def test_roles_bound_to_distinct_models(tmp_path: Path):
     assert rec["independent_judge"] is True
     assert (tmp_path / "debate_record.json").exists()
     assert (tmp_path / "innovator.r0.md").exists()
+
+
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize(
+    "judge_model,generator_models,author_model,independent",
+    [
+        ("B", ("A", "B", "C"), "A", False),
+        ("J", ("A", "B", "C"), "A", True),
+        ("AUTHOR", ("A", "B", "C"), "AUTHOR", False),
+        ("", ("A", "B", "C"), "A", False),
+        ("unknown", ("A", "B", "C"), "A", False),
+        (" \t ", ("A", "B", "C"), "A", False),
+        ("J", ("A", "", "C"), "A", False),
+        ("J", ("A", "unknown", "C"), "A", False),
+        ("J", ("A", " \t ", "C"), "A", False),
+    ],
+)
+def test_judge_independence_tracks_successful_authors(
+    tmp_path, split, judge_model, generator_models, author_model, independent,
+):
+    panel = [_RecLLM(model) for model in generator_models]
+    judge = _RecLLM(judge_model)
+    synth = _RecLLM("SYNTH") if split else None
+
+    _, rec = run_debate(
+        panel, judge, _ROLES, {"topic": "T"},
+        rounds=0, synth_prompt="hypothesis_synthesize",
+        out_dir=tmp_path, prompts=_PromptsStub(), author_model=author_model,
+        synthesizer=synth,
+    )
+
+    assert rec["independent_judge"] is independent
+    assert ("INDEPENDENT" in judge.calls[0]["system"]) is independent
+    assert ("distinct from" in judge.calls[0]["system"]) is independent
+    if split:
+        assessment = synth.calls[0]["user"]
+        heading = "Independent reviewer assessment" if independent else "Reviewer assessment"
+        assert f"## {heading} (scores + ranking)" in assessment
+        assert ("Independent reviewer assessment" in assessment) is independent
+
+
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize(
+    "author_kwargs",
+    [{}, {"author_model": ""}, {"author_model": "unknown"}, {"author_model": " \t "}],
+    ids=["default", "empty", "unknown", "blank"],
+)
+def test_unknown_author_prevents_judge_independence(tmp_path, split, author_kwargs):
+    from researchclaw.prompts import PromptManager
+
+    panel = [_RecLLM("A"), _RecLLM("B")]
+    judge = _RecLLM("J")
+    synth = _RecLLM("SYNTH") if split else None
+    _, rec = run_debate(
+        panel, judge, _ROLES, {"topic": "T"},
+        rounds=0, synth_prompt="hypothesis_synthesize",
+        out_dir=tmp_path, prompts=PromptManager(), synthesizer=synth,
+        **author_kwargs,
+    )
+
+    assert rec["independent_judge"] is False
+    assert rec["author_model"] == author_kwargs.get("author_model", "")
+    assert "independent" not in judge.calls[0]["system"].lower()
+    assert "distinct from" not in judge.calls[0]["system"]
+    if split:
+        assert "## Reviewer assessment (scores + ranking)" in synth.calls[0]["user"]
+        assert "Independent reviewer assessment" not in synth.calls[0]["user"]
+
+
+@pytest.mark.parametrize("failed_model", ["B", ""])
+@pytest.mark.parametrize("raises", [True, False])
+def test_judge_independence_excludes_dropped_roles(tmp_path, failed_model, raises):
+    class _FailedLLM(_RecLLM):
+        def chat(self, *args, **kwargs):
+            if raises:
+                raise RuntimeError("generation failed")
+            return SimpleNamespace(content=" \n ")
+
+    panel = [_RecLLM("A"), _FailedLLM(failed_model), _RecLLM("C")]
+    _, rec = run_debate(
+        panel, _RecLLM("B"), _ROLES, {"topic": "T"},
+        rounds=0, synth_prompt="hypothesis_synthesize",
+        out_dir=tmp_path, prompts=_PromptsStub(), author_model="A",
+    )
+
+    assert rec["perspectives_succeeded"] == ["contrarian", "innovator"]
+    assert rec["independent_judge"] is True
+
+
+def test_judge_independence_excludes_unused_panel_models(tmp_path):
+    panel = [_RecLLM("A"), _RecLLM("C"), _RecLLM("B")]
+    roles = {name: _ROLES[name] for name in ("innovator", "pragmatist")}
+    _, rec = run_debate(
+        panel, _RecLLM("B"), roles, {"topic": "T"},
+        rounds=0, synth_prompt="hypothesis_synthesize",
+        out_dir=tmp_path, prompts=_PromptsStub(), author_model="A",
+    )
+
+    assert panel[2].calls == []
+    assert rec["independent_judge"] is True
 
 
 def test_rebuttal_round_sees_others(tmp_path: Path):
@@ -150,6 +350,8 @@ def test_single_model_panel_degrades(tmp_path: Path):
     assert set(rec["roles"].values()) == {"SOLO"}
     assert rec["judge_model"] == "SOLO"
     assert rec["independent_judge"] is False
+    assert "INDEPENDENT" not in solo.calls[-1]["system"]
+    assert "distinct from" not in solo.calls[-1]["system"]
 
 
 def test_split_judge_and_synthesizer(tmp_path: Path):
