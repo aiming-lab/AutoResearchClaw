@@ -62,6 +62,15 @@ llm:
   # primary_model: "deepseek-ai/deepseek-v4-pro"
   # fallback_models:
   #   - "deepseek-ai/deepseek-v4-flash"
+  # --- Cheaper Inference provider example ---
+  # OpenAI-compatible gateway with models from several labs.
+  # Each model costs 15–60% less than the list price of its lab.
+  # provider: "cheaperinference"
+  # api_key_env: "CHEAPER_INFERENCE_API_KEY"
+  # primary_model: "gpt-5.4-mini"
+  # fallback_models:
+  #   - "gpt-5.4"
+  #   - "claude-sonnet-5"
   # --- Ollama (local) example ---
   # provider: "ollama"
   # base_url: "http://localhost:11434/v1"

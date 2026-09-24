@@ -23,6 +23,9 @@ PROVIDER_PRESETS = {
     "atlascloud": {
         "base_url": "https://api.atlascloud.ai/v1",
     },
+    "cheaperinference": {
+        "base_url": "https://api.cheaperinference.com/v1",
+    },
     "anthropic": {
         "base_url": "https://api.anthropic.com",
         "adapter": "anthropic",
@@ -67,6 +70,7 @@ def create_llm_client(config: RCConfig) -> LLMClient | ACPClient:
     - ``"openai"`` → :class:`LLMClient` with OpenAI base URL
     - ``"deepseek"`` → :class:`LLMClient` with DeepSeek base URL
     - ``"atlascloud"`` → :class:`LLMClient` with Atlas Cloud base URL
+    - ``"cheaperinference"`` → :class:`LLMClient` with Cheaper Inference base URL
     - ``"novita"`` → :class:`LLMClient` with Novita AI base URL
     - ``"minimax"`` → :class:`LLMClient` with MiniMax base URL
     - ``"openai-compatible"`` (default) → :class:`LLMClient` with custom base_url
