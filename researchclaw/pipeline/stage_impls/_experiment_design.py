@@ -12,6 +12,7 @@ import yaml
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.hardware import format_hardware_prompt
 from researchclaw.llm.client import LLMClient
 from researchclaw.pipeline._helpers import (
     StageResult,
@@ -149,10 +150,20 @@ def _execute_experiment_design(
     if llm is not None:
         _pm = prompts or PromptManager()
         # Pass dataset_guidance block for experiment design
-        try:
-            _dg_block = _pm.block("dataset_guidance")
-        except (KeyError, Exception):  # noqa: BLE001
-            _dg_block = ""
+        if config.experiment.mode == "ssh_remote":
+            _dg_block = (
+                "\n## Remote Dataset Availability\n"
+                "Use real benchmarks appropriate to the research question. "
+                "No datasets or pretrained models are known to be cached on the SSH host. "
+                "Do not assume Docker paths such as /opt/datasets or /workspace/data. "
+                "Plan explicit data preparation within the configured budget and network policy; "
+                "if data is unavailable, report the missing prerequisite instead of simulating results.\n"
+            )
+        else:
+            try:
+                _dg_block = _pm.block("dataset_guidance")
+            except (KeyError, Exception):  # noqa: BLE001
+                _dg_block = ""
         # I-08: Inject RL step guidance for RL topics
         _rl_kws = ("reinforcement learning", "ppo", "sac", "td3", "ddpg",
                     "dqn", "mujoco", "continuous control", "actor-critic",
@@ -189,13 +200,14 @@ def _execute_experiment_design(
         except Exception:  # noqa: BLE001
             pass
         # Improvement A: Compute hardware profile + per-condition budget
-        _hw_profile_str = (
-            "- GPU: NVIDIA RTX 6000 Ada (49140 MB VRAM)\n"
-            "- GPU count: 1\n"
-            "- CPU: shared server"
+        _hw_profile_str = format_hardware_prompt(
+            _load_hardware_profile(run_dir),
+            remote=config.experiment.mode == "ssh_remote",
         )
         _per_condition_sec = int(config.experiment.time_budget_sec * 0.7 / 6)
         _tier1 = "CIFAR-10, CIFAR-100, MNIST, FashionMNIST, STL-10, SVHN"
+        if config.experiment.mode == "ssh_remote":
+            _tier1 = "unknown on the SSH host; verify availability before selecting datasets"
 
         _overlay = _get_evolution_overlay(run_dir, "experiment_design")
         sp = _pm.for_stage(
@@ -275,7 +287,9 @@ def _execute_experiment_design(
                     f"Topic: {config.research.topic}\n"
                     "Required keys: baselines, proposed_methods, ablations, "
                     "datasets, metrics, objectives, risks, compute_budget.\n"
-                    "Each key maps to a list of strings."
+                    "Each key maps to a list of strings.\n"
+                    f"Execution hardware:\n{_hw_profile_str}\n"
+                    f"Total time budget: {config.experiment.time_budget_sec} seconds.\n"
                 )
                 _retry_resp = _chat_with_prompt(
                     llm,
@@ -438,7 +452,7 @@ def _execute_experiment_design(
                 llm,
                 config=_ba_cfg,
                 gpu_memory_mb=(
-                    _hw.get("gpu_memory_mb", 49000) if _hw else 49000
+                    int(_hw.get("vram_mb") or 0) if _hw else 0
                 ),
                 time_budget_sec=config.experiment.time_budget_sec,
                 network_policy=(

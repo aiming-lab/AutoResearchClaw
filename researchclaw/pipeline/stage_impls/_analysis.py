@@ -45,11 +45,16 @@ def _execute_result_analysis(
         run_dir,
         metric_key=config.experiment.metric_key,
         metric_direction=config.experiment.metric_direction,
+        require_completed=config.experiment.mode == "ssh_remote",
     )
     runs_dir = _read_prior_artifact(run_dir, "runs/") or ""
     context = ""
     if runs_dir:
-        context = _collect_json_context(Path(runs_dir), max_files=30)
+        context = (
+            json.dumps(exp_data["runs"], indent=2)
+            if config.experiment.mode == "ssh_remote"
+            else _collect_json_context(Path(runs_dir), max_files=30)
+        )
 
     # --- R13-1: Merge Stage 13 (ITERATIVE_REFINE) results if available ---
     # Stage 13 stores richer per-condition metrics in refinement_log.json
@@ -63,6 +68,14 @@ def _execute_result_analysis(
 
             def _get_best_sandbox(it: dict) -> dict:
                 """BUG-181: Metrics may be in sandbox or sandbox_after_fix."""
+                if config.experiment.mode == "ssh_remote" or _refine_data.get("mode") == "ssh_remote":
+                    # The repaired version supersedes the pre-repair attempt.
+                    # Keep failed metrics in the log, not in the analysis.
+                    sbx = it.get("sandbox_after_fix", it.get("sandbox", {}))
+                    if (it.get("remote_run_incomplete") or not isinstance(sbx, dict)
+                            or sbx.get("returncode") != 0 or sbx.get("timed_out")):
+                        return {}
+                    return sbx
                 sbx = it.get("sandbox", {})
                 if sbx.get("metrics"):
                     return sbx
@@ -222,6 +235,11 @@ def _execute_result_analysis(
         try:
             _rl = json.loads(_refine_log_text)
             for _it in _rl.get("iterations", []):
+                if config.experiment.mode == "ssh_remote" or _rl.get("mode") == "ssh_remote":
+                    _sbx_stdout = _get_best_sandbox(_it).get("stdout", "")
+                    if _sbx_stdout:
+                        _all_paired.extend(_extract_paired(_sbx_stdout))
+                    continue
                 for _sbx_key in ("sandbox", "sandbox_after_fix"):
                     _sbx_stdout = (_it.get(_sbx_key) or {}).get("stdout", "")
                     if _sbx_stdout:

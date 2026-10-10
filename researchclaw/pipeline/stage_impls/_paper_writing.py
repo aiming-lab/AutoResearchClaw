@@ -147,7 +147,9 @@ def _execute_paper_outline(
     )
 
 
-def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
+def _collect_raw_experiment_metrics(
+    run_dir: Path, *, execution_mode: str = "",
+) -> tuple[str, bool]:
     """Collect raw experiment metric lines from stdout for paper writing.
 
     Returns a tuple of (formatted block, has_parsed_metrics).
@@ -158,7 +160,19 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
     run_count = 0
     has_parsed_metrics = False
 
+    # Revision/review callers do not always have config. Written execution
+    # modes identify remote evidence even when the compute host has no GPU.
+    refinement_logs: list[dict[str, Any]] = []
+    for refine_path in sorted(run_dir.glob("stage-13*/refinement_log.json")):
+        try:
+            refine_log = json.loads(refine_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(refine_log, dict):
+            refinement_logs.append(refine_log)
+    run_groups: list[list[dict[str, Any]]] = []
     for stage_subdir in sorted(run_dir.glob("stage-*/runs")):
+        stage_runs: list[dict[str, Any]] = []
         for run_file in sorted(stage_subdir.glob("*.json")):
             if run_file.name == "results.json":
                 continue
@@ -167,6 +181,26 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
             except (json.JSONDecodeError, OSError):
                 continue
             if not isinstance(payload, dict):
+                continue
+
+            stage_runs.append(payload)
+        run_groups.append(stage_runs)
+    remote_mode = (
+        execution_mode == "ssh_remote"
+        or any(log.get("mode") == "ssh_remote" for log in refinement_logs)
+        or any(payload.get("execution_mode") == "ssh_remote"
+               for stage_runs in run_groups for payload in stage_runs)
+    )
+    for stage_runs in run_groups:
+        for payload in stage_runs:
+            source_mode = payload.get("execution_mode") or (
+                "ssh_remote" if remote_mode else execution_mode
+            )
+            if source_mode == "ssh_remote" and (
+                payload.get("status") != "completed"
+                or payload.get("returncode") != 0
+                or payload.get("timed_out")
+            ):
                 continue
 
             # R10: Skip simulated data — only collect real experiment results
@@ -218,13 +252,31 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
     _best_refine_metrics: dict[str, Any] = {}
     _best_refine_stdout = ""
     _best_refine_primary: float | None = None
-    for _rl_path in sorted(run_dir.glob("stage-13*/refinement_log.json")):
+    _best_refine_is_remote = False
+    for _rlog in refinement_logs:
         try:
-            _rlog = json.loads(_rl_path.read_text(encoding="utf-8"))
             for _it in _rlog.get("iterations", []):
-                for _sbx_key in ("sandbox", "sandbox_after_fix"):
+                if not isinstance(_it, dict):
+                    continue
+                _refine_mode = _rlog.get("mode") or (
+                    "ssh_remote" if remote_mode else execution_mode
+                )
+                _strict_refine = _refine_mode == "ssh_remote"
+                if _strict_refine:
+                    # A repaired attempt supersedes the pre-repair metrics. A
+                    # failed repair cannot revive an earlier successful result.
+                    _sbx_keys = ("sandbox_after_fix",) if "sandbox_after_fix" in _it else ("sandbox",)
+                else:
+                    _sbx_keys = ("sandbox", "sandbox_after_fix")
+                for _sbx_key in _sbx_keys:
                     _sbx = _it.get(_sbx_key, {})
                     if not isinstance(_sbx, dict):
+                        continue
+                    if _strict_refine and (
+                        _it.get("remote_run_incomplete")
+                        or _sbx.get("returncode") != 0
+                        or _sbx.get("timed_out")
+                    ):
                         continue
                     _sbx_metrics = _sbx.get("metrics", {})
                     if not isinstance(_sbx_metrics, dict) or not _sbx_metrics:
@@ -250,9 +302,12 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
                         _best_refine_metrics = _sbx_metrics
                         _best_refine_stdout = _sbx.get("stdout", "")
                         _best_refine_primary = _sbx_primary
+                        _best_refine_is_remote = _strict_refine
         except (json.JSONDecodeError, OSError):
             pass
 
+    if _best_refine_is_remote and _best_refine_metrics:
+        has_parsed_metrics = True
     if _best_refine_metrics and len(_best_refine_metrics) > len(metric_lines) // 2:
         # Refinement has richer data — REPLACE Stage 12 data to avoid conflicts
         metric_lines = []
@@ -1432,7 +1487,9 @@ def _execute_paper_draft(
             )
 
     # Collect raw experiment stdout metrics as hard constraint for the paper
-    raw_metrics_block, _has_parsed_metrics = _collect_raw_experiment_metrics(run_dir)
+    raw_metrics_block, _has_parsed_metrics = _collect_raw_experiment_metrics(
+        run_dir, execution_mode=config.experiment.mode,
+    )
     if raw_metrics_block:
         # BUG-23: Raw stdout alone is not sufficient — require either
         # metrics_summary data, parsed metrics from run JSONs,

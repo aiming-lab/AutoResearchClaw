@@ -72,6 +72,8 @@ class TestBuildSshBase:
         assert "ssh" in cmd
         assert "bob@server" in cmd
         assert "-p" not in cmd
+        assert "StrictHostKeyChecking=yes" in cmd
+        assert "StrictHostKeyChecking=no" not in cmd
 
     def test_custom_port(self):
         cfg = SshRemoteConfig(host="server", user="bob", port=2222)
@@ -214,7 +216,9 @@ class TestSshConnectivityCheck:
 
     def test_unreachable_host(self):
         cfg = SshRemoteConfig(host="nonexistent-host-12345.invalid")
-        ok, msg = SshRemoteSandbox.check_ssh_available(cfg)
+        with mock.patch("researchclaw.experiment.ssh_sandbox.subprocess.run",
+                        return_value=mock.Mock(returncode=255, stdout="", stderr="unreachable")):
+            ok, msg = SshRemoteSandbox.check_ssh_available(cfg)
         assert not ok
 
 
@@ -246,9 +250,18 @@ class TestSshSandboxRun:
         def fake_scp(local_dir, remote_dir):
             return True
 
+        def fake_download(remote_dir, local_dir):
+            (local_dir / "_researchclaw_status.json").write_text(json.dumps({
+                "returncode": 0,
+                "timed_out": False,
+                "remote_termination_confirmed": True,
+            }))
+            return True
+
         with mock.patch.object(sb, '_ssh_run', side_effect=fake_ssh_run):
             with mock.patch.object(sb, '_scp_upload', side_effect=fake_scp):
-                result = sb.run("print('hello')", timeout_sec=60)
+                with mock.patch.object(sb, '_scp_download', side_effect=fake_download):
+                    result = sb.run("print('hello')", timeout_sec=60)
 
         assert result.returncode == 0
         assert result.metrics.get("accuracy") == 0.95
@@ -405,8 +418,10 @@ class TestFactoryIntegration:
             mode="ssh_remote",
             ssh_remote=SshRemoteConfig(host="nonexistent.invalid"),
         )
-        with pytest.raises(RuntimeError, match="SSH connectivity"):
-            create_sandbox(cfg, tmp_path)
+        with mock.patch.object(SshRemoteSandbox, "check_ssh_available",
+                               return_value=(False, "unreachable")):
+            with pytest.raises(RuntimeError, match="SSH connectivity"):
+                create_sandbox(cfg, tmp_path)
 
     def test_colab_drive_requires_root(self, tmp_path: Path):
         cfg = _make_experiment_config(

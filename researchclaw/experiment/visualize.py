@@ -630,15 +630,11 @@ def generate_all_charts(
     generated: list[Path] = []
 
     # Collect experiment runs
-    runs: list[dict[str, Any]] = []
-    for stage_subdir in sorted(run_dir.glob("stage-*/runs")):
-        for run_file in sorted(stage_subdir.glob("*.json")):
-            try:
-                data = json.loads(run_file.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    runs.append(data)
-            except (json.JSONDecodeError, OSError):
-                continue
+    # Reuse the analysis evidence filter so retained failed SSH attempts cannot
+    # reappear as successful measurements in Stage 14 or final export charts.
+    from researchclaw.pipeline._helpers import _collect_experiment_results
+
+    runs = _collect_experiment_results(run_dir, metric_key, metric_direction)["runs"]
 
     # 1. Metric trajectory
     path = plot_metric_trajectory(

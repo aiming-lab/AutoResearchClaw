@@ -300,7 +300,7 @@ def _execute_experiment_run(
         )
     # ── End ColliderAgent mode ──────────────────────────────────────────
 
-    if mode in ("sandbox", "docker"):
+    if mode in ("sandbox", "docker", "ssh_remote"):
         # P7: Auto-install missing dependencies before subprocess sandbox
         if mode == "sandbox":
             _all_code = code_text
@@ -325,6 +325,12 @@ def _execute_experiment_run(
         # Try to read structured results.json from sandbox working dir
         structured_results: dict[str, Any] | None = None
         sandbox_project = runs_dir / "sandbox" / "_project"
+        # SSH downloads into a distinct per-attempt directory, preserving both
+        # the original generated project and prior attempts' raw evidence.
+        if mode == "ssh_remote":
+            remote_artifacts = getattr(sandbox, "last_run_dir", None)
+            if isinstance(remote_artifacts, (str, Path)):
+                sandbox_project = Path(remote_artifacts)
         results_json_path = sandbox_project / "results.json"
         if results_json_path.exists():
             try:
@@ -379,7 +385,9 @@ def _execute_experiment_run(
 
         run_payload: dict[str, Any] = {
             "run_id": "run-1",
-            "task_id": "sandbox-main",
+            "task_id": "ssh-remote-main" if mode == "ssh_remote" else "sandbox-main",
+            "execution_mode": mode,
+            "returncode": result.returncode,
             "status": run_status,
             "metrics": effective_metrics,
             "elapsed_sec": result.elapsed_sec,
@@ -390,6 +398,8 @@ def _execute_experiment_run(
         }
         if structured_results is not None:
             run_payload["structured_results"] = structured_results
+        if mode == "ssh_remote" and sandbox_project.is_dir():
+            run_payload["artifact_dir"] = str(sandbox_project.resolve().relative_to(stage_dir.resolve()))
         # Auto-generate results.json from parsed metrics if sandbox didn't produce one
         if structured_results is None and effective_metrics:
             auto_results = {"source": "stdout_parsed", "metrics": effective_metrics}
@@ -500,13 +510,27 @@ def _execute_experiment_run(
     # with zero metrics (or only noise) must NOT proceed to paper writing.
     # The old code always returned DONE, which let fabricated papers through.
     _has_real_metrics = False
-    if mode in ("sandbox", "docker"):
+    if mode in ("sandbox", "docker", "ssh_remote"):
         # Check that we have at least one non-trivial float metric
         _real_metric_count = sum(
             1 for k, v in (effective_metrics or {}).items()
             if isinstance(v, (int, float)) and not math.isnan(v) and not math.isinf(v)
         )
         _has_real_metrics = _real_metric_count > 0
+        # A failed transfer, nonzero exit, or timeout may still print metrics.
+        # Keep those as diagnostic evidence, never mark an SSH run complete.
+        if mode == "ssh_remote" and (run_status != "completed" or not _has_real_metrics):
+            return StageResult(
+                stage=Stage.EXPERIMENT_RUN,
+                status=StageStatus.FAILED,
+                artifacts=("runs/",),
+                evidence_refs=("stage-12/runs/",),
+                error=(
+                    f"Remote experiment incomplete (status={run_status}, "
+                    f"returncode={result.returncode}, real_metrics={_real_metric_count}). "
+                    "Inspect retained logs and artifacts before continuing."
+                ),
+            )
         if not _has_real_metrics and run_status == "failed":
             logger.error(
                 "Stage 12: Experiment FAILED and produced zero real metrics. "
@@ -824,6 +848,12 @@ def _execute_iterative_refine(
                 if len(summary["stderr"]) > 2000:
                     summary["stderr"] = summary["stderr"][-2000:]
             run_summaries.append(json.dumps(summary, ensure_ascii=False))
+            if config.experiment.mode == "ssh_remote" and (
+                payload.get("status") != "completed"
+                or payload.get("timed_out")
+                or payload.get("returncode", 0) != 0
+            ):
+                continue
             metrics = payload.get("metrics")
             if not isinstance(metrics, dict):
                 metrics = (
@@ -939,6 +969,14 @@ def _execute_iterative_refine(
     # --- Helper: write files to a directory ---
     def _write_project(target_dir: Path, project_files: dict[str, str]) -> None:
         target_dir.mkdir(parents=True, exist_ok=True)
+        # The prompt edits a text-file subset. Remote candidates still need the
+        # complete input project (packages, datasets, and other binary assets).
+        if config.experiment.mode == "ssh_remote" and exp_dir_text:
+            import shutil
+
+            source_project = Path(exp_dir_text)
+            if source_project.is_dir() and source_project.resolve() != target_dir.resolve():
+                shutil.copytree(source_project, target_dir, dirs_exist_ok=True)
         for fname, code in project_files.items():
             (target_dir / fname).write_text(code, encoding="utf-8")
 
@@ -1244,7 +1282,7 @@ def _execute_iterative_refine(
             iter_record["validation_issues"] = issue_text
 
         metric_val = None  # R6-3: initialize before conditional block
-        if validation.ok and config.experiment.mode in ("sandbox", "docker"):
+        if validation.ok and config.experiment.mode in ("sandbox", "docker", "ssh_remote"):
             # P7: Ensure deps for refined code (subprocess sandbox only)
             if config.experiment.mode == "sandbox":
                 _refine_code = "\n".join(candidate_files.values())
@@ -1258,6 +1296,7 @@ def _execute_iterative_refine(
                 version_dir,
                 timeout_sec=config.experiment.time_budget_sec,
             )
+            final_rerun = rerun
             metric_val = _find_metric(rerun.metrics, metric_key)
             # R19-1: Store stdout (capped) so PAIRED lines survive for Stage 14
             _stdout_cap = rerun.stdout[:50000] if rerun.stdout else ""
@@ -1369,15 +1408,25 @@ def _execute_iterative_refine(
                         version_dir,
                         timeout_sec=config.experiment.time_budget_sec,
                     )
+                    final_rerun = rerun2
                     metric_val = _find_metric(rerun2.metrics, metric_key)
                     iter_record["sandbox_after_fix"] = {
                         "returncode": rerun2.returncode,
                         "metrics": rerun2.metrics,
                         "elapsed_sec": rerun2.elapsed_sec,
                         "timed_out": rerun2.timed_out,
+                        "stdout": rerun2.stdout[:50000] if rerun2.stdout else "",
+                        "stderr": rerun2.stderr[:2000] if rerun2.stderr else "",
                     }
                     iter_record["metric"] = metric_val
                     iter_record["runtime_repaired"] = True
+
+            if config.experiment.mode == "ssh_remote" and (
+                final_rerun.returncode != 0 or final_rerun.timed_out
+            ):
+                metric_val = None
+                iter_record["metric"] = None
+                iter_record["remote_run_incomplete"] = True
 
             if metric_val is not None:
                 consecutive_no_metrics = 0

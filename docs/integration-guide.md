@@ -498,9 +498,36 @@ experiment:
     host: "gpu-server.example.com"
     gpu_ids: [0, 1]
     remote_workdir: "/tmp/researchclaw_experiments"
+    remote_python: "/path/to/remote/venv/bin/python"
+    keep_remote: true
+    network_isolation: "required"
 ```
 
-The pipeline sends generated code to a remote GPU server for execution.
+The pipeline uploads the complete experiment project, executes it remotely, and
+downloads the working directory, including raw data, figures, stdout, stderr,
+and a completion record. Stage 12 records the downloaded directory in
+`runs/run-1.json` under `artifact_dir`; each attempt has its own directory.
+Stage 13 also executes refined projects on the remote host. The controller does
+not install the experiment's dependencies locally for SSH runs: prepare the
+remote environment and set `remote_python` to its absolute Python path.
+
+SSH uses the host's existing SSH configuration and requires a verified host key.
+For bare Python, `network_isolation: required` fails if `unshare --net` is
+unavailable or disallowed. Setting it to `disabled` explicitly permits execution
+without network isolation. Bare Python runs with the remote account's filesystem
+permissions; changing `HOME` is not a filesystem sandbox. Docker-over-SSH uses
+`docker_network_policy` instead and also needs the configured remote Python to
+launch the host-side supervisor.
+
+Remote experiment and setup deadlines are enforced on the compute host. Timeout,
+nonzero exit, an unconfirmed stop, or incomplete result transfer blocks Stage 12
+even when some metrics were printed. Partial results remain diagnostic evidence.
+Failed SSH attempts are excluded from aggregated results, generated charts and
+paper metric inputs, including retained attempts from previous pipeline retries.
+`keep_remote: true` retains remote files by default; with `false`, only a successful,
+fully collected run is removed. Failed runs remain available for diagnosis.
+Review `_researchclaw_remote.json` for transfer, retention and termination status.
+Plan disk cleanup explicitly when retaining many runs.
 
 **Best for**: Experiments that require GPU hardware you don't have locally.
 

@@ -126,7 +126,10 @@ experiment:
     gpu_ids: []             # e.g. [0, 1] for CUDA_VISIBLE_DEVICES
     remote_workdir: "/tmp/researchclaw_experiments"
     remote_python: "python3"
-    setup_commands: []      # e.g. ["source ~/venv/bin/activate", "pip install torch"]
+    setup_commands: []      # Use an absolute remote_python; setup shells do not persist
+    setup_timeout_sec: 120
+    keep_remote: true       # Preserve code, raw artifacts and logs on the remote host
+    network_isolation: "required"  # required | disabled (bare Python only)
     # Docker-over-SSH (most secure remote execution)
     use_docker: false       # Set true to run experiments inside Docker on remote host
     docker_image: "researchclaw/experiment:latest"
