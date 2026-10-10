@@ -355,7 +355,12 @@ def run_repair_loop(
     # Create LLM client
     try:
         from researchclaw.llm import create_llm_client
-        llm = create_llm_client(config)
+        from researchclaw.llm.routing import check_selection_error, prepare_routed_client, resolve_stage_config, routing_enabled
+        repair_config = resolve_stage_config(
+            config, 13, run_id, execution=True, purpose="experiment-repair",
+        )
+        llm = create_llm_client(repair_config)
+        prepare_routed_client(llm, repair_config, run_dir / "repair_llm_selection.json")
     except Exception as exc:
         logger.error("[%s] Repair loop: cannot create LLM client: %s", run_id, exc)
         return ExperimentRepairResult(
@@ -393,8 +398,10 @@ def run_repair_loop(
 
         # 3. Get fixed code via LLM (with OpenCode fallback)
         fixed_code = _get_repaired_code(
-            repair_prompt, code, llm, config, run_dir, cycle,
+            repair_prompt, code, llm, repair_config, run_dir, cycle,
         )
+        if routing_enabled(repair_config):
+            check_selection_error(llm, run_dir / "repair_llm_selection.json")
 
         if not fixed_code:
             cycle_result = RepairCycleResult(

@@ -657,6 +657,21 @@ Generated: {_utcnow_iso()}
     # Try FigureAgent first (multi-agent intelligent charts), fall back to visualize.py
     _figure_plan_saved = False
     if config.experiment.figure_agent.enabled and llm is not None:
+        from researchclaw.llm.routing import (
+            check_selection_error, prepare_routed_client, resolve_stage_config, routing_enabled,
+        )
+        _figure_execution_llm = None
+        if routing_enabled(config):
+            from researchclaw.llm import create_llm_client
+            _figure_execution_config = resolve_stage_config(
+                config, int(Stage.RESULT_ANALYSIS), str(run_dir.resolve()),
+                execution=True, purpose="figure-code",
+            )
+            _figure_execution_llm = create_llm_client(_figure_execution_config)
+            prepare_routed_client(
+                _figure_execution_llm, _figure_execution_config,
+                stage_dir / "figure_llm_selection.json",
+            )
         try:
             from researchclaw.agents.figure_agent import FigureOrchestrator
             from researchclaw.agents.figure_agent.orchestrator import FigureAgentConfig as _FACfg
@@ -676,7 +691,12 @@ Generated: {_utcnow_iso()}
                 strict_mode=config.experiment.figure_agent.strict_mode,
                 dpi=config.experiment.figure_agent.dpi,
             )
-            _fa = FigureOrchestrator(llm, _fa_cfg, stage_dir=stage_dir)
+            # Figure planning and critique use the research model; writing and
+            # repairing plotting scripts use an isolated execution session.
+            _fa = FigureOrchestrator(
+                llm, _fa_cfg, stage_dir=stage_dir,
+                execution_llm=_figure_execution_llm,
+            )
 
             # Build conditions list from condition_summaries
             _fa_conditions = list(_condition_summaries.keys()) if _condition_summaries else []
@@ -705,6 +725,8 @@ Generated: {_utcnow_iso()}
                 "paper_draft": _paper_draft,
                 "output_dir": str(stage_dir / "charts"),
             })
+            if getattr(_figure_execution_llm, "selection_error", None):
+                raise RuntimeError(_figure_execution_llm.selection_error)
 
             if _fa_plan.figure_count > 0:
                 # Save figure plan for Stage 17 to read
@@ -724,7 +746,11 @@ Generated: {_utcnow_iso()}
             else:
                 logger.warning("Stage 14: FigureAgent produced no charts, falling back")
         except Exception as _fa_exc:
+            if getattr(_figure_execution_llm, "selection_error", None):
+                raise
             logger.warning("Stage 14: FigureAgent failed (%s), falling back to visualize.py", _fa_exc)
+        finally:
+            check_selection_error(_figure_execution_llm, stage_dir / "figure_llm_selection.json")
 
     # Fallback: legacy visualize.py chart generation
     if not _figure_plan_saved:

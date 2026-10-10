@@ -131,7 +131,9 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
     )
 
 
-def _build_reviewer_or_generator(config, generator_llm):
+def _build_reviewer_or_generator(
+    config, generator_llm, run_dir: Path | None = None, *, writer_stage: int = 17,
+):
     """Return (review_client, author_model, judge_model) for review stages.
 
     Falls back to the generator client when no independent reviewer is
@@ -143,6 +145,27 @@ def _build_reviewer_or_generator(config, generator_llm):
         author_model = (
             getattr(getattr(generator_llm, "config", None), "primary_model", "") or ""
         )
+    from researchclaw.llm.routing import routing_enabled, stage_model
+    if routing_enabled(config):
+        if run_dir is not None and writer_stage == 19:
+            try:
+                provenance = json.loads((run_dir / "stage-19/paper_author.json").read_text(encoding="utf-8"))
+                if provenance.get("source_stage") == 17:
+                    writer_stage = 17
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+        # The current stage's client is the judge, not the paper's author.
+        # Use the writer of the actual input artifact. In a resumed run an old
+        # Stage 19 revision must not replace the author of a new Stage 17 draft.
+        author_model = stage_model(config, writer_stage)
+        if run_dir is not None:
+            selection_file = run_dir / f"stage-{writer_stage:02d}" / "llm_selection.json"
+            try:
+                selection = json.loads(selection_file.read_text(encoding="utf-8"))
+                if selection.get("verified") and selection.get("selected_model"):
+                    author_model = selection["selected_model"]
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
     try:
         from researchclaw.llm import build_reviewer_llm
 
@@ -154,7 +177,8 @@ def _build_reviewer_or_generator(config, generator_llm):
             getattr(getattr(reviewer, "config", None), "primary_model", "") or ""
         )
         return reviewer, author_model, judge_model
-    return generator_llm, author_model, author_model
+    judge_model = getattr(getattr(generator_llm, "config", None), "primary_model", "") or ""
+    return generator_llm, author_model, judge_model
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +201,7 @@ def _execute_peer_review(
     # independent reviewer is configured it answers here instead of the
     # generator. Falls back to the generator when it is not.
     _review_llm, _author_model, _judge_model = _build_reviewer_or_generator(
-        config, llm
+        config, llm, run_dir
     )
 
     # Load draft quality warnings from Stage 17 (if available)
@@ -417,6 +441,12 @@ def _execute_paper_revision(
     else:
         revised = draft
     (stage_dir / "paper_revised.md").write_text(revised, encoding="utf-8")
+    from researchclaw.llm.routing import routing_enabled
+    if routing_enabled(config):
+        (stage_dir / "paper_author.json").write_text(
+            json.dumps({"source_stage": 17 if revised == draft else 19}) + "\n",
+            encoding="utf-8",
+        )
     return StageResult(
         stage=Stage.PAPER_REVISION,
         status=StageStatus.DONE,
@@ -443,7 +473,7 @@ def _execute_quality_gate(
     # The author model should not be the one deciding whether its own paper
     # passes the gate: judge with the independent model when configured.
     _judge_llm, _author_model, _judge_model = _build_reviewer_or_generator(
-        config, llm
+        config, llm, run_dir, writer_stage=19
     )
 
     # BUG-25 + BUG-180: Load the RICHEST experiment summary for cross-checking.

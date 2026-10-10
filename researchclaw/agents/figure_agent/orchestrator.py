@@ -124,7 +124,11 @@ class FigurePlan:
 
 
 class FigureOrchestrator(AgentOrchestrator):
-    """Coordinates Decision → (Code-to-Viz | Nano Banana) → Integrator."""
+    """Coordinates Decision → (Code-to-Viz | Nano Banana) → Integrator.
+
+    ``execution_llm`` optionally handles plotting code and its revisions;
+    the other agents retain the research ``llm``.
+    """
 
     def __init__(
         self,
@@ -132,6 +136,7 @@ class FigureOrchestrator(AgentOrchestrator):
         config: FigureAgentConfig | None = None,
         *,
         stage_dir: Path | None = None,
+        execution_llm: Any | None = None,
     ) -> None:
         cfg = config or FigureAgentConfig()
         super().__init__(llm, max_iterations=cfg.max_iterations)
@@ -154,7 +159,7 @@ class FigureOrchestrator(AgentOrchestrator):
         )
         # BUG-60: Pass use_docker so CodeGen generates container-aware paths
         self._codegen = CodeGenAgent(
-            llm, output_format=cfg.output_format,
+            execution_llm or llm, output_format=cfg.output_format,
             use_docker=bool(cfg.use_docker) if cfg.use_docker is not None else False,
         )
         self._renderer = RendererAgent(

@@ -189,6 +189,12 @@ class AcpConfig:
     session_name: str = "researchclaw"
     timeout_sec: int = 1800
     max_turns: int = 1
+    # Opt in to verified, per-stage ACP model selection. Legacy agents keep
+    # their own model defaults when this is disabled.
+    model_routing: bool = False
+    reasoning_effort: str = ""
+    execution_model: str = ""
+    stage_models: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -906,7 +912,9 @@ class RCConfig:
     hitl: object = field(default=None)  # HITLConfig (lazy import avoids circular dep)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["llm"]["acp"]["stage_models"] = dict(self.llm.acp.stage_models)
+        return data
 
     @classmethod
     def from_dict(
@@ -1136,6 +1144,45 @@ def validate_config(
     ):
         errors.append(f"Invalid llm.wire_api: {llm_wire_api}")
 
+    acp_data = _get_by_path(data, "llm.acp") or {}
+    if not isinstance(acp_data, dict):
+        errors.append("llm.acp must be a mapping")
+    else:
+        routing = acp_data.get("model_routing", False)
+        if not isinstance(routing, bool):
+            errors.append("llm.acp.model_routing must be a boolean")
+        if routing:
+            if llm_provider != "acp":
+                errors.append("llm.acp.model_routing requires provider: acp")
+            primary_model = _get_by_path(data, "llm.primary_model")
+            if not isinstance(primary_model, str) or not primary_model.strip():
+                errors.append("ACP model routing requires llm.primary_model")
+            if acp_data.get("reasoning_effort") not in (
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+            ):
+                errors.append("ACP model routing requires an explicit valid reasoning_effort")
+            if _get_by_path(data, "llm.fallback_models"):
+                errors.append("ACP model routing does not allow fallback_models")
+        stage_models = acp_data.get("stage_models", {})
+        if not isinstance(stage_models, dict):
+            errors.append("llm.acp.stage_models must map stage numbers to model names")
+        else:
+            seen_stages: set[int] = set()
+            for key, model in stage_models.items():
+                if isinstance(key, bool) or not str(key).isdigit() or not 1 <= int(key) <= 23:
+                    errors.append(f"Invalid ACP model stage: {key!r}; expected 1..23")
+                elif int(key) in seen_stages:
+                    errors.append(f"Duplicate ACP model stage: {key!r}")
+                else:
+                    seen_stages.add(int(key))
+                if not isinstance(model, str) or not model.strip():
+                    errors.append(f"ACP stage {key!r} needs a non-empty model name")
+        execution_model = acp_data.get("execution_model", "")
+        if not isinstance(execution_model, str):
+            errors.append("llm.acp.execution_model must be a model name")
+        if not routing and (stage_models or execution_model or acp_data.get("reasoning_effort")):
+            errors.append("ACP model settings require model_routing: true")
+
     hitl_required_stages = _get_by_path(data, "security.hitl_required_stages")
     if hitl_required_stages is not None:
         if not isinstance(hitl_required_stages, list):
@@ -1207,6 +1254,13 @@ def _parse_llm_config(data: dict[str, Any]) -> LlmConfig:
             session_name=acp_data.get("session_name", "researchclaw"),
             timeout_sec=int(acp_data.get("timeout_sec", 1800)),
             max_turns=_safe_int(acp_data.get("max_turns"), 1),
+            model_routing=bool(acp_data.get("model_routing", False)),
+            reasoning_effort=str(acp_data.get("reasoning_effort", "")),
+            execution_model=str(acp_data.get("execution_model", "")),
+            stage_models=tuple(
+                (int(stage), model.strip())
+                for stage, model in (acp_data.get("stage_models") or {}).items()
+            ),
         ),
     )
 

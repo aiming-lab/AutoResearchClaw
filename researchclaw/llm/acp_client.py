@@ -3,13 +3,14 @@
 Uses acpx as the ACP bridge to communicate with any ACP-compatible agent
 (Claude Code, Codex, Gemini CLI, etc.) via persistent named sessions.
 
-Key advantage: a single persistent session maintains context across all
-23 pipeline stages — the agent remembers everything.
+Persistent named sessions retain context between calls. Opt-in model routing
+uses a separate fixed-model client and session for each configured role.
 """
 
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 import re
@@ -43,6 +44,8 @@ class ACPConfig:
     session_name: str = "researchclaw"
     timeout_sec: int = 1800  # per-prompt timeout
     max_turns: int = 1  # turns allowed per prompt before acpx aborts the call
+    primary_model: str = ""  # non-empty enables strict, fixed-model sessions
+    reasoning_effort: str = ""
 
 
 def _find_acpx() -> str | None:
@@ -72,9 +75,28 @@ class ACPClient:
     _atexit_registered: bool = False
 
     def __init__(self, acp_config: ACPConfig) -> None:
+        if bool(acp_config.primary_model) != bool(acp_config.reasoning_effort):
+            raise ValueError("ACP model routing requires both primary_model and reasoning_effort")
+        if acp_config.primary_model and any(
+            not isinstance(value, str) or not value.strip()
+            for value in (acp_config.primary_model, acp_config.reasoning_effort)
+        ):
+            raise ValueError("ACP model and reasoning effort must be non-empty strings")
         self.config = acp_config
         self._acpx: str | None = acp_config.acpx_command or None
         self._session_ready = False
+        self._session_lock = threading.RLock()
+        self.selection_error: str | None = None
+        self.session_selection: dict[str, Any] = {
+            "requested_model": acp_config.primary_model or None,
+            "requested_reasoning_effort": acp_config.reasoning_effort or None,
+            "selected_model": None,
+            "selected_reasoning_effort": None,
+            "model_advertised": False,
+            "effort_advertised": False,
+            "session_name": acp_config.session_name,
+            "verified": False,
+        }
         # Prune dead weakrefs, then track this instance
         ACPClient._live_instances = [r for r in ACPClient._live_instances if r() is not None]
         ACPClient._live_instances.append(weakref.ref(self))
@@ -86,6 +108,15 @@ class ACPClient:
     def from_rc_config(cls, rc_config: Any) -> ACPClient:
         """Build from a ResearchClaw ``RCConfig``."""
         acp = rc_config.llm.acp
+        # Routing is opt-in: older agents continue to own their model choices.
+        model_routing = getattr(acp, "model_routing", False) is True
+        primary_model = getattr(rc_config.llm, "primary_model", "") if model_routing else ""
+        reasoning_effort = getattr(acp, "reasoning_effort", "") if model_routing else ""
+        if model_routing and (
+            not isinstance(primary_model, str) or not primary_model.strip()
+            or not isinstance(reasoning_effort, str) or not reasoning_effort.strip()
+        ):
+            raise ValueError("ACP model routing requires a primary model and reasoning effort")
         return cls(ACPConfig(
             agent=acp.agent,
             cwd=acp.cwd,
@@ -93,6 +124,8 @@ class ACPClient:
             session_name=getattr(acp, "session_name", "researchclaw"),
             timeout_sec=getattr(acp, "timeout_sec", 1800),
             max_turns=getattr(acp, "max_turns", 1),
+            primary_model=primary_model,
+            reasoning_effort=reasoning_effort,
         ))
 
     # ------------------------------------------------------------------
@@ -113,9 +146,11 @@ class ACPClient:
         """Send a prompt and return the agent's response.
 
         Parameters mirror ``LLMClient.chat()`` for drop-in compatibility.
-        ``model``, ``max_tokens``, ``temperature``, and ``json_mode`` are
-        accepted but not forwarded — the agent manages its own model and
-        parameters.
+        With model routing enabled, this instance is fixed to its configured
+        model and reasoning effort. A different ``model`` is rejected; callers
+        use a separate named-session client for another model. Otherwise the
+        agent manages its model. ``max_tokens``, ``temperature``, and
+        ``json_mode`` remain agent-managed.
 
         ``strip_thinking`` defaults to True: ACP agents (opencode, Claude
         Code) interleave ``[thinking]`` blocks and acpx metadata with the
@@ -123,16 +158,55 @@ class ACPClient:
         not have to remember to ask for that to be removed. Pass False only
         when the reasoning trace itself is what you want.
         """
-        prompt_text = self._messages_to_prompt(messages, system=system)
-        content = self._send_prompt(prompt_text)
-        if strip_thinking:
-            from researchclaw.utils.thinking_tags import strip_thinking_tags
-            content = strip_thinking_tags(content)
-        return LLMResponse(
-            content=content,
-            model=f"acp:{self.config.agent}",
-            finish_reason="stop",
-        )
+        with self._session_lock:
+            if self.config.primary_model and model not in (None, self.config.primary_model):
+                self.selection_error = (
+                    f"ACP session {self.config.session_name!r} is fixed to "
+                    f"{self.config.primary_model!r}; requested {model!r}"
+                )
+                self.session_selection["verified"] = False
+                raise RuntimeError(self.selection_error)
+            if self.config.primary_model:
+                backend_instruction = (
+                    "You are a text-generation backend for a research pipeline. "
+                    "Respond with plain text only. Do not use tools, read or write "
+                    "files, search, or run terminal commands."
+                )
+                system = f"{backend_instruction}\n\n{system}" if system else backend_instruction
+            prompt_text = self._messages_to_prompt(messages, system=system)
+            content = self._send_prompt(prompt_text)
+            if strip_thinking:
+                from researchclaw.utils.thinking_tags import strip_thinking_tags
+                content = strip_thinking_tags(content)
+            return LLMResponse(
+                content=content,
+                model=self.config.primary_model or f"acp:{self.config.agent}",
+                finish_reason="stop",
+                raw={"acp_selection": dict(self.session_selection)} if self.config.primary_model else {},
+            )
+
+    def prepare(self) -> dict[str, Any]:
+        """Prepare the session and verify routing without a routed model prompt.
+
+        Each call reapplies the fixed choices and reads the session metadata,
+        including after reconnect. Selection failures are latched so pipeline
+        callers can detect errors swallowed by a stage's exception handler.
+        """
+        with self._session_lock:
+            try:
+                self._ensure_session()
+                if self.config.primary_model:
+                    self._configure_and_verify_selection()
+            except Exception as exc:
+                if self.config.primary_model:
+                    self.selection_error = str(exc)
+                    self.session_selection.update(
+                        verified=False, selected_model=None, selected_reasoning_effort=None,
+                        model_advertised=False, effort_advertised=False,
+                    )
+                raise
+            self.selection_error = None
+            return dict(self.session_selection)
 
     def preflight(self) -> tuple[bool, str]:
         """Check that acpx and the agent are available."""
@@ -148,29 +222,31 @@ class ACPClient:
             return False, f"ACP agent CLI not found: {agent!r} (not on PATH)"
         # Create the session
         try:
-            self._ensure_session()
+            self.prepare()
             return True, f"OK - ACP session ready ({agent} via acpx)"
         except Exception as exc:  # noqa: BLE001
             return False, f"ACP session init failed: {exc}"
 
     def close(self) -> None:
         """Close the acpx session."""
-        if not self._session_ready:
-            return
-        acpx = self._resolve_acpx()
-        if not acpx:
-            return
-        try:
-            subprocess.run(
-                [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
-                 self.config.agent, "sessions", "close",
-                 self.config.session_name],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=15,
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        self._session_ready = False
+        with self._session_lock:
+            if not self._session_ready:
+                return
+            acpx = self._resolve_acpx()
+            if not acpx:
+                return
+            try:
+                subprocess.run(
+                    [acpx, "--ttl", "0", "--cwd", self._abs_cwd(),
+                     self.config.agent, "sessions", "close",
+                     self.config.session_name],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=15,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            self._session_ready = False
+            self.session_selection["verified"] = False
 
     def __del__(self) -> None:
         """Best-effort cleanup on garbage collection."""
@@ -208,10 +284,9 @@ class ACPClient:
     def _ensure_session(self) -> None:
         """Find or create the named acpx session.
 
-        After creating or reconnecting a session, sends a disposable warm-up
-        prompt.  Without this, the agent's cold-start greeting (e.g. "The
-        model has been set to …") is returned as the response to the first
-        real prompt, swallowing the actual request.
+        Legacy clients send a disposable warm-up to consume adapter greetings.
+        Routed sessions perform configuration checks in ``prepare()`` and
+        receive the text-backend instruction with each actual prompt instead.
         """
         if self._session_ready:
             return
@@ -241,6 +316,13 @@ class ACPClient:
                     f"Failed to create ACP session: {result.stderr.strip()}"
                 )
 
+        # Routed Codex sessions need no greeting-consuming model request.
+        # Mark the created session ready before verification, so a failed
+        # selection can still be closed by normal cleanup.
+        if self.config.primary_model:
+            self._session_ready = True
+            return
+
         # Warm-up: consume the agent's cold-start greeting and set
         # text-only mode so it does not use tools or pollute responses.
         _warmup = (
@@ -265,6 +347,99 @@ class ACPClient:
 
         self._session_ready = True
         logger.info("ACP session '%s' ready (%s)", self.config.session_name, self.config.agent)
+
+    def _selection_command(self, arguments: list[str], *, label: str) -> dict[str, Any]:
+        acpx = self._resolve_acpx()
+        if not acpx:
+            raise RuntimeError("acpx not found")
+        cmd = [acpx, "--format", "json", "--ttl", "0", "--cwd", self._abs_cwd(),
+               self.config.agent, *arguments]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=60,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"ACP {label} timed out") from exc
+        if result.returncode != 0:
+            raise RuntimeError(f"ACP {label} failed (exit {result.returncode}): {(result.stderr or '').strip()}")
+        try:
+            payload = json.loads(result.stdout)
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(f"ACP {label} returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"ACP {label} returned invalid metadata")
+        return payload
+
+    @staticmethod
+    def _advertised_values(options: Any) -> set[str]:
+        """Read both flat and grouped ACP select-option values."""
+        values: set[str] = set()
+        if not isinstance(options, list):
+            return values
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            value = option.get("value")
+            if isinstance(value, str):
+                values.add(value)
+            values.update(ACPClient._advertised_values(option.get("options")))
+        return values
+
+    def _verify_config_options(self, options: Any, *, source: str) -> None:
+        if not isinstance(options, list):
+            raise RuntimeError(f"ACP {source} omitted config options")
+        for config_id, requested in (
+            ("model", self.config.primary_model),
+            ("reasoning_effort", self.config.reasoning_effort),
+        ):
+            matches = [item for item in options if isinstance(item, dict) and item.get("id") == config_id]
+            if len(matches) != 1:
+                raise RuntimeError(f"ACP {source} did not advertise exactly one {config_id} option")
+            option = matches[0]
+            if requested not in self._advertised_values(option.get("options")):
+                raise RuntimeError(f"ACP {source} does not advertise {config_id}={requested!r}")
+            if option.get("currentValue") != requested:
+                raise RuntimeError(
+                    f"ACP {source} selected {config_id}={option.get('currentValue')!r}, "
+                    f"requested {requested!r}"
+                )
+
+    def _configure_and_verify_selection(self) -> None:
+        name = self.config.session_name
+        # Model changes can alter the reasoning catalog, so effort follows model.
+        self._selection_command(
+            ["-s", name, "set", "model", self.config.primary_model], label="model selection",
+        )
+        accepted = self._selection_command(
+            ["-s", name, "set", "reasoning_effort", self.config.reasoning_effort],
+            label="reasoning effort selection",
+        )
+        # The CLI's echoed request is insufficient: check the adapter's complete
+        # acknowledgement and then independently read the persisted session.
+        self._verify_config_options(accepted.get("configOptions"), source="selection response")
+        record = self._selection_command(["sessions", "show", name], label="selection readback")
+        if record.get("name") != name or record.get("closed") is True:
+            raise RuntimeError("ACP selection readback does not identify the active named session")
+        for key in ("acpxRecordId", "acpxSessionId"):
+            actual = record.get("acpSessionId" if key == "acpxSessionId" else key)
+            if not isinstance(accepted.get(key), str) or not accepted[key] or actual != accepted[key]:
+                raise RuntimeError(f"ACP selection readback has inconsistent {key}")
+        state = record.get("acpx")
+        self._verify_config_options(
+            state.get("config_options") if isinstance(state, dict) else None,
+            source="session readback",
+        )
+        self.session_selection.update(
+            selected_model=self.config.primary_model,
+            selected_reasoning_effort=self.config.reasoning_effort,
+            model_advertised=True,
+            effort_advertised=True,
+            verified=True,
+            acpx_record_id=record["acpxRecordId"],
+            acp_session_id=record["acpSessionId"],
+            agent_session_id=record.get("agentSessionId"),
+        )
 
     # Linux MAX_ARG_STRLEN is 128 KB; Windows CreateProcess limit is ~32 KB
     # for the entire command line, not just the prompt payload. acpx adds
@@ -338,7 +513,7 @@ class ACPClient:
 
         last_exc: RuntimeError | None = None
         for attempt in range(1 + self._MAX_RECONNECT_ATTEMPTS):
-            self._ensure_session()
+            self.prepare()
             try:
                 if use_file:
                     return self._send_prompt_via_file(acpx, prompt)
