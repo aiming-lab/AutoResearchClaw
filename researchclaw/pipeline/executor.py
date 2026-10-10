@@ -17,6 +17,7 @@ from researchclaw.config import RCConfig
 from researchclaw.hardware import HardwareProfile, detect_hardware, ensure_torch_available, is_metric_name
 from researchclaw.llm import create_llm_client
 from researchclaw.llm.client import LLMClient
+from researchclaw.llm.routing import check_selection_error, prepare_routed_client, resolve_stage_config, routing_enabled
 from researchclaw.prompts import PromptManager
 from researchclaw.pipeline.stages import (
     NEXT_STAGE,
@@ -466,12 +467,22 @@ def _run_collaboration_loop(
     try:
         if config is not None:
             from researchclaw.llm import create_llm_client
-            llm_client = create_llm_client(config)
+            discussion_config = resolve_stage_config(
+                config, stage_num, str(run_dir.resolve()),
+                purpose="copilot", model=config.llm.primary_model,
+            )
+            llm_client = create_llm_client(discussion_config)
+            prepare_routed_client(
+                llm_client, discussion_config,
+                run_dir / f"stage-{stage_num:02d}" / "copilot_llm_selection.json",
+            )
             topic_obj = getattr(config, "research", None)
             topic = topic_obj.topic if topic_obj else "Research"
         else:
             topic = "Research"
     except Exception:
+        if config is not None and routing_enabled(config):
+            raise
         topic = "Research"
 
     collab.initialize(
@@ -637,15 +648,25 @@ def execute_stage(
         adapters.memory.append("stages", f"{run_id}:{int(stage)}:running")
 
     llm = None
+    stage_config = config
     try:
+        stage_config = resolve_stage_config(config, int(stage), run_id)
         if config.llm.provider == "acp":
-            llm = create_llm_client(config)
+            llm = create_llm_client(stage_config)
+            prepare_routed_client(llm, stage_config, stage_dir / "llm_selection.json")
         else:
             candidate = LLMClient.from_rc_config(config)
             if candidate.config.base_url and candidate.config.api_key:
                 llm = candidate
     except Exception as _llm_exc:  # noqa: BLE001
         logger.warning("LLM client creation failed: %s", _llm_exc)
+        if routing_enabled(config):
+            result = StageResult(
+                stage=stage, status=StageStatus.FAILED, artifacts=(),
+                error=f"Required ACP model selection failed: {_llm_exc}", decision="retry",
+            )
+            _write_stage_meta(stage_dir, stage, run_id, result)
+            return result
         llm = None
 
     try:
@@ -661,12 +682,14 @@ def execute_stage(
         )
         try:
             result = executor(
-                stage_dir, run_dir, config, adapters, llm=llm, prompts=prompts
+                stage_dir, run_dir, stage_config, adapters, llm=llm, prompts=prompts
             )
         except TypeError as exc:
             if "unexpected keyword argument 'prompts'" not in str(exc):
                 raise
-            result = executor(stage_dir, run_dir, config, adapters, llm=llm)
+            result = executor(stage_dir, run_dir, stage_config, adapters, llm=llm)
+        if routing_enabled(config):
+            check_selection_error(llm, stage_dir / "llm_selection.json")
     except Exception as exc:  # noqa: BLE001
         logger.exception("Stage %s failed", stage.name)
         result = StageResult(
@@ -676,6 +699,18 @@ def execute_stage(
             error=str(exc),
             decision="retry",
         )
+
+    if routing_enabled(config) and getattr(llm, "selection_error", None):
+        result = StageResult(
+            stage=stage, status=StageStatus.FAILED, artifacts=result.artifacts,
+            error=f"Required ACP model selection failed: {llm.selection_error}", decision="retry",
+        )
+        (stage_dir / "llm_selection.json").write_text(
+            json.dumps({**llm.session_selection, "verified": False, "error": llm.selection_error}, indent=2)
+            + "\n", encoding="utf-8",
+        )
+        _write_stage_meta(stage_dir, stage, run_id, result)
+        return result
 
     if result.status == StageStatus.DONE:
         for output_file in _select_output_files(contract, config):
