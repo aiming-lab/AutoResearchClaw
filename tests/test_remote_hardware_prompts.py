@@ -290,4 +290,3 @@ def test_benchmark_agent_uses_profile_memory_instead_of_49gb(monkeypatch, tmp_pa
     )
     assert result.status == StageStatus.DONE
     assert factory.call_args.kwargs["gpu_memory_mb"] == (vram_mb or 0)
-
