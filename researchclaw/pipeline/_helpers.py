@@ -906,6 +906,7 @@ def _collect_experiment_results(
     run_dir: Path,
     metric_key: str = "",
     metric_direction: str = "maximize",
+    require_completed: bool = False,
 ) -> dict[str, Any]:
     """Aggregate experiment metrics from runs/ directory across prior stages.
 
@@ -917,9 +918,32 @@ def _collect_experiment_results(
 
     # Scan all stage dirs for runs/ subdirectory
     for stage_subdir in sorted(run_dir.glob("stage-*/runs")):
+        parsed_runs = []
+        for run_file in sorted(stage_subdir.glob("*.json")):
+            if run_file.name == "results.json":
+                continue
+            parsed = _safe_json_loads(run_file.read_text(encoding="utf-8"), {})
+            if isinstance(parsed, dict) and ("metrics" in parsed or "key_metrics" in parsed):
+                parsed_runs.append(parsed)
+        strict_remote = require_completed or any(
+            p.get("execution_mode") == "ssh_remote" for p in parsed_runs
+        )
+        accepted_runs = [p for p in parsed_runs if not strict_remote or (
+            p.get("status") == "completed" and p.get("returncode") == 0
+            and not p.get("timed_out")
+        )]
+        # A retained failed attempt's results.json is diagnostic evidence. In
+        # strict mode, use an unambiguous successful run's embedded results or
+        # the canonical file belonging to that single successful attempt.
+        for parsed in accepted_runs:
+            if strict_remote and "structured_results" in parsed and structured_results is None:
+                structured_results = parsed["structured_results"]
         # Check for structured results.json first
         results_json = stage_subdir / "results.json"
-        if results_json.exists() and structured_results is None:
+        can_use_canonical = not strict_remote or (
+            len(parsed_runs) == 1 and len(accepted_runs) == 1
+        )
+        if can_use_canonical and results_json.exists() and structured_results is None:
             try:
                 structured_results = json.loads(
                     results_json.read_text(encoding="utf-8")
@@ -927,10 +951,7 @@ def _collect_experiment_results(
             except (json.JSONDecodeError, OSError):
                 pass
 
-        for run_file in sorted(stage_subdir.glob("*.json")):
-            if run_file.name == "results.json":
-                continue  # Already handled above
-            parsed = _safe_json_loads(run_file.read_text(encoding="utf-8"), {})
+        for parsed in accepted_runs:
             if isinstance(parsed, dict) and "metrics" in parsed:
                 # Also check for structured_results inside run payload
                 if "structured_results" in parsed and structured_results is None:

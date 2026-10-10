@@ -285,6 +285,8 @@ class SshRemoteConfig:
     timeout_sec: int = 600  # default 10 min for experiment execution
     scp_timeout_sec: int = 300  # default 5 min for file uploads
     setup_timeout_sec: int = 300  # default 5 min for setup commands
+    keep_remote: bool = True  # retain the remote evidence after collection
+    network_isolation: str = "required"  # required | disabled (bare Python only)
 
 
 @dataclass(frozen=True)
@@ -1155,6 +1157,20 @@ def validate_config(
     if not _is_blank(exp_direction) and exp_direction not in ("minimize", "maximize"):
         errors.append(f"Invalid experiment.metric_direction: {exp_direction}")
 
+    ssh_network_isolation = _get_by_path(data, "experiment.ssh_remote.network_isolation")
+    if ssh_network_isolation is not None and ssh_network_isolation not in (
+        "required", "disabled",
+    ):
+        errors.append(
+            "experiment.ssh_remote.network_isolation must be required or disabled"
+        )
+    ssh_keep_remote = _get_by_path(data, "experiment.ssh_remote.keep_remote")
+    if ssh_keep_remote is not None and not isinstance(ssh_keep_remote, bool):
+        errors.append("experiment.ssh_remote.keep_remote must be a boolean")
+    ssh_docker_network = _get_by_path(data, "experiment.ssh_remote.docker_network_policy")
+    if ssh_docker_network is not None and ssh_docker_network not in ("none", "full"):
+        errors.append("experiment.ssh_remote.docker_network_policy must be none or full")
+
     cli_agent_provider = _get_by_path(data, "experiment.cli_agent.provider")
     if (
         not _is_blank(cli_agent_provider)
@@ -1384,9 +1400,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
             setup_commands=tuple(ssh_data.get("setup_commands") or ()),
             use_docker=bool(ssh_data.get("use_docker", False)),
             docker_image=ssh_data.get("docker_image", "researchclaw/experiment:latest"),
-            docker_network_policy=_validate_network_policy(
-                ssh_data.get("docker_network_policy", "none"),
-            ),
+            docker_network_policy=ssh_data.get("docker_network_policy", "none"),
             docker_memory_limit_mb=_safe_int(
                 ssh_data.get("docker_memory_limit_mb"), 8192
             ),
@@ -1394,6 +1408,8 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
             timeout_sec=_safe_int(ssh_data.get("timeout_sec"), 600),
             scp_timeout_sec=_safe_int(ssh_data.get("scp_timeout_sec"), 300),
             setup_timeout_sec=_safe_int(ssh_data.get("setup_timeout_sec"), 300),
+            keep_remote=ssh_data.get("keep_remote", True),
+            network_isolation=ssh_data.get("network_isolation", "required"),
         ),
         colab_drive=ColabDriveConfig(
             drive_root=colab_data.get("drive_root", ""),

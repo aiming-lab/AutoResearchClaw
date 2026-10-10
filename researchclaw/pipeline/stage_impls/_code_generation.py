@@ -10,6 +10,7 @@ from typing import Any
 
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
+from researchclaw.hardware import format_hardware_prompt
 from researchclaw.experiment.validator import (
     CodeValidation,
     format_issues_for_llm,
@@ -294,8 +295,21 @@ def _execute_code_generation(
                 )
         else:
             pkg_hint = _pm.block("pkg_hint_sandbox")
+    elif config.experiment.mode == "ssh_remote":
+        pkg_hint = (
+            "\n## Remote Python Environment\n"
+            "The experiment runs on the SSH host, using the configured remote Python or Docker image.\n"
+            "Third-party installed packages have not been verified by this hardware profile. "
+            "Do not infer remote packages from imports or installations on the coordinator.\n"
+            "Use only dependencies provisioned in that remote environment; if a required "
+            "package is missing, report the prerequisite instead of inventing results.\n"
+        )
     else:
         pkg_hint = ""
+    if config.experiment.mode in ("sandbox", "docker", "ssh_remote"):
+        pkg_hint += "\n## Execution Hardware\n" + format_hardware_prompt(
+            hw_profile, remote=config.experiment.mode == "ssh_remote"
+        ) + "\n"
 
     # --- Compute budget hint ---
     time_budget_sec = config.experiment.time_budget_sec
@@ -352,6 +366,48 @@ def _execute_code_generation(
             extra_guidance += _pm.block("multi_seed_enforcement")
         except Exception:  # noqa: BLE001
             pass
+
+    if config.experiment.mode == "ssh_remote":
+        _ssh_cfg = config.experiment.ssh_remote
+        extra_guidance += (
+            "\n## SSH Dataset and Dependency Preparation\n"
+            "Use real benchmarks appropriate to the research question; report missing "
+            "data rather than producing synthetic stand-ins for empirical results.\n"
+            "No datasets or pretrained models are known to be cached on the SSH host. "
+            "Do not assume Docker-specific paths such as /opt/datasets or /workspace/data. "
+            "Use project-relative paths and verify that data is available before training.\n"
+            "Only configured ssh_remote.setup_commands run before the experiment. "
+            "Generated setup.py and requirements.txt are not automatically executed by this backend. "
+            "Provision dependencies and data through those configured setup commands; "
+            "do not run pip install from main.py.\n"
+        )
+        if _ssh_cfg.use_docker:
+            _remote_policy = _ssh_cfg.docker_network_policy
+            extra_guidance += (
+                f"Remote Docker network policy: {_remote_policy}. "
+                "The backend does not infer package or dataset availability from the image name.\n"
+            )
+            if _remote_policy != "full":
+                extra_guidance += (
+                    "The main experiment has no network access. Prepare data in advance; "
+                    "do not download packages, datasets, or models from main.py.\n"
+                )
+        elif getattr(_ssh_cfg, "network_isolation", "required") == "required":
+            extra_guidance += (
+                "The main experiment requires network isolation. Prepare data in advance; "
+                "do not download packages, datasets, or models from main.py.\n"
+            )
+        else:
+            extra_guidance += (
+                "Network isolation is explicitly disabled for the main experiment. "
+                "Remote network connectivity is not guaranteed; bound any data/model downloads "
+                "and include them in the time budget.\n"
+            )
+        for _block_name in ("hp_reporting", "multi_seed_enforcement"):
+            try:
+                extra_guidance += _pm.block(_block_name)
+            except Exception:  # noqa: BLE001
+                pass
 
     # --- BA: Inject BenchmarkAgent plan from Stage 9 ---
     _bp_path = None
@@ -483,8 +539,15 @@ def _execute_code_generation(
         "EXPLICITLY requires deep learning.\n"
         "- Prefer lightweight CPU-friendly libraries (numpy, scipy, "
         "sklearn, pandas) unless deep learning is inherent to the topic.\n"
-        "- The experiment MUST be self-contained and runnable without GPU.\n"
     )
+    if config.experiment.mode == "ssh_remote":
+        extra_guidance += (
+            "- Run the experiment, including model training and evaluation, on the SSH execution host.\n"
+            "- The Stage 1 execution hardware constraints take precedence over generic framework "
+            "examples for precision, attention kernels, model size, and memory.\n"
+        )
+    else:
+        extra_guidance += "- The experiment MUST be self-contained and runnable without GPU.\n"
 
     # --- Code generation: Beast Mode → CodeAgent → Legacy single-shot ---
     _code_agent_active = False
@@ -624,7 +687,8 @@ def _execute_code_generation(
             )
             _ca_cfg = _CAConfig()
 
-        # Sandbox factory (only for sandbox/docker modes)
+        # Sandbox factory (only for sandbox/docker modes). Remote execution
+        # is performed by the experiment stages, not CodeAgent validation.
         _sandbox_factory = None
         if config.experiment.mode in ("sandbox", "docker"):
             from researchclaw.experiment.factory import (

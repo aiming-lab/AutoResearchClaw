@@ -97,8 +97,10 @@ Investigate the topic with emphasis on reproducible methods and measurable outco
     # When using ssh_remote, detect hardware on the remote host instead of locally
     _ssh_cfg = config.experiment.ssh_remote if config.experiment.mode == "ssh_remote" else None
     hw = detect_hardware(ssh_config=_ssh_cfg)
+    hw_data = hw.to_dict()
+    hw_data["execution_mode"] = config.experiment.mode
     (stage_dir / "hardware_profile.json").write_text(
-        json.dumps(hw.to_dict(), indent=2), encoding="utf-8"
+        json.dumps(hw_data, indent=2), encoding="utf-8"
     )
     if hw.warning:
         logger.warning("Hardware advisory: %s", hw.warning)
