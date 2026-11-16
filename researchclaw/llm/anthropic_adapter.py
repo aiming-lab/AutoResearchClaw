@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import urllib.error
 from typing import Any
 
@@ -26,6 +27,26 @@ _STOP_REASON_MAP = {
     "stop_sequence": "stop",
     "tool_use": "tool_calls",
 }
+
+_NO_SAMPLING_MODEL = re.compile(
+    r"(?:^|[./:])claude-(?:(?P<family>opus|sonnet|haiku)-"
+    r"(?P<major>\d+)(?:-(?P<minor>\d{1,2}))?(?=$|[./:-])"
+    r"|(?P<fixed>fable|mythos)(?:[./:-]|$))"
+)
+
+
+def _rejects_sampling_params(model: str) -> bool:
+    """Whether Anthropic rejects explicit temperature/top-p/top-k values."""
+    match = _NO_SAMPLING_MODEL.search(model.lower())
+    if match is None:
+        return False
+    if match.group("fixed") is not None:
+        return True
+    major = int(match.group("major"))
+    minor = int(match.group("minor") or 0)
+    if match.group("family") == "opus":
+        return (major, minor) >= (4, 7)
+    return major >= 5
 
 
 class AnthropicAdapter:
@@ -101,26 +122,25 @@ class AnthropicAdapter:
                 else _JSON_MODE_INSTRUCTION
             )
 
-        # Thinking-enabled Claude models require temperature=1.0
-        # and do not accept other temperature values.
-        _THINKING_MODELS = ("claude-3-7", "claude-4")
-        _is_thinking = any(model.startswith(p) for p in _THINKING_MODELS)
-        if _is_thinking and temperature != 1.0:
-            logger.warning(
-                "Overriding temperature=%.2f → 1.0 for thinking model %s "
-                "(required by Anthropic API).",
-                temperature,
-                model,
-            )
-            temperature = 1.0
-
         # Build Anthropic request
         body: dict[str, Any] = {
             "model": model,
             "messages": user_messages,
             "max_tokens": max_tokens,
-            "temperature": temperature,
         }
+        if not _rejects_sampling_params(model):
+            # Older thinking-enabled Claude models require temperature=1.0.
+            _THINKING_MODELS = ("claude-3-7", "claude-4")
+            _is_thinking = any(model.startswith(p) for p in _THINKING_MODELS)
+            if _is_thinking and temperature != 1.0:
+                logger.warning(
+                    "Overriding temperature=%.2f -> 1.0 for thinking model %s "
+                    "(required by Anthropic API).",
+                    temperature,
+                    model,
+                )
+                temperature = 1.0
+            body["temperature"] = temperature
         if system_msg:
             body["system"] = system_msg
 
